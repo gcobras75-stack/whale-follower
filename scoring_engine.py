@@ -80,6 +80,13 @@ class ExtendedContext:
     ml_probability: float = 1.0      # 1.0 si modelo no disponible
     ml_block:       bool  = False    # True si prob < 0.65
 
+    # Capa 11 — Deribit Options Flow
+    options_pcr:           float = 1.0    # put/call ratio (>1.5 bearish, <0.5 bullish)
+    options_iv_spike:      bool  = False  # IV spike > 30% vs promedio → pause
+    options_bullish_sweep: bool  = False  # large call sweep → +8 pts
+    options_bearish_sweep: bool  = False  # large put sweep → -8 pts
+    options_pts:           int   = 0      # ajuste final calculado
+
 
 # ── Score breakdown ────────────────────────────────────────────────────────────
 
@@ -174,6 +181,11 @@ class ScoringEngine:
         )
 
         # ── FILTROS QUE BLOQUEAN ANTES DE CALCULAR ────────────────────────────
+        # Options IV spike → mercado impredecible, pausar
+        if ext.options_iv_spike:
+            bd.block_reason = "options_iv_spike: volatilidad implícita disparada"
+            return 0, bd
+
         # Fear & Greed: solo bloquear LONGs (el bot solo hace longs ahora)
         if ext.fear_greed_block_long:
             bd.blocked_fear_greed = True
@@ -326,9 +338,19 @@ class ScoringEngine:
         bd.structure_pts = min(bd.structure_pts, 20)
         bd.structure_pts = max(bd.structure_pts, 0)   # no negativo
 
+        # ── Capa 11 — Options Flow (fuera de caps de categoría) ───────────────
+        if ext.options_bullish_sweep:
+            ext.options_pts += 8
+        if ext.options_bearish_sweep:
+            ext.options_pts -= 8
+        if ext.options_pcr < 0.5:
+            ext.options_pts += 10    # ratio muy bajo = mucho más call que put = bullish
+        elif ext.options_pcr > 1.5:
+            ext.options_pts -= 10    # ratio muy alto = mucho más put que call = bearish
+
         # ── Score total ────────────────────────────────────────────────────────
         raw = (bd.primary_pts + bd.volume_pts +
-               bd.context_pts + bd.structure_pts)
+               bd.context_pts + bd.structure_pts + ext.options_pts)
 
         # Aplicar Fear & Greed multiplier (0.8 o 1.2)
         raw_adj = raw * ext.fear_greed_multiplier

@@ -100,6 +100,7 @@ class BybitTestnetExecutor:
         self._enabled = bool(self._api_key and self._api_secret)
         self._daily_loss_usd: float = 0.0
         self._daily_reset_ts: float = time.time()
+        self._trade_history: List[tuple] = []   # (won: bool, pnl_usd: float) para Kelly
 
         # En producción: leverage forzado a 1x, sin apalancamiento dinámico
         max_lev = 1 if self._production else config.MAX_LEVERAGE
@@ -174,12 +175,16 @@ class BybitTestnetExecutor:
             logger.info("[executor] Maximo de trades abiertos alcanzado ({}). Skip.", max_open)
             return None
 
-        # Tamaño de posición
+        # Tamaño de posición — Kelly criterion dinámico
         leverage = self._leverage_mgr.get_leverage()
         if size_usd is None:
-            risk_pct = config.RISK_PER_TRADE if self._production else 0.01
-            base_usd = self._capital * risk_pct     # % de capital = margen
-            size_usd = base_usd * leverage           # posicion efectiva
+            kelly_pct = self._kelly_fraction()
+            base_usd  = self._capital * kelly_pct
+            size_usd  = base_usd * leverage
+            logger.debug(
+                "[executor] Kelly={:.1%} lev={}x size=${:.2f}",
+                kelly_pct, leverage, size_usd,
+            )
         if leverage > 1:
             logger.info("[executor] Apalancamiento activo: {}x (size_usd=${:.0f})", leverage, size_usd)
         # ── Protección de capital en producción ───────────────────────────────
@@ -361,6 +366,10 @@ class BybitTestnetExecutor:
         # Notificar al gestor de apalancamiento
         won = reason == "take_profit" or (reason == "trailing_stop" and trade.pnl_usd > 0)
         self._leverage_mgr.record_trade(won=won, pnl_usd=trade.pnl_usd)
+        # Historial para Kelly criterion (ventana de 50 trades)
+        self._trade_history.append((won, trade.pnl_usd))
+        if len(self._trade_history) > 50:
+            self._trade_history.pop(0)
         logger.info("[executor] {}", self._leverage_mgr.summary())
 
         # Notificar al modelo ML para aprendizaje continuo
@@ -374,6 +383,46 @@ class BybitTestnetExecutor:
                 logger.warning("[executor] ML record_outcome error: {}", exc)
 
         await self._update_supabase_close(trade, duration)
+
+    # ── Kelly Criterion ───────────────────────────────────────────────────────
+
+    def _kelly_fraction(self) -> float:
+        """
+        Calcula la fracción óptima de capital por trade usando Kelly Criterion.
+        f* = (p * b - q) / b
+        donde:
+          p = win rate histórico
+          q = 1 - p
+          b = avg_win / avg_loss (payoff ratio)
+
+        Usa Half-Kelly (f*/2) para reducir volatilidad.
+        Clampeado entre RISK_PER_TRADE * 0.5 y RISK_PER_TRADE * 2.5
+        Fallback a RISK_PER_TRADE si no hay suficientes datos.
+        """
+        outcomes = self._trade_history   # lista de (won: bool, pnl_usd: float)
+        if len(outcomes) < 10:
+            return config.RISK_PER_TRADE
+
+        wins  = [(won, pnl) for won, pnl in outcomes if won and pnl > 0]
+        losses = [(won, pnl) for won, pnl in outcomes if not won and pnl < 0]
+        if not wins or not losses:
+            return config.RISK_PER_TRADE
+
+        p = len(wins) / len(outcomes)
+        q = 1.0 - p
+        avg_win  = sum(pnl for _, pnl in wins)  / len(wins)
+        avg_loss = abs(sum(pnl for _, pnl in losses) / len(losses))
+        if avg_loss == 0:
+            return config.RISK_PER_TRADE
+
+        b = avg_win / avg_loss
+        kelly_full = (p * b - q) / b
+        half_kelly = kelly_full / 2.0   # Half-Kelly: menos volatilidad
+
+        # Clamp entre 0.5x y 2.5x del risk_per_trade base
+        base = config.RISK_PER_TRADE
+        result = max(base * 0.5, min(base * 2.5, half_kelly))
+        return round(result, 4)
 
     # ── Bybit Testnet API ─────────────────────────────────────────────────────
 
