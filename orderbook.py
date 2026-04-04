@@ -49,8 +49,23 @@ class OrderBookEngine:
     def __init__(self) -> None:
         # pair -> {"imbalance": float, "ts": float}
         self._data: Dict[str, Dict[str, float]] = {}
+        # pair -> {"bids": list, "asks": list, "ts": float}  — para OFI
+        self._raw: Dict[str, Dict] = {}
 
     # ── Public API ─────────────────────────────────────────────────────────────
+
+    def raw_snapshot(self, pair: str = "BTCUSDT") -> Tuple[list, list]:
+        """
+        Retorna (bids, asks) crudos del ultimo snapshot para OFI multi-nivel.
+        bids/asks = [[price_str, size_str], ...] ordenados por precio.
+        Retorna ([], []) si no hay datos o son stale.
+        """
+        entry = self._raw.get(pair)
+        if entry is None:
+            return [], []
+        if time.time() - entry["ts"] > _STALE_SECS:
+            return [], []
+        return entry["bids"], entry["asks"]
 
     def imbalance(self, pair: str = "BTCUSDT") -> Tuple[float, bool, int]:
         """
@@ -127,7 +142,10 @@ class OrderBookEngine:
             return
 
         ratio = bid_volume / total
-        self._data[pair] = {"imbalance": ratio, "ts": time.time()}
+        now = time.time()
+        self._data[pair] = {"imbalance": ratio, "ts": now}
+        # Guardar snapshot crudo para OFI multi-nivel
+        self._raw[pair]  = {"bids": bids, "asks": asks, "ts": now}
         logger.debug(
             "[orderbook] {} imbalance={:.3f} bids={:.2f} asks={:.2f}",
             pair, ratio, bid_volume, ask_volume,

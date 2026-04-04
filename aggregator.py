@@ -137,10 +137,20 @@ class Aggregator:
                 self._connect_with_backoff("bybit", self._bybit_handler),
                 name="bybit"
             ))
+            # ETHBTC en Bybit spot — necesario para arbitraje triangular real
+            tasks.append(asyncio.create_task(
+                self._connect_with_backoff("bybit_ethbtc", self._bybit_ethbtc_handler),
+                name="bybit_ethbtc"
+            ))
         if config.ENABLE_OKX:
             tasks.append(asyncio.create_task(
                 self._connect_with_backoff("okx", self._okx_handler),
                 name="okx"
+            ))
+            # ETH-BTC en OKX spot — segunda fuente para triangular arb
+            tasks.append(asyncio.create_task(
+                self._connect_with_backoff("okx_ethbtc", self._okx_ethbtc_handler),
+                name="okx_ethbtc"
             ))
         return tasks
 
@@ -277,6 +287,56 @@ class Aggregator:
                         side=t["side"],
                         timestamp=int(t["ts"]) / 1000.0,
                         pair=pair,
+                    )
+                    await self._enqueue(trade)
+
+    # ── ETHBTC Bybit spot ─────────────────────────────────────────────────────
+    # ETH/BTC spot en Bybit — necesario para arbitraje triangular real.
+    # Stream: wss://stream.bybit.com/v5/public/spot con topic publicTrade.ETHBTC
+    # El precio ETHBTC spot permite comparar con el tipo implicito ETH_USDT/BTC_USDT.
+
+    async def _bybit_ethbtc_handler(self) -> None:
+        url = "wss://stream.bybit.com/v5/public/spot"
+        sub = json.dumps({"op": "subscribe", "args": ["publicTrade.ETHBTC"]})
+        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+            await ws.send(sub)
+            logger.success("[bybit_ethbtc] Connected (ETHBTC spot).")
+            async for raw in ws:
+                msg = json.loads(raw)
+                if not msg.get("topic", "").startswith("publicTrade.ETHBTC"):
+                    continue
+                for t in msg.get("data", []):
+                    trade = Trade(
+                        exchange  = "bybit",
+                        price     = float(t["p"]),
+                        quantity  = float(t["v"]),
+                        side      = t["S"].lower(),
+                        timestamp = t["T"] / 1000.0,
+                        pair      = "ETHBTC",
+                    )
+                    await self._enqueue(trade)
+
+    # ── ETHBTC OKX spot ───────────────────────────────────────────────────────
+    # ETH-BTC spot en OKX — segunda fuente de precio ETHBTC para triangular arb.
+
+    async def _okx_ethbtc_handler(self) -> None:
+        url = "wss://ws.okx.com:8443/ws/v5/public"
+        sub = json.dumps({"op": "subscribe", "args": [{"channel": "trades", "instId": "ETH-BTC"}]})
+        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+            await ws.send(sub)
+            logger.success("[okx_ethbtc] Connected (ETH-BTC spot).")
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg.get("arg", {}).get("instId") != "ETH-BTC":
+                    continue
+                for t in msg.get("data", []):
+                    trade = Trade(
+                        exchange  = "okx",
+                        price     = float(t["px"]),
+                        quantity  = float(t["sz"]),
+                        side      = t["side"],
+                        timestamp = int(t["ts"]) / 1000.0,
+                        pair      = "ETHBTC",
                     )
                     await self._enqueue(trade)
 

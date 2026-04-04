@@ -44,6 +44,7 @@ class PaperTrade:
     status:         str = "open" # "open" | "closed" | "partial"
     opened_at:      float = field(default_factory=time.time)
     db_row_id:      Optional[str] = None  # UUID de la fila en Supabase
+    signal_features: Optional[dict] = None  # features para ML record_outcome
 
     # Gestión activa
     breakeven_done:  bool = False
@@ -111,6 +112,7 @@ class BybitTestnetExecutor:
         signal_id: Optional[str] = None,
         pair: str = "BTCUSDT",
         size_usd: Optional[float] = None,
+        signal_features: Optional[dict] = None,
     ) -> Optional[PaperTrade]:
         """
         Abre un nuevo trade. Devuelve PaperTrade o None si hubo error.
@@ -152,6 +154,7 @@ class BybitTestnetExecutor:
             size_contracts  = size_contracts,
             size_usd        = round(size_usd, 2),
             trailing_sl     = stop_loss,
+            signal_features = signal_features,
         )
 
         # Intentar orden en Bybit Testnet
@@ -291,6 +294,16 @@ class BybitTestnetExecutor:
         won = reason == "take_profit" or (reason == "trailing_stop" and trade.pnl_usd > 0)
         self._leverage_mgr.record_trade(won=won, pnl_usd=trade.pnl_usd)
         logger.info("[executor] {}", self._leverage_mgr.summary())
+
+        # Notificar al modelo ML para aprendizaje continuo
+        if trade.signal_features:
+            try:
+                from ml_model import MLModel
+                ml = MLModel()
+                ml.record_outcome(trade.signal_features, won)
+                logger.debug("[executor] ML outcome registrado won={} trade={}", won, trade.trade_id[:8])
+            except Exception as exc:
+                logger.warning("[executor] ML record_outcome error: {}", exc)
 
         await self._update_supabase_close(trade, duration)
 

@@ -236,6 +236,9 @@ async def trading_loop() -> None:
             session_vol.record_volume(trade.quantity, trade.timestamp)
         if arb_engine:
             arb_engine.on_trade(trade.exchange, trade.pair, trade.price, trade.timestamp * 1000)
+            # ETHBTC spot → triangular arb con precio real (no implicito)
+            if trade.pair == "ETHBTC":
+                arb_engine.on_eth_btc_price(trade.price)
 
         # Estrategias avanzadas — datos en tiempo real
         if grid_eng:
@@ -243,6 +246,15 @@ async def trading_loop() -> None:
         if ofi_eng:
             ofi_eng.on_trade_volume(trade.pair, trade.quantity)
             ofi_eng.on_price(trade.pair, trade.price)
+            # OFI recibe order book completo multi-nivel para calculo preciso
+            if orderbook:
+                ob_bids, ob_asks = orderbook.raw_snapshot(trade.pair)
+                if ob_bids and ob_asks:
+                    ofi_eng.on_orderbook(trade.pair, ob_bids, ob_asks)
+            # OFI necesita CVD velocity 10s para confirmacion cruzada
+            if cvd_combined:
+                snap_cvd = cvd_combined.snapshot()
+                ofi_eng.on_cvd_snapshot(snap_cvd.weighted_velocity)
         if dn_eng:
             dn_eng.on_perp_price(trade.exchange, trade.price)
 
@@ -420,16 +432,17 @@ async def trading_loop() -> None:
             btc_correlation_active = selection.btc_correlation_active,
         )
 
-        # 9. Ejecutar trades
+        # 9. Ejecutar trades (features guardadas para ML record_outcome al cierre)
         for alloc in allocation.trades:
             paper = await executor.open_trade(
-                signal_score = alloc.signal_score,
-                entry_price  = alloc.entry_price,
-                stop_loss    = alloc.stop_loss,
-                take_profit  = alloc.take_profit,
-                signal_id    = str(uuid.uuid4()),
-                pair         = alloc.pair,
-                size_usd     = alloc.size_usd,
+                signal_score     = alloc.signal_score,
+                entry_price      = alloc.entry_price,
+                stop_loss        = alloc.stop_loss,
+                take_profit      = alloc.take_profit,
+                signal_id        = str(uuid.uuid4()),
+                pair             = alloc.pair,
+                size_usd         = alloc.size_usd,
+                signal_features  = features if ml_model else None,
             )
             if paper:
                 logger.info(
