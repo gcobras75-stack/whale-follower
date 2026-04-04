@@ -51,6 +51,15 @@ BYBIT_TESTNET_API_KEY: str = os.getenv("BYBIT_TESTNET_API_KEY", "")
 BYBIT_TESTNET_SECRET:  str = os.getenv("BYBIT_TESTNET_SECRET",  "")
 PAPER_CAPITAL:        float = float(os.getenv("PAPER_CAPITAL", "10000"))
 
+# ── Bybit Real (producción) ───────────────────────────────────────────────────
+BYBIT_API_KEY:    str  = os.getenv("BYBIT_API_KEY",    "")
+BYBIT_API_SECRET: str  = os.getenv("BYBIT_API_SECRET", "")
+PRODUCTION:       bool = os.getenv("PRODUCTION", "false").lower() == "true"
+REAL_CAPITAL:     float = float(os.getenv("REAL_CAPITAL", "75"))
+RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "0.01"))   # 1% por trade
+MAX_TRADES_OPEN:  int   = int(os.getenv("MAX_TRADES_OPEN",  "2"))
+DAILY_LOSS_LIMIT: float = float(os.getenv("DAILY_LOSS_LIMIT", "0.05")) # 5% máx diario
+
 # ── Multi-pair monitoring ─────────────────────────────────────────────────────
 TRADING_PAIRS: list[str] = [
     p.strip() for p in os.getenv("TRADING_PAIRS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT").split(",")

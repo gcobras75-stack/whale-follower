@@ -61,35 +61,59 @@ class PaperTrade:
 
 class BybitTestnetExecutor:
     """
-    Ejecuta y gestiona paper trades en Bybit Testnet.
+    Ejecuta trades en Bybit.
+    - PRODUCTION=False → Bybit Testnet (paper, capital simulado)
+    - PRODUCTION=True  → Bybit Real (dinero real, capital REAL_CAPITAL)
 
-    Características:
-    - Capital simulado de $PAPER_CAPITAL (default $10,000)
-    - Tamaño de posición: 1% del capital por señal
-    - Gestión activa: breakeven, parciales, trailing stop
-    - Persiste cada trade en Supabase tabla paper_trades
+    Protecciones de producción:
+    - MAX_TRADES_OPEN: máximo trades simultáneos (default 2)
+    - RISK_PER_TRADE:  fracción del capital por trade (default 1%)
+    - DAILY_LOSS_LIMIT: para bot si pérdida diaria > X% (default 5%)
+    - MAX_LEVERAGE: 1x al inicio, sin apalancamiento
+    - Balance mínimo: no opera si balance < $10 USD
     """
 
-    _BASE_URL = "https://api-testnet.bybit.com"
+    _TESTNET_URL    = "https://api-testnet.bybit.com"
+    _PRODUCTION_URL = "https://api.bybit.com"
 
     def __init__(self) -> None:
-        self._api_key    = config.BYBIT_TESTNET_API_KEY
-        self._api_secret = config.BYBIT_TESTNET_SECRET
-        self._capital    = config.PAPER_CAPITAL
+        self._production = config.PRODUCTION
+
+        if self._production:
+            self._BASE_URL   = self._PRODUCTION_URL
+            self._api_key    = config.BYBIT_API_KEY
+            self._api_secret = config.BYBIT_API_SECRET
+            self._capital    = config.REAL_CAPITAL
+            logger.warning(
+                "[executor] MODO PRODUCCION REAL | capital=${:.0f} | "
+                "risk={:.0%}/trade | max_trades={} | daily_loss={:.0%}",
+                config.REAL_CAPITAL, config.RISK_PER_TRADE,
+                config.MAX_TRADES_OPEN, config.DAILY_LOSS_LIMIT,
+            )
+        else:
+            self._BASE_URL   = self._TESTNET_URL
+            self._api_key    = config.BYBIT_TESTNET_API_KEY
+            self._api_secret = config.BYBIT_TESTNET_SECRET
+            self._capital    = config.PAPER_CAPITAL
+
         self._trades: List[PaperTrade] = []
         self._enabled = bool(self._api_key and self._api_secret)
+        self._daily_loss_usd: float = 0.0
+        self._daily_reset_ts: float = time.time()
+
+        # En producción: leverage forzado a 1x, sin apalancamiento dinámico
+        max_lev = 1 if self._production else config.MAX_LEVERAGE
         self._leverage_mgr = LeverageManager(
-            initial_capital     = config.PAPER_CAPITAL,
+            initial_capital     = self._capital,
             min_trades          = config.MIN_TRADES_FOR_LEVERAGE,
-            max_leverage        = config.MAX_LEVERAGE,
+            max_leverage        = max_lev,
             warmup_win_rate_pct = config.LEVERAGE_WARMUP_WR,
             warmup_samples      = config.LEVERAGE_WARMUP_SAMPLES,
         )
 
         if not self._enabled:
             logger.warning(
-                "[executor] BYBIT_TESTNET_API_KEY/SECRET no configurados — "
-                "paper trading desactivado."
+                "[executor] API keys no configuradas — trading desactivado."
             )
 
     # ── API pública ────────────────────────────────────────────────────────────
@@ -121,23 +145,41 @@ class BybitTestnetExecutor:
         if not self._enabled:
             return None
 
+        # Reset diario de pérdidas
+        if time.time() - self._daily_reset_ts > 86400:
+            self._daily_loss_usd = 0.0
+            self._daily_reset_ts = time.time()
+
+        # Daily loss limit (solo en producción)
+        if self._production:
+            max_daily_loss = self._capital * config.DAILY_LOSS_LIMIT
+            if self._daily_loss_usd >= max_daily_loss:
+                logger.error(
+                    "[executor] DAILY LOSS LIMIT alcanzado: ${:.2f} >= ${:.2f}. "
+                    "Trading suspendido hasta mañana.",
+                    self._daily_loss_usd, max_daily_loss,
+                )
+                return None
+
         # Verificar pausa por racha perdedora
         if self._leverage_mgr.is_paused():
             rem = self._leverage_mgr.pause_remaining_secs()
             logger.info("[executor] Trading pausado por racha perdedora. Reanuda en {}s.", rem)
             return None
 
-        # Limitar trades abiertos simultáneos (máx 3)
+        # Limitar trades abiertos simultáneos
+        max_open = config.MAX_TRADES_OPEN if self._production else 3
         open_trades = [t for t in self._trades if t.status in ("open", "partial")]
-        if len(open_trades) >= 3:
-            logger.info("[executor] Maximo de trades abiertos alcanzado (3). Skip.")
+        if len(open_trades) >= max_open:
+            logger.info("[executor] Maximo de trades abiertos alcanzado ({}). Skip.", max_open)
             return None
 
-        # Tamaño de posición con apalancamiento dinámico
+        # Tamaño de posición
         leverage = self._leverage_mgr.get_leverage()
         if size_usd is None:
-            base_usd = self._capital * 0.01          # 1% de capital = margen
-            size_usd = base_usd * leverage            # posicion efectiva
+            risk_pct = config.RISK_PER_TRADE if self._production else 0.01
+            base_usd = self._capital * risk_pct     # % de capital = margen
+            size_usd = base_usd * leverage           # posicion efectiva
         if leverage > 1:
             logger.info("[executor] Apalancamiento activo: {}x (size_usd=${:.0f})", leverage, size_usd)
         size_contracts = round(size_usd / entry_price, 3)
@@ -289,6 +331,10 @@ class BybitTestnetExecutor:
             f"en {price:.2f} | P&L: ${trade.pnl_usd:.2f} ({trade.pnl_pct:.2f}%) "
             f"| duracion: {duration}s"
         )
+
+        # Acumular pérdida diaria (para daily loss limit en producción)
+        if trade.pnl_usd < 0:
+            self._daily_loss_usd += abs(trade.pnl_usd)
 
         # Notificar al gestor de apalancamiento
         won = reason == "take_profit" or (reason == "trailing_stop" and trade.pnl_usd > 0)

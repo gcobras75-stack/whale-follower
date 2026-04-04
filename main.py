@@ -113,7 +113,8 @@ async def trading_loop() -> None:
 
     # ── Arbitraje (tolerante a fallos) ───────────────────────────────────────
     arb_mod = _try_import("arb_engine")
-    arb_engine = arb_mod.ArbEngine(production=False) if arb_mod else None
+    prod = config.PRODUCTION   # True = dinero real, False = papel
+    arb_engine = arb_mod.ArbEngine(production=prod) if arb_mod else None
     _arb_ref = arb_engine
 
     # ── Estrategias avanzadas (tolerantes a fallos) ───────────────────────────
@@ -123,11 +124,11 @@ async def trading_loop() -> None:
     mom_mod  = _try_import("momentum_scaling")
     dn_mod   = _try_import("delta_neutral")
 
-    mean_rev  = mr_mod.MeanReversionEngine(production=False)   if mr_mod  else None
-    grid_eng  = grid_mod.GridTradingEngine(production=False)   if grid_mod else None
-    ofi_eng   = ofi_mod.OFIEngine(production=False)            if ofi_mod  else None
-    mom_eng   = mom_mod.MomentumScalingEngine(production=False) if mom_mod else None
-    dn_eng    = dn_mod.DeltaNeutralEngine(production=False)    if dn_mod  else None
+    mean_rev  = mr_mod.MeanReversionEngine(production=prod)    if mr_mod  else None
+    grid_eng  = grid_mod.GridTradingEngine(production=prod)    if grid_mod else None
+    ofi_eng   = ofi_mod.OFIEngine(production=prod)             if ofi_mod  else None
+    mom_eng   = mom_mod.MomentumScalingEngine(production=prod) if mom_mod else None
+    dn_eng    = dn_mod.DeltaNeutralEngine(production=prod)     if dn_mod  else None
 
     # ── Modulos Sprint 4 (tolerantes a fallos) ────────────────────────────────
     cvd_comb_mod    = _try_import("cvd_combined")
