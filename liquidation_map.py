@@ -13,9 +13,10 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_BYBIT_LIQ_URL = "https://api.bybit.com/v5/market/liquidations"
+# OKX endpoint — funciona sin restriccion geografica
+_OKX_LIQ_URL = "https://www.okx.com/api/v5/public/liquidation-orders"
 _REFRESH_INTERVAL = 120    # 2 minutes
-_HISTORY_WINDOW = 1800     # 30 minutes
+_HISTORY_WINDOW = 3600     # 60 minutes (ampliado para periodos de baja actividad)
 _ZONE_RADIUS = 0.005       # +-0.5%
 _MAJOR_ZONE_USD = 5_000_000
 _MINOR_ZONE_USD = 1_000_000
@@ -101,52 +102,54 @@ class LiquidationMap:
     # ------------------------------------------------------------------
 
     async def _fetch(self) -> None:
+        """Fetch from OKX liquidation-orders (no geo-restriction)."""
         params = {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "limit": 200,
+            "instType":  "SWAP",
+            "instFamily": "BTC-USDT",
+            "state":     "filled",
+            "limit":     "100",
         }
         timeout = aiohttp.ClientTimeout(total=10)
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(_BYBIT_LIQ_URL, params=params) as resp:
+                async with session.get(_OKX_LIQ_URL, params=params) as resp:
                     if resp.status != 200:
                         raise ValueError(f"HTTP {resp.status}")
                     data = await resp.json(content_type=None)
 
-            ret_code = data.get("retCode", -1)
-            if ret_code != 0:
-                raise ValueError(f"Bybit retCode={ret_code} msg={data.get('retMsg')}")
+            code = data.get("code", "-1")
+            if str(code) != "0":
+                raise ValueError(f"OKX code={code} msg={data.get('msg')}")
 
-            rows = (
-                data.get("result", {}).get("list") or []
-            )
+            # OKX structure: data[0].details[{bkPx, sz, ts, side, ...}]
+            groups = data.get("data") or []
+            details = groups[0].get("details", []) if groups else []
+
             now = time.time()
             cutoff = now - _HISTORY_WINDOW
             added = 0
 
-            for row in rows:
-                # Bybit returns timestamps in milliseconds
-                ts_ms = float(row.get("updatedTime", 0))
-                ts = ts_ms / 1000.0 if ts_ms > 1e10 else ts_ms
+            for item in details:
+                ts_ms = float(item.get("ts", 0))
+                ts = ts_ms / 1000.0
 
                 if ts < cutoff:
                     continue
 
-                price = float(row.get("price", 0))
-                qty = float(row.get("qty", 0))
-                value_usd = price * qty  # approximation; Bybit qty is in contracts (1 BTC)
+                price = float(item.get("bkPx", 0))    # bankruptcy price
+                qty   = float(item.get("sz",   0))    # size in BTC
+                value_usd = price * qty
 
                 if price > 0 and value_usd > 0:
                     self._buffer.append(_LiqEntry(timestamp=ts, price=price, value_usd=value_usd))
                     added += 1
 
             logger.info(
-                "[liquidation_map] fetched {} liquidations, {} added to buffer (buf_size={})",
-                len(rows), added, len(self._buffer),
+                "[liquidation_map] OKX: {} liquidations, {} added (buf={})",
+                len(details), added, len(self._buffer),
             )
 
         except Exception as exc:
             logger.warning("[liquidation_map] fetch failed, no zone update: {}", exc)
-            # Do not clear the buffer — stale data is better than no data for zone detection
+            # Do not clear the buffer — stale data is better than no data

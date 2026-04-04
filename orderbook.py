@@ -15,19 +15,22 @@ from loguru import logger
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_BINANCE_COMBINED_WS = (
-    "wss://stream.binance.com:9443/stream"
-    "?streams=btcusdt@depth20@100ms"
-    "/ethusdt@depth20@100ms"
-    "/solusdt@depth20@100ms"
-    "/bnbusdt@depth20@100ms"
-)
+# Bybit linear — sin restriccion geografica en Railway
+_BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
 
-_STREAM_TO_PAIR: Dict[str, str] = {
-    "btcusdt@depth20@100ms": "BTCUSDT",
-    "ethusdt@depth20@100ms": "ETHUSDT",
-    "solusdt@depth20@100ms": "SOLUSDT",
-    "bnbusdt@depth20@100ms": "BNBUSDT",
+_BYBIT_TOPICS = [
+    "orderbook.50.BTCUSDT",
+    "orderbook.50.ETHUSDT",
+    "orderbook.50.SOLUSDT",
+    "orderbook.50.BNBUSDT",
+]
+
+# topic -> pair
+_TOPIC_TO_PAIR: Dict[str, str] = {
+    "orderbook.50.BTCUSDT": "BTCUSDT",
+    "orderbook.50.ETHUSDT": "ETHUSDT",
+    "orderbook.50.SOLUSDT": "SOLUSDT",
+    "orderbook.50.BNBUSDT": "BNBUSDT",
 }
 
 _STALE_SECS = 5.0
@@ -87,14 +90,17 @@ class OrderBookEngine:
                 backoff = min(backoff * 2, 60.0)
 
     async def _connect_and_process(self) -> None:
-        logger.info("[orderbook] Connecting to Binance combined stream")
+        logger.info("[orderbook] Connecting to Bybit order book stream")
         async with websockets.connect(
-            _BINANCE_COMBINED_WS,
+            _BYBIT_WS_URL,
             ping_interval=20,
             ping_timeout=10,
             close_timeout=5,
         ) as ws:
-            logger.info("[orderbook] Connected to Binance depth stream")
+            # Suscribirse a los 4 pares
+            sub_msg = json.dumps({"op": "subscribe", "args": _BYBIT_TOPICS})
+            await ws.send(sub_msg)
+            logger.info("[orderbook] Connected to Bybit order book (4 pairs)")
             async for raw in ws:
                 try:
                     self._process_message(raw)
@@ -103,14 +109,15 @@ class OrderBookEngine:
 
     def _process_message(self, raw: str) -> None:
         msg = json.loads(raw)
-        stream = msg.get("stream", "")
-        pair = _STREAM_TO_PAIR.get(stream)
+        topic = msg.get("topic", "")
+        pair = _TOPIC_TO_PAIR.get(topic)
         if pair is None:
             return
 
+        # Bybit OB message: data.b = bids [[price, size], ...], data.a = asks
         data = msg.get("data", {})
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
+        bids = data.get("b", [])
+        asks = data.get("a", [])
 
         bid_volume = sum(float(entry[1]) for entry in bids)
         ask_volume = sum(float(entry[1]) for entry in asks)
