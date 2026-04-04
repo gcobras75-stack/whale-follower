@@ -33,14 +33,16 @@ class PaperTrade:
     """Representa un trade de paper trading activo."""
     trade_id:       str
     signal_score:   int
+    pair:           str          # "BTCUSDT" | "ETHUSDT" | "SOLUSDT" | "BNBUSDT"
     side:           str          # "Buy" | "Sell"
     entry_price:    float
     stop_loss:      float
     take_profit:    float
-    size_contracts: float        # cantidad en contratos (BTCUSDT linear)
+    size_contracts: float        # cantidad en contratos
     size_usd:       float
     status:         str = "open" # "open" | "closed" | "partial"
     opened_at:      float = field(default_factory=time.time)
+    db_row_id:      Optional[str] = None  # UUID de la fila en Supabase
 
     # Gestión activa
     breakeven_done:  bool = False
@@ -83,6 +85,15 @@ class BybitTestnetExecutor:
 
     # ── API pública ────────────────────────────────────────────────────────────
 
+    def open_count(self) -> int:
+        """Número de trades actualmente abiertos."""
+        return sum(1 for t in self._trades if t.status in ("open", "partial"))
+
+    def available_capital(self) -> float:
+        """Capital disponible (reducido por trades abiertos)."""
+        in_use = sum(t.size_usd for t in self._trades if t.status in ("open", "partial"))
+        return max(self._capital - in_use, 0.0)
+
     async def open_trade(
         self,
         signal_score: int,
@@ -90,29 +101,32 @@ class BybitTestnetExecutor:
         stop_loss: float,
         take_profit: float,
         signal_id: Optional[str] = None,
+        pair: str = "BTCUSDT",
+        size_usd: Optional[float] = None,
     ) -> Optional[PaperTrade]:
         """
         Abre un nuevo trade. Devuelve PaperTrade o None si hubo error.
+        size_usd: si se pasa, usa ese monto; si no, 1% del capital.
         """
         if not self._enabled:
             return None
 
         # Limitar trades abiertos simultáneos (máx 3)
-        open_trades = [t for t in self._trades if t.status == "open"]
+        open_trades = [t for t in self._trades if t.status in ("open", "partial")]
         if len(open_trades) >= 3:
-            logger.info("[executor] Máximo de trades abiertos alcanzado (3). Skip.")
+            logger.info("[executor] Maximo de trades abiertos alcanzado (3). Skip.")
             return None
 
-        # Tamaño: 1% del capital
-        size_usd = self._capital * 0.01
-        # Contratos BTCUSDT linear: tamaño en USD / precio
-        # Bybit requiere mínimo 0.001 BTC; redondeamos a 3 decimales
+        # Tamaño de posición
+        if size_usd is None:
+            size_usd = self._capital * 0.01
         size_contracts = round(size_usd / entry_price, 3)
         size_contracts = max(size_contracts, 0.001)
 
         trade = PaperTrade(
             trade_id        = str(uuid.uuid4()),
             signal_score    = signal_score,
+            pair            = pair,
             side            = "Buy",   # Spring = alcista
             entry_price     = entry_price,
             stop_loss       = stop_loss,
@@ -138,13 +152,15 @@ class BybitTestnetExecutor:
         )
         return trade
 
-    async def update_trades(self, current_price: float) -> None:
+    async def update_trades(self, current_price: float, pair: str = "BTCUSDT") -> None:
         """
-        Llamar con cada tick de precio para gestionar trades activos.
+        Llamar con cada tick de precio para gestionar trades activos del par.
         Implementa breakeven, parciales y trailing stop.
         """
         for trade in self._trades:
-            if trade.status != "open":
+            if trade.status not in ("open", "partial"):
+                continue
+            if trade.pair != pair:
                 continue
             await self._manage_trade(trade, current_price)
 
@@ -319,19 +335,27 @@ class BybitTestnetExecutor:
                 "stop_loss":    trade.stop_loss,
                 "take_profit":  trade.take_profit,
                 "size_usd":     trade.size_usd,
-                "status":       trade.status,
+                "status":       "open",
             }
             client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
-            await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 None,
                 lambda: client.table("paper_trades").insert(row).execute()
             )
+            # Guardar el UUID de la fila para UPDATE posterior
+            rows = result.data if hasattr(result, "data") else []
+            if rows:
+                trade.db_row_id = rows[0].get("id")
+                logger.debug(f"[executor] Supabase row id={trade.db_row_id}")
         except Exception as exc:
             logger.error(f"[executor] Supabase insert error: {exc}")
 
     async def _update_supabase_close(
         self, trade: PaperTrade, duration: int
     ) -> None:
+        if not trade.db_row_id:
+            logger.warning("[executor] Sin db_row_id para actualizar cierre en Supabase.")
+            return
         try:
             from supabase import create_client
             loop = asyncio.get_running_loop()
@@ -349,9 +373,10 @@ class BybitTestnetExecutor:
                 lambda: (
                     client.table("paper_trades")
                     .update(update)
-                    .eq("signal_id", trade.trade_id)
+                    .eq("id", trade.db_row_id)   # FIX: usa el ID real de la fila
                     .execute()
                 )
             )
+            logger.success(f"[executor] Trade {trade.db_row_id[:8]} cerrado en Supabase.")
         except Exception as exc:
             logger.error(f"[executor] Supabase update error: {exc}")

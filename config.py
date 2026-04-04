@@ -49,6 +49,13 @@ BYBIT_TESTNET_API_KEY: str = os.getenv("BYBIT_TESTNET_API_KEY", "")
 BYBIT_TESTNET_SECRET:  str = os.getenv("BYBIT_TESTNET_SECRET",  "")
 PAPER_CAPITAL:        float = float(os.getenv("PAPER_CAPITAL", "10000"))
 
+# ── Multi-pair monitoring ─────────────────────────────────────────────────────
+TRADING_PAIRS: list[str] = [
+    p.strip() for p in os.getenv("TRADING_PAIRS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT").split(",")
+]
+ALLOCATION_MODE:         str = os.getenv("ALLOCATION_MODE", "B")   # A | B | C
+CORRELATION_WINDOW_SECS: int = int(os.getenv("CORRELATION_WINDOW_SECS", "60"))
+
 # ── Reconnection back-off ─────────────────────────────────────────────────────
 BACKOFF_BASE: float = 1.0
 BACKOFF_MAX:  float = 60.0

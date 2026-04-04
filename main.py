@@ -68,12 +68,12 @@ async def trading_loop() -> None:
     try:
         import config
         from aggregator        import Aggregator
-        from cascade_detector  import CascadeDetector
         from context_engine    import ContextEngine
-        from cvd_real          import CVDEngine
-        from scoring_engine    import ScoringEngine
-        from spring_detector   import SpringDetector
         from bybit_executor    import BybitTestnetExecutor
+        from multi_pair        import MultiPairMonitor
+        from pair_selector     import PairSelector
+        from capital_allocator import CapitalAllocator
+        from risk_manager      import RiskManager
         import alerts
     except Exception as exc:
         _error_msg = str(exc)
@@ -83,18 +83,14 @@ async def trading_loop() -> None:
 
     # ── Inicializar motores ────────────────────────────────────────────────────
     aggregator = Aggregator()
-    cvd_engine = CVDEngine()
-    cascade    = CascadeDetector(
-        window_secs=config.CASCADE_SECS,
-        min_trades=config.CASCADE_SELL_COUNT,
-    )
     context    = ContextEngine()
-    detector   = SpringDetector()
-    scorer     = ScoringEngine()
+    monitor    = MultiPairMonitor()
+    selector   = PairSelector()
+    allocator  = CapitalAllocator()
+    risk_mgr   = RiskManager(config.PAPER_CAPITAL)
     executor   = BybitTestnetExecutor()
 
-    # Tareas de fondo
-    asyncio.create_task(context.run(),    name="context_engine")
+    asyncio.create_task(context.run(), name="context_engine")
     asyncio.create_task(
         alerts.handle_telegram_commands(executor),
         name="telegram_commands",
@@ -103,90 +99,85 @@ async def trading_loop() -> None:
     _ready = True
 
     logger.info("=" * 60)
-    logger.info(" Whale Follower Bot -- Sprint 2")
-    logger.info(f" Pair:      {config.TRADING_PAIR}")
+    logger.info(" Whale Follower Bot -- Sprint 3 (Multi-Par)")
+    logger.info(f" Pares:     {', '.join(config.TRADING_PAIRS)}")
+    logger.info(f" Modo:      {config.ALLOCATION_MODE} | Corr: {config.CORRELATION_WINDOW_SECS}s")
     logger.info(f" Exchanges: B={config.ENABLE_BINANCE} By={config.ENABLE_BYBIT} O={config.ENABLE_OKX}")
     logger.info(f" Threshold: {config.SIGNAL_SCORE_THRESHOLD} | High: {config.HIGH_CONFIDENCE_SCORE}")
-    logger.info(f" Paper capital: ${config.PAPER_CAPITAL:,.0f}")
-    logger.info(f" Bybit Testnet: {'ENABLED' if executor._enabled else 'DISABLED (no keys)'}")
+    logger.info(f" Capital:   ${config.PAPER_CAPITAL:,.0f}")
+    logger.info(f" Bybit:     {'ENABLED' if executor._enabled else 'DISABLED'}")
     logger.info("=" * 60)
+
+    recent_signals: list = []
 
     # ── Loop principal ─────────────────────────────────────────────────────────
     async for trade, _legacy_state in aggregator.stream():
 
-        # 1. Actualizar CVD real
-        cvd_engine.update(trade.side, trade.quantity, trade.timestamp)
-        cvd_metrics = cvd_engine.metrics()
-
-        # 2. Actualizar cascade detector
-        cascade_event = cascade.add(trade.side, trade.quantity, trade.timestamp)
-
-        # 3. Actualizar gestión activa de trades open
+        # 1. Gestionar trades activos del par recibido
         if executor._enabled:
-            await executor.update_trades(trade.price)
+            await executor.update_trades(trade.price, pair=trade.pair)
 
-        # 4. Spring detector
-        spring_data = detector.feed(trade, cvd_metrics.cumulative)
-        if spring_data is None:
-            continue
-
-        # 5. Scoring engine (contexto + CVD + cascade + spring)
+        # 2. Procesar en monitor multi-par
         ctx_snapshot = context.snapshot()
-        score, breakdown = scorer.score(
-            spring_data   = spring_data,
-            cvd           = cvd_metrics,
-            cascade       = cascade_event,
-            context       = ctx_snapshot,
-            current_price = trade.price,
-        )
-
-        if score < config.SIGNAL_SCORE_THRESHOLD:
-            logger.debug(f"[main] Spring score={score} < threshold={config.SIGNAL_SCORE_THRESHOLD} — ignorado")
+        signal = monitor.process(trade, ctx_snapshot)
+        if signal is None:
             continue
 
         _signal_count += 1
-        entry     = spring_data["current_price"]
-        sl        = spring_data["spring_low"] * (1 - config.STOP_LOSS_PCT)
-        risk      = entry - sl
-        tp        = entry + risk * config.RISK_REWARD
-        exchange  = spring_data["strongest_exchange"]
-
         logger.info(
-            f"[main] *** SIGNAL #{_signal_count} score={score} "
-            f"entry={entry:.2f} sl={sl:.2f} tp={tp:.2f} ***"
+            f"[main] *** SIGNAL #{_signal_count} {signal.pair} "
+            f"score={signal.score} entry={signal.entry_price:.2f} ***"
         )
 
-        # 6. Abrir paper trade si executor habilitado
-        trade_info: str = ""
-        if executor._enabled:
-            import uuid
-            sig_id = str(uuid.uuid4())
+        # Actualizar buffer de señales recientes (ventana 10s para correlación)
+        now = time.time()
+        recent_signals.append(signal)
+        recent_signals = [s for s in recent_signals if now - s.timestamp < 10]
+
+        # 3. Verificar risk manager
+        open_count = executor.open_count()
+        allowed, reason = risk_mgr.can_open_trade(signal.score, open_count)
+        if not allowed:
+            logger.info(f"[main] {signal.pair} bloqueado: {reason}")
+            asyncio.create_task(alerts.dispatch_multi(
+                signals=[signal], allocation=None,
+                all_scores=monitor.get_all_scores(),
+            ))
+            continue
+
+        # 4. Selección de par(es) y asignación de capital
+        selection  = selector.select(recent_signals, monitor.btc_spring_ts, monitor.get_all_scores())
+        allocation = allocator.allocate(
+            signals=recent_signals,
+            available_capital=executor.available_capital(),
+            mode=config.ALLOCATION_MODE,
+            btc_correlation_active=selection.btc_correlation_active,
+        )
+
+        # 5. Ejecutar trades
+        import uuid
+        for alloc in allocation.trades:
             paper = await executor.open_trade(
-                signal_score = score,
-                entry_price  = entry,
-                stop_loss    = sl,
-                take_profit  = tp,
-                signal_id    = sig_id,
+                signal_score = alloc.signal_score,
+                entry_price  = alloc.entry_price,
+                stop_loss    = alloc.stop_loss,
+                take_profit  = alloc.take_profit,
+                signal_id    = str(uuid.uuid4()),
+                pair         = alloc.pair,
+                size_usd     = alloc.size_usd,
             )
             if paper:
-                trade_info = (
-                    f"Trade Bybit Testnet abierto\n"
-                    f"   Tamaño: ${paper.size_usd:.2f} ({paper.size_contracts} BTC)"
+                logger.info(
+                    f"[main] Trade {alloc.pair} ${paper.size_usd:.0f} "
+                    f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
                 )
 
-        # 7. Enviar alerta Telegram + Supabase
-        asyncio.create_task(
-            alerts.dispatch(
-                score       = score,
-                bd          = breakdown,
-                spring_data = spring_data,
-                exchange    = exchange,
-                entry       = round(entry, 2),
-                sl          = round(sl, 2),
-                tp          = round(tp, 2),
-                trade_info  = trade_info or None,
-            )
-        )
+        # 6. Alerta multi-par Telegram + Supabase
+        asyncio.create_task(alerts.dispatch_multi(
+            signals=recent_signals,
+            allocation=allocation,
+            all_scores=monitor.get_all_scores(),
+        ))
 
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ class Trade:
     quantity: float
     side: str          # "buy" | "sell"
     timestamp: float   # unix seconds (float for sub-second precision)
+    pair: str = "BTCUSDT"  # normalised symbol, e.g. "ETHUSDT"
 
 
 # ── CVD state shared across all consumers ─────────────────────────────────────
@@ -160,80 +161,99 @@ class Aggregator:
             else:
                 delay = config.BACKOFF_BASE   # reset on clean exit
 
+    # ── Helpers de par ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _binance_stream_name(pair: str) -> str:
+        """BTCUSDT → btcusdt@aggTrade"""
+        return f"{pair.lower()}@aggTrade"
+
+    @staticmethod
+    def _okx_inst_id(pair: str) -> str:
+        """BTCUSDT → BTC-USDT"""
+        base = pair.replace("USDT", "")
+        return f"{base}-USDT"
+
     # ── Binance ───────────────────────────────────────────────────────────────
-    # Stream: wss://stream.binance.com:9443/ws/btcusdt@aggTrade
-    # Payload keys: p=price, q=qty, m=isBuyerMarketMaker, T=tradeTime(ms)
+    # Combined stream: wss://stream.binance.com:9443/stream?streams=s1/s2/...
+    # Each message: {"stream":"btcusdt@aggtrade","data":{p,q,m,T,...}}
 
     async def _binance_handler(self) -> None:
-        url = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+        streams = "/".join(self._binance_stream_name(p) for p in config.TRADING_PAIRS)
+        url = f"wss://stream.binance.com:9443/stream?streams={streams}"
         async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
-            logger.success("[binance] Connected.")
+            logger.success(f"[binance] Connected ({len(config.TRADING_PAIRS)} pairs).")
             async for raw in ws:
                 msg = json.loads(raw)
-                if msg.get("e") != "aggTrade":
+                data = msg.get("data", {})
+                if data.get("e") != "aggTrade":
                     continue
-                # m=True means the buyer is maker → the aggressor was a SELL
-                side = "sell" if msg["m"] else "buy"
+                # stream name "ethusdt@aggtrade" → "ETHUSDT"
+                stream: str = msg.get("stream", "btcusdt@aggtrade")
+                pair = stream.split("@")[0].upper()
+                side = "sell" if data["m"] else "buy"
                 trade = Trade(
                     exchange="binance",
-                    price=float(msg["p"]),
-                    quantity=float(msg["q"]),
+                    price=float(data["p"]),
+                    quantity=float(data["q"]),
                     side=side,
-                    timestamp=msg["T"] / 1000.0,
+                    timestamp=data["T"] / 1000.0,
+                    pair=pair,
                 )
                 await self._enqueue(trade)
 
     # ── Bybit ─────────────────────────────────────────────────────────────────
-    # Stream: wss://stream.bybit.com/v5/public/linear
-    # Subscribe: {"op":"subscribe","args":["publicTrade.BTCUSDT"]}
-    # Payload: data[].S = "Buy"|"Sell", v=qty, p=price, T=timestamp(ms)
+    # Subscribe all pairs in one message: args=["publicTrade.BTCUSDT",...]
+    # Each message topic: "publicTrade.ETHUSDT"
 
     async def _bybit_handler(self) -> None:
         url = "wss://stream.bybit.com/v5/public/linear"
+        args = [f"publicTrade.{p}" for p in config.TRADING_PAIRS]
         async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
-            await ws.send(json.dumps({
-                "op": "subscribe",
-                "args": ["publicTrade.BTCUSDT"]
-            }))
-            logger.success("[bybit] Connected.")
+            await ws.send(json.dumps({"op": "subscribe", "args": args}))
+            logger.success(f"[bybit] Connected ({len(args)} pairs).")
             async for raw in ws:
                 msg = json.loads(raw)
-                if msg.get("topic") != "publicTrade.BTCUSDT":
+                topic: str = msg.get("topic", "")
+                if not topic.startswith("publicTrade."):
                     continue
+                pair = topic.split(".")[1]          # "publicTrade.ETHUSDT" → "ETHUSDT"
                 for t in msg.get("data", []):
                     trade = Trade(
                         exchange="bybit",
                         price=float(t["p"]),
                         quantity=float(t["v"]),
-                        side=t["S"].lower(),   # "Buy" → "buy"
+                        side=t["S"].lower(),
                         timestamp=t["T"] / 1000.0,
+                        pair=pair,
                     )
                     await self._enqueue(trade)
 
     # ── OKX ───────────────────────────────────────────────────────────────────
-    # Stream: wss://ws.okx.com:8443/ws/v5/public
-    # Subscribe: {"op":"subscribe","args":[{"channel":"trades","instId":"BTC-USDT"}]}
-    # Payload: data[].side="buy"|"sell", sz=qty, px=price, ts=timestamp(ms)
+    # Subscribe: args=[{"channel":"trades","instId":"BTC-USDT"},...]
+    # Each message arg.instId: "ETH-USDT" → "ETHUSDT"
 
     async def _okx_handler(self) -> None:
         url = "wss://ws.okx.com:8443/ws/v5/public"
+        sub_args = [{"channel": "trades", "instId": self._okx_inst_id(p)}
+                    for p in config.TRADING_PAIRS]
         async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
-            await ws.send(json.dumps({
-                "op": "subscribe",
-                "args": [{"channel": "trades", "instId": "BTC-USDT"}]
-            }))
-            logger.success("[okx] Connected.")
+            await ws.send(json.dumps({"op": "subscribe", "args": sub_args}))
+            logger.success(f"[okx] Connected ({len(sub_args)} pairs).")
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg.get("arg", {}).get("channel") != "trades":
                     continue
+                inst_id: str = msg["arg"].get("instId", "BTC-USDT")
+                pair = inst_id.replace("-", "")     # "ETH-USDT" → "ETHUSDT"
                 for t in msg.get("data", []):
                     trade = Trade(
                         exchange="okx",
                         price=float(t["px"]),
                         quantity=float(t["sz"]),
-                        side=t["side"],   # already "buy" | "sell"
+                        side=t["side"],
                         timestamp=int(t["ts"]) / 1000.0,
+                        pair=pair,
                     )
                     await self._enqueue(trade)
 

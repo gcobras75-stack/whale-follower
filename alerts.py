@@ -215,6 +215,79 @@ async def _save_supabase(
         logger.error(f"[supabase] Error guardando: {exc}")
 
 
+# ── Alerta multi-par ─────────────────────────────────────────────────────────
+
+async def dispatch_multi(
+    signals: list,
+    allocation: Any,
+    all_scores: dict,
+) -> None:
+    """Alerta multi-par: scores de todos los pares y capital distribuido."""
+    global _stats
+    if not signals:
+        return
+
+    best = max(signals, key=lambda s: s.score)
+    _stats["signals_total"] += 1
+    if best.score >= config.HIGH_CONFIDENCE_SCORE:
+        _stats["signals_high"] += 1
+    _stats["last_signal"] = {
+        "score": best.score, "entry": best.entry_price,
+        "sl": best.stop_loss, "tp": best.take_profit,
+        "exchange": best.spring_data.get("strongest_exchange", "multi"),
+        "ts": time.time(),
+    }
+
+    score_lines = []
+    for pair, score in sorted(all_scores.items(), key=lambda x: -x[1]):
+        is_trading = allocation and any(t.pair == pair for t in allocation.trades)
+        if is_trading:
+            tag = "OPERANDO"
+        elif score >= config.SIGNAL_SCORE_THRESHOLD:
+            tag = "En espera"
+        else:
+            tag = "Sin senal"
+        score_lines.append(f"  {pair}: {score:3d}/100 [{tag}]")
+
+    capital_lines = []
+    if allocation:
+        for alloc in allocation.trades:
+            capital_lines.append(
+                f"  {alloc.pair}: ${alloc.size_usd:,.0f} ({alloc.capital_fraction*100:.0f}%)"
+            )
+
+    mode_labels = {"A": "Par unico", "B": "Diversificado", "C": "Correlacion BTC activa"}
+    mode_label = mode_labels.get(getattr(allocation, "mode", "A"), "Auto")
+
+    msg = (
+        "MULTI-PAR DETECTADO\n"
+        "------------------------------\n"
+        "Scores actuales:\n"
+        + "\n".join(score_lines) + "\n"
+        "------------------------------\n"
+        "Capital distribuido:\n"
+        + ("\n".join(capital_lines) if capital_lines else "  (ninguno)") + "\n"
+        "------------------------------\n"
+        f"Modo: {mode_label}\n"
+        f"Score min: {config.SIGNAL_SCORE_THRESHOLD} | RR 1:{config.RISK_REWARD:.0f}\n"
+        "Solo analisis. No es consejo financiero."
+    )
+
+    await asyncio.gather(
+        _send_telegram(msg),
+        *[
+            _save_supabase(
+                s.score, s.breakdown, s.spring_data,
+                s.spring_data.get("strongest_exchange", "multi"),
+                round(s.entry_price, 2), round(s.stop_loss, 2), round(s.take_profit, 2),
+                None,
+            )
+            for s in signals
+        ],
+        return_exceptions=True,
+    )
+
+
 # ── Comandos de Telegram (/status /stats /last /trades) ───────────────────────
 
 async def handle_telegram_commands(executor: Any) -> None:
