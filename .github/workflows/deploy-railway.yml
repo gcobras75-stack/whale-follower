@@ -1,0 +1,43 @@
+# Despliegue automático a Railway en cada push a main.
+# Requisito: secret del repo GitHub → RAILWAY_TOKEN (Project Token de Railway).
+# Docs: https://docs.railway.com/guides/cli#tokens
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-railway-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up \
+            --project d3f6357f-019c-4a69-bfe8-0870201fd18e \
+            --service whale-follower \
+            --environment production \
+            --detach \
+            --ci \
+            -m "gha-${{ github.run_number }}-${{ github.sha }}"
