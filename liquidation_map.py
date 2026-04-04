@@ -16,7 +16,7 @@ from loguru import logger
 # OKX endpoint — funciona sin restriccion geografica
 _OKX_LIQ_URL = "https://www.okx.com/api/v5/public/liquidation-orders"
 _REFRESH_INTERVAL = 120    # 2 minutes
-_HISTORY_WINDOW = 3600     # 60 minutes (ampliado para periodos de baja actividad)
+_HISTORY_WINDOW = 43200    # 12 horas — zonas de liquidacion persisten como S/R
 _ZONE_RADIUS = 0.005       # +-0.5%
 _MAJOR_ZONE_USD = 5_000_000
 _MINOR_ZONE_USD = 1_000_000
