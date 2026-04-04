@@ -58,7 +58,9 @@ CORRELATION_WINDOW_SECS: int = int(os.getenv("CORRELATION_WINDOW_SECS", "60"))
 
 # ── Dynamic leverage ─────────────────────────────────────────────────────────
 MAX_LEVERAGE:            int   = int(os.getenv("MAX_LEVERAGE",            "7"))
-MIN_TRADES_FOR_LEVERAGE: int   = int(os.getenv("MIN_TRADES_FOR_LEVERAGE", "20"))
+MIN_TRADES_FOR_LEVERAGE: int   = int(os.getenv("MIN_TRADES_FOR_LEVERAGE", "0"))
+LEVERAGE_WARMUP_WR:      float = float(os.getenv("LEVERAGE_WARMUP_WR",    "50"))
+LEVERAGE_WARMUP_SAMPLES: int   = int(os.getenv("LEVERAGE_WARMUP_SAMPLES", "20"))
 
 # ── Sprint 4 — Extended layers ────────────────────────────────────────────────
 NEWS_API_KEY:       str   = os.getenv("NEWS_API_KEY",        "")

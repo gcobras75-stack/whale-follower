@@ -118,9 +118,16 @@ class LeverageManager:
     def __init__(
         self,
         initial_capital: float,
-        min_trades: int = 20,
+        min_trades: int = 0,
         max_leverage: int = 7,
+        warmup_win_rate_pct: float = 50.0,
+        warmup_samples: int = 20,
     ) -> None:
+        """
+        warmup_win_rate_pct: WR asumido para arrancar (50 = 2x desde el primer trade).
+        warmup_samples: trades sinteticos para inicializar el historial.
+        min_trades=0 activa el apalancamiento inmediatamente.
+        """
         if initial_capital <= 0:
             raise ValueError(f"initial_capital must be positive, got {initial_capital}")
 
@@ -128,17 +135,19 @@ class LeverageManager:
         self._min_trades       = min_trades
         self._max_leverage     = max_leverage
 
-        self._outcomes: List[bool]  = []    # True=win, False=loss
+        # Pre-sembrar historial con WR inicial
+        wins = int(warmup_samples * warmup_win_rate_pct / 100)
+        self._outcomes: List[bool] = [True] * wins + [False] * (warmup_samples - wins)
         self._total_pnl: float      = 0.0
         self._consecutive_losses: int = 0
 
-        self._level_cap: Optional[int]  = None   # protection downgrade ceiling
+        self._level_cap: Optional[int]  = None
         self._paused_until: float       = 0.0
-        self._current_leverage: int     = 1
+        self._current_leverage: int     = self.get_leverage()
 
         logger.info(
-            "[leverage] Initialized: capital={:.0f} min_trades={} max_leverage={}x",
-            initial_capital, min_trades, max_leverage,
+            "[leverage] Initialized: capital={:.0f} warmup_wr={}% leverage={}x max={}x",
+            initial_capital, warmup_win_rate_pct, self._current_leverage, max_leverage,
         )
 
     # ── Public API ─────────────────────────────────────────────────────────────

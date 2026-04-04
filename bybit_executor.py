@@ -78,9 +78,11 @@ class BybitTestnetExecutor:
         self._trades: List[PaperTrade] = []
         self._enabled = bool(self._api_key and self._api_secret)
         self._leverage_mgr = LeverageManager(
-            initial_capital = config.PAPER_CAPITAL,
-            min_trades      = config.MIN_TRADES_FOR_LEVERAGE,
-            max_leverage    = config.MAX_LEVERAGE,
+            initial_capital     = config.PAPER_CAPITAL,
+            min_trades          = config.MIN_TRADES_FOR_LEVERAGE,
+            max_leverage        = config.MAX_LEVERAGE,
+            warmup_win_rate_pct = config.LEVERAGE_WARMUP_WR,
+            warmup_samples      = config.LEVERAGE_WARMUP_SAMPLES,
         )
 
         if not self._enabled:
