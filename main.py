@@ -277,7 +277,7 @@ async def trading_loop() -> None:
             if cvd_combined:
                 snap_cvd = cvd_combined.snapshot()
                 ofi_eng.on_cvd_snapshot(snap_cvd.weighted_velocity)
-        if dn_eng:
+        if dn_eng and trade.pair == "BTCUSDT":
             dn_eng.on_perp_price(trade.exchange, trade.price)
 
         # Regime detector + Range trader (operan en cada tick, sin spring)

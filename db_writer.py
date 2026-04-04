@@ -429,14 +429,14 @@ async def save_range_open(trade) -> None:
         lambda: _client().table("range_trades").insert(row).execute()
     )
     await _save_paper_open(
-        trade_id    = trade.trade_id,
+        strategy    = "range",
         pair        = trade.pair,
+        side        = "Buy" if trade.side == "long" else "Sell",
         entry_price = trade.entry_price,
         stop_loss   = trade.sl,
         take_profit = trade.tp,
         size_usd    = trade.size_usd,
-        strategy    = "range",
-        production  = trade.production,
+        trade_id    = trade.trade_id,
     )
 
 
@@ -457,8 +457,10 @@ async def save_range_close(trade, reason: str, exit_price: float, pnl_net: float
         .execute()
     )
     await _save_paper_close(
-        trade_id   = trade.trade_id,
-        exit_price = exit_price,
-        pnl_usd    = pnl_net,
-        reason     = reason,
+        trade_id      = trade.trade_id,
+        exit_price    = exit_price,
+        pnl_usd       = pnl_net,
+        pnl_pct       = pnl_net / trade.size_usd if trade.size_usd else 0.0,
+        close_reason  = reason,
+        duration_secs = int(time.time() - trade.open_ts),
     )
