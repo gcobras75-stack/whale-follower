@@ -3,11 +3,7 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python main.py"
-restartPolicyType = "always"
+restartPolicyType       = "always"
 restartPolicyMaxRetries = 10
-healthcheckPath = "/health"
-healthcheckTimeout = 30
-
-[[services]]
-name = "whale-follower"
+healthcheckPath         = "/health"
+healthcheckTimeout      = 60

@@ -1,18 +1,14 @@
 """
-spring_detector.py — Whale Follower Bot
-Sliding-window Spring pattern detector (Wyckoff-style).
-
-A Spring is detected when the price fakes a breakdown below a support level,
-traps sellers, then snaps back — all while smart money absorbs supply (CVD ↑).
-
-Score 0-100.  Signal emitted when score >= SIGNAL_SCORE_THRESHOLD.
+spring_detector.py — Whale Follower Bot — Sprint 2
+Detecta el patrón Spring de Wyckoff en la ventana deslizante de precios.
+En Sprint 2 devuelve spring_data dict que el ScoringEngine procesa.
 """
 from __future__ import annotations
 
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, Optional, Tuple
 
 from loguru import logger
 
@@ -20,39 +16,19 @@ import config
 from aggregator import Trade
 
 
-# ── Price snapshot ─────────────────────────────────────────────────────────────
-
 @dataclass
 class PricePoint:
-    price: float
+    price:     float
     timestamp: float
-    cvd: float
-    exchange: str
-    volume: float
+    cvd:       float
+    exchange:  str
+    volume:    float
 
-
-# ── Spring signal ──────────────────────────────────────────────────────────────
-
-@dataclass
-class SpringSignal:
-    score: int
-    price_entry: float
-    stop_loss: float
-    take_profit: float
-    conditions: Dict[str, bool | float]
-    strongest_exchange: str
-    cvd_velocity: float
-    spring_low: float
-    timestamp: float
-
-
-# ── Per-exchange volume tracker ────────────────────────────────────────────────
 
 class VolumeTracker:
-    """Tracks 1-minute rolling volume per exchange."""
+    """Volumen rodante por exchange (1 minuto)."""
 
     def __init__(self) -> None:
-        # exchange → deque of (timestamp, volume)
         self._windows: Dict[str, Deque[Tuple[float, float]]] = {}
 
     def add(self, exchange: str, volume: float, ts: float) -> None:
@@ -69,7 +45,6 @@ class VolumeTracker:
         return total
 
     def strongest(self, ts: float) -> str:
-        """Exchange with the most volume in the last minute."""
         best_exc, best_vol = "", 0.0
         for exc, dq in self._windows.items():
             self._prune(exc, ts)
@@ -79,46 +54,43 @@ class VolumeTracker:
         return best_exc or "unknown"
 
     def _prune(self, exchange: str, now: float) -> None:
-        dq = self._windows[exchange]
+        dq     = self._windows[exchange]
         cutoff = now - 60.0
         while dq and dq[0][0] < cutoff:
             dq.popleft()
 
 
-# ── Spring Detector ────────────────────────────────────────────────────────────
-
 class SpringDetector:
     """
-    Receives normalized trades from the Aggregator and detects Spring patterns.
-
-    Call `feed(trade, state)` for every trade; it returns a SpringSignal when
-    a qualifying event is detected, otherwise None.
+    Detecta el patrón Spring (caída + rebote + divergencia CVD).
+    Devuelve un dict con los datos crudos del spring para que el
+    ScoringEngine calcule el score final.
     """
 
     def __init__(self) -> None:
-        # Sliding window: last WINDOW_SECS of price points
-        self._window: Deque[PricePoint] = deque()
-        self._vol_tracker = VolumeTracker()
+        self._window:   Deque[PricePoint] = deque()
+        self._vol_tracker                  = VolumeTracker()
+        self._baseline: Deque[Tuple[float, float]] = deque()
 
-        # Rolling 1-minute volume baseline (for multiplier check)
-        self._baseline_window: Deque[Tuple[float, float]] = deque()  # (ts, vol)
+        self._last_signal_ts:  float = 0.0
+        self._cooldown_secs:   float = 30.0
 
-        # Cooldown: avoid re-firing on the same spring
-        self._last_signal_ts: float = 0.0
-        self._cooldown_secs: float = 30.0
-
-    # ── Public API ─────────────────────────────────────────────────────────────
+    # ── API pública ────────────────────────────────────────────────────────────
 
     def feed(
-        self, trade: Trade, state: Dict
-    ) -> Optional[SpringSignal]:
+        self, trade: Trade, cvd_value: float
+    ) -> Optional[Dict]:
+        """
+        Alimenta un trade. Devuelve spring_data dict si detecta patrón,
+        o None si no hay patrón o está en cooldown.
+        """
         now = trade.timestamp
-        pt = PricePoint(
-            price=trade.price,
-            timestamp=now,
-            cvd=state["cvd"],
-            exchange=trade.exchange,
-            volume=trade.quantity,
+        pt  = PricePoint(
+            price     = trade.price,
+            timestamp = now,
+            cvd       = cvd_value,
+            exchange  = trade.exchange,
+            volume    = trade.quantity,
         )
         self._window.append(pt)
         self._vol_tracker.add(trade.exchange, trade.quantity, now)
@@ -130,108 +102,72 @@ class SpringDetector:
         if len(self._window) < 10:
             return None
 
-        return self._evaluate(now, state)
+        return self._evaluate(now, cvd_value)
 
-    # ── Evaluation ─────────────────────────────────────────────────────────────
+    def strongest_exchange(self, ts: float) -> str:
+        return self._vol_tracker.strongest(ts)
 
-    def _evaluate(self, now: float, state: Dict) -> Optional[SpringSignal]:
-        pts = list(self._window)
+    def current_price(self) -> float:
+        if self._window:
+            return self._window[-1].price
+        return 0.0
+
+    # ── Evaluación ─────────────────────────────────────────────────────────────
+
+    def _evaluate(self, now: float, cvd_now: float) -> Optional[Dict]:
+        pts           = list(self._window)
         current_price = pts[-1].price
 
-        # ── Condition A: price dropped >= 0.3% in last 10 seconds ─────────────
-        drop_window = [p for p in pts if now - p.timestamp <= config.SPRING_DROP_SECS]
+        # Condición A: caída >= 0.3% en ≤ 10 segundos
+        drop_window     = [p for p in pts if now - p.timestamp <= config.SPRING_DROP_SECS]
         if not drop_window:
             return None
-        high_before_drop = max(p.price for p in drop_window)
-        spring_low = min(p.price for p in drop_window)
-        drop_pct = (high_before_drop - spring_low) / high_before_drop
+        high_before     = max(p.price for p in drop_window)
+        spring_low      = min(p.price for p in drop_window)
+        drop_pct        = (high_before - spring_low) / high_before
+        cond_a          = drop_pct >= config.SPRING_DROP_PCT
+        drop_intensity  = min(drop_pct / (config.SPRING_DROP_PCT * 2), 1.0)
 
-        cond_a = drop_pct >= config.SPRING_DROP_PCT
-        drop_intensity = min(drop_pct / (config.SPRING_DROP_PCT * 2), 1.0)  # 0→1
-
-        # ── Condition B: price bounced >= 0.2% from low in last 5 seconds ─────
-        bounce_window = [p for p in pts if now - p.timestamp <= config.SPRING_BOUNCE_SECS]
-        bounce_low = min((p.price for p in bounce_window), default=current_price)
-        bounce_pct = (current_price - bounce_low) / bounce_low if bounce_low > 0 else 0.0
-
-        cond_b = bounce_pct >= config.SPRING_BOUNCE_PCT
+        # Condición B: rebote >= 0.2% desde el mínimo en ≤ 5 segundos
+        bounce_window   = [p for p in pts if now - p.timestamp <= config.SPRING_BOUNCE_SECS]
+        bounce_low      = min((p.price for p in bounce_window), default=current_price)
+        bounce_pct      = (current_price - bounce_low) / bounce_low if bounce_low > 0 else 0.0
+        cond_b          = bounce_pct >= config.SPRING_BOUNCE_PCT
         bounce_intensity = min(bounce_pct / (config.SPRING_BOUNCE_PCT * 2), 1.0)
 
-        # ── Condition C: CVD divergence (CVD rose while price fell) ───────────
-        # Compare CVD at the high-before-drop vs now
+        # Condición C: CVD sube mientras precio baja (divergencia)
         if len(drop_window) >= 2:
-            cvd_at_high = drop_window[0].cvd    # oldest point in drop window
-            cvd_now = state["cvd"]
-            cond_c = (cvd_now > cvd_at_high) and cond_a
-            cvd_delta = cvd_now - cvd_at_high
-            cvd_intensity = min(abs(cvd_delta) / 5.0, 1.0)   # 5 BTC delta → full score
+            cvd_at_high = drop_window[0].cvd
+            cond_c      = (cvd_now > cvd_at_high) and cond_a
         else:
             cond_c = False
-            cvd_intensity = 0.0
 
-        # ── Condition D: combined volume > 1.5x 1-min average ─────────────────
-        recent_vol = self._vol_tracker.total_last_minute(now)
-        baseline_avg = self._baseline_avg()
-        vol_ratio = (recent_vol / baseline_avg) if baseline_avg > 0 else 0.0
-        cond_d = vol_ratio >= config.VOLUME_MULTIPLIER
-        vol_intensity = min(vol_ratio / (config.VOLUME_MULTIPLIER * 1.5), 1.0)
+        # Condición D: volumen combinado > 1.5x promedio
+        recent_vol    = self._vol_tracker.total_last_minute(now)
+        baseline_avg  = self._baseline_avg()
+        vol_ratio     = (recent_vol / baseline_avg) if baseline_avg > 0 else 0.0
+        cond_d        = vol_ratio >= config.VOLUME_MULTIPLIER
 
-        # ── Score (0–100) ──────────────────────────────────────────────────────
-        # Each condition carries base points; intensity modulates the bonus.
-        score = 0
-        if cond_a:
-            score += 20 + int(10 * drop_intensity)
-        if cond_b:
-            score += 20 + int(10 * bounce_intensity)
-        if cond_c:
-            score += 20 + int(10 * cvd_intensity)
-        if cond_d:
-            score += 10 + int(10 * vol_intensity)
-
-        # Extra: cascade bonus
-        if state.get("cascade"):
-            score = min(score + 10, 100)
-
-        conditions = {
-            "drop_pct": round(drop_pct * 100, 3),
-            "bounce_pct": round(bounce_pct * 100, 3),
-            "cvd_divergence": cond_c,
-            "volume_spike": cond_d,
-            "vol_ratio": round(vol_ratio, 2),
-            "cascade_detected": bool(state.get("cascade")),
-            "cond_a": cond_a,
-            "cond_b": cond_b,
-            "cond_c": cond_c,
-            "cond_d": cond_d,
-        }
-
-        if score < config.SIGNAL_SCORE_THRESHOLD:
+        # Si ninguna condición primaria → ignorar
+        if not cond_a and not cond_b:
             return None
-
-        # ── Build signal ───────────────────────────────────────────────────────
-        stop_loss   = spring_low * (1 - config.STOP_LOSS_PCT)
-        risk        = current_price - stop_loss
-        take_profit = current_price + risk * config.RISK_REWARD
-        strongest   = self._vol_tracker.strongest(now)
 
         self._last_signal_ts = now
 
-        signal = SpringSignal(
-            score=score,
-            price_entry=round(current_price, 2),
-            stop_loss=round(stop_loss, 2),
-            take_profit=round(take_profit, 2),
-            conditions=conditions,
-            strongest_exchange=strongest,
-            cvd_velocity=round(state.get("cvd_velocity_10s", 0.0), 4),
-            spring_low=round(spring_low, 2),
-            timestamp=now,
-        )
-        logger.info(
-            f"[spring] SIGNAL score={score} entry={signal.price_entry} "
-            f"sl={signal.stop_loss} tp={signal.take_profit}"
-        )
-        return signal
+        return {
+            "cond_a":          cond_a,
+            "cond_b":          cond_b,
+            "cond_c":          cond_c,
+            "cond_d":          cond_d,
+            "drop_pct":        round(drop_pct * 100, 3),
+            "bounce_pct":      round(bounce_pct * 100, 3),
+            "drop_intensity":  drop_intensity,
+            "bounce_intensity": bounce_intensity,
+            "spring_low":      round(spring_low, 2),
+            "current_price":   round(current_price, 2),
+            "vol_ratio":       round(vol_ratio, 2),
+            "strongest_exchange": self._vol_tracker.strongest(now),
+        }
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -241,12 +177,12 @@ class SpringDetector:
             self._window.popleft()
 
     def _update_baseline(self, volume: float, ts: float) -> None:
-        self._baseline_window.append((ts, volume))
+        self._baseline.append((ts, volume))
         cutoff = ts - 60.0
-        while self._baseline_window and self._baseline_window[0][0] < cutoff:
-            self._baseline_window.popleft()
+        while self._baseline and self._baseline[0][0] < cutoff:
+            self._baseline.popleft()
 
     def _baseline_avg(self) -> float:
-        if not self._baseline_window:
+        if not self._baseline:
             return 0.0
-        return sum(v for _, v in self._baseline_window) / max(len(self._baseline_window), 1)
+        return sum(v for _, v in self._baseline) / max(len(self._baseline), 1)
