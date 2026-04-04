@@ -4,14 +4,15 @@ macro_agent.py — Whale Follower Bot — Sprint 6
 Agente de macrofundamentales en tiempo real (costo $0).
 
 Fuentes:
-  1. Forex Factory JSON  — calendario económico USD de alto impacto
-  2. CryptoPanic RSS     — noticias crypto importantes
-  3. CoinGecko Fear&Greed — ya existe en fear_greed.py (usado como hook)
+  1. Forex Factory JSON   — calendario económico USD de alto impacto
+  2. CryptoPanic RSS      — noticias crypto importantes
+  3. Reddit JSON API      — r/CryptoCurrency, r/Bitcoin, r/ethereum (sin auth)
+  4. X / Twitter via Nitter RSS — cuentas clave: Elon, Saylor, CZ, Fed
 
 Expone:
-  is_paused()           -> (bool, str)   # bloquea la señal si hay evento macro
-  sentiment_adjustment() -> int          # ajuste de score (-15 a +10)
-  run()                 -> coro          # tarea de fondo asyncio
+  is_paused()            -> (bool, str)   # bloquea la señal si hay evento macro
+  sentiment_adjustment() -> int           # ajuste de score (-20 a +15)
+  run()                  -> coro          # tarea de fondo asyncio
 """
 from __future__ import annotations
 
@@ -27,35 +28,65 @@ import aiohttp
 from loguru import logger
 
 # ── Configuración ──────────────────────────────────────────────────────────────
-_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-_CRYPTOPANIC_RSS = "https://cryptopanic.com/news/rss/"
-_REFRESH_CALENDAR = 3600      # cada hora
-_REFRESH_NEWS     = 300       # cada 5 minutos
-_PRE_EVENT_SECS   = 1800      # pausar 30 min ANTES del evento
-_POST_EVENT_SECS  = 900       # pausar 15 min DESPUÉS del evento
+_CALENDAR_URL     = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_CRYPTOPANIC_RSS  = "https://cryptopanic.com/news/rss/"
+_REFRESH_CALENDAR = 3600   # cada hora
+_REFRESH_NEWS     = 300    # cada 5 minutos
+_REFRESH_REDDIT   = 180    # cada 3 minutos
+_REFRESH_TWITTER  = 240    # cada 4 minutos
+_PRE_EVENT_SECS   = 1800   # pausar 30 min ANTES del evento
+_POST_EVENT_SECS  = 900    # pausar 15 min DESPUÉS del evento
+_ARTICLE_WINDOW   = 1800   # solo noticias de los últimos 30 min
 
-# Eventos USD de alto impacto que mueven cripto significativamente
-_HIGH_IMPACT_KEYWORDS = [
-    "CPI", "NFP", "Non-Farm", "FOMC", "Federal Funds",
-    "PCE", "GDP", "PPI", "Unemployment", "Retail Sales",
-    "Interest Rate", "Powell", "Fed Chair", "Treasury",
-    "Inflation", "Consumer Price",
+# ── Reddit — subreddits a monitorear ──────────────────────────────────────────
+_REDDIT_FEEDS = [
+    "https://www.reddit.com/r/CryptoCurrency/new.json?limit=25",
+    "https://www.reddit.com/r/Bitcoin/new.json?limit=25",
+    "https://www.reddit.com/r/ethereum/new.json?limit=25",
+    "https://www.reddit.com/r/CryptoMarkets/new.json?limit=15",
+]
+_REDDIT_USER_AGENT = "WhaleFollowerBot/1.0 (market monitoring)"
+
+# ── X / Twitter via Nitter RSS — cuentas de alto impacto ─────────────────────
+# Nitter es un frontend open-source de Twitter que expone RSS público sin auth
+_NITTER_INSTANCES = [
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.net",
+]
+_TWITTER_ACCOUNTS = [
+    "elonmusk",      # mueve mercados con un tweet
+    "saylor",        # MicroStrategy — señal de acumulación institucional
+    "cz_binance",    # CEO Binance — noticias exchange clave
+    "federalreserve",# Fed oficial — política monetaria
+    "POTUS",         # Presidencia — aranceles, regulación
+    "realDonaldTrump", # TruthSocial / X — impacto cripto directo
 ]
 
-# Keywords de noticias que indican riesgo para longs en cripto
+# ── Keywords bearish ──────────────────────────────────────────────────────────
 _BEARISH_KEYWORDS = [
     "ban", "banned", "hack", "hacked", "exploit", "stolen",
     "SEC", "lawsuit", "arrest", "seized", "shutdown",
     "crash", "collapse", "bankrupt", "fraud", "scam",
     "regulation", "restricted", "blocked", "sanction",
-    "tariff", "recession", "panic",
+    "tariff", "recession", "panic", "dump", "rugpull",
+    "investigation", "fined", "penalty", "delistment",
 ]
 
-# Keywords que refuerzan sentimiento alcista
+# ── Keywords bullish ──────────────────────────────────────────────────────────
 _BULLISH_KEYWORDS = [
     "ETF", "approved", "institutional", "adoption", "partnership",
-    "reserve", "treasury", "accumulate", "strategic",
-    "breakthrough", "upgrade", "milestone",
+    "reserve", "treasury", "accumulate", "strategic", "buy",
+    "breakthrough", "upgrade", "milestone", "all-time", "ATH",
+    "halving", "bullrun", "moon", "rally",
+]
+
+# ── Eventos macro USD de alto impacto ────────────────────────────────────────
+_HIGH_IMPACT_KEYWORDS = [
+    "CPI", "NFP", "Non-Farm", "FOMC", "Federal Funds",
+    "PCE", "GDP", "PPI", "Unemployment", "Retail Sales",
+    "Interest Rate", "Powell", "Fed Chair", "Treasury",
+    "Inflation", "Consumer Price",
 ]
 
 
@@ -69,15 +100,27 @@ class MacroSnapshot:
     mins_to_event: Optional[int] = None
 
     # Noticias CryptoPanic
-    bearish_headline: str = ""
-    bullish_headline: str = ""
-    news_sentiment_adj: int = 0    # -15 a +10
+    cp_bearish_headline: str = ""
+    cp_bullish_headline: str = ""
+
+    # Reddit
+    reddit_bearish_headline: str = ""
+    reddit_bullish_headline: str = ""
+    reddit_score: int = 0          # upvotes del post más relevante
+
+    # X / Twitter
+    twitter_bearish_tweet: str = ""
+    twitter_bullish_tweet: str = ""
+    twitter_account_hit: str = ""
+
+    # Ajuste total de sentimiento
+    news_sentiment_adj: int = 0    # -20 a +15
 
     # Meta
     last_calendar_update: float = 0.0
     last_news_update: float = 0.0
-    calendar_stale: bool = True
-    news_stale: bool = True
+    last_reddit_update: float = 0.0
+    last_twitter_update: float = 0.0
 
 
 # ── Motor principal ────────────────────────────────────────────────────────────
@@ -90,28 +133,19 @@ class MacroAgent:
 
     def __init__(self) -> None:
         self._snap = MacroSnapshot()
-        self._upcoming_events: list[dict] = []   # cache de eventos esta semana
-        self._recent_headlines: list[dict] = []  # cache de noticias recientes
+        self._upcoming_events: list[dict] = []
+        self._cp_headlines: list[dict] = []
+        self._reddit_posts: list[dict] = []
+        self._tweets: list[dict] = []
 
     # ── API pública ────────────────────────────────────────────────────────────
 
     def is_paused(self) -> tuple[bool, str]:
-        """
-        Retorna (True, reason) si hay un evento macro de alto impacto
-        en ventana de ±30/15 min.  Nunca bloquea en caso de fallo de API.
-        """
         if self._snap.paused_for_event:
             return True, f"macro_pause: {self._snap.event_name}"
         return False, ""
 
     def sentiment_adjustment(self) -> int:
-        """
-        Retorna delta de score:
-          -15  si hay noticia bearish grave (hack, ban, SEC)
-          -8   si hay noticia bearish moderada
-          +5   si hay noticia bullish fuerte (ETF, reserve)
-           0   en ausencia de señal
-        """
         return self._snap.news_sentiment_adj
 
     def snapshot(self) -> MacroSnapshot:
@@ -120,14 +154,17 @@ class MacroAgent:
     # ── Loop de fondo ──────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Tarea de fondo: corre calendar y news en paralelo."""
-        logger.info("[macro_agent] iniciando — calendario económico + CryptoPanic RSS")
+        logger.info(
+            "[macro_agent] iniciando — calendario + CryptoPanic + Reddit + X/Nitter"
+        )
         await asyncio.gather(
             self._calendar_loop(),
             self._news_loop(),
+            self._reddit_loop(),
+            self._twitter_loop(),
         )
 
-    # ── Calendario económico ───────────────────────────────────────────────────
+    # ── 1. Calendario económico ────────────────────────────────────────────────
 
     async def _calendar_loop(self) -> None:
         while True:
@@ -144,7 +181,6 @@ class MacroAgent:
                         raise ValueError(f"HTTP {resp.status}")
                     data = await resp.json(content_type=None)
 
-            # Filtrar: solo USD + High impact + keywords relevantes
             filtered = []
             for event in data:
                 if event.get("country", "").upper() != "USD":
@@ -158,19 +194,15 @@ class MacroAgent:
 
             self._upcoming_events = filtered
             self._snap.last_calendar_update = time.time()
-            self._snap.calendar_stale = False
             logger.info(
-                "[macro_agent] calendario: {} eventos USD High-Impact esta semana",
-                len(filtered),
+                "[macro_agent] calendario: {} eventos USD High esta semana", len(filtered)
             )
         except Exception as exc:
             logger.warning("[macro_agent] calendario fallo (no bloquea): {}", exc)
-            self._snap.calendar_stale = True
 
     def _evaluate_calendar(self) -> None:
-        """Compara hora actual con eventos próximos. Activa pausa si corresponde."""
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        nearest_name: str = ""
+        nearest_name = ""
         nearest_dt: Optional[datetime.datetime] = None
         nearest_delta: Optional[float] = None
 
@@ -179,8 +211,6 @@ class MacroAgent:
             if dt is None:
                 continue
             delta_secs = (dt - now_utc).total_seconds()
-
-            # Ventana: -PRE_EVENT_SECS antes hasta +POST_EVENT_SECS después
             if -_POST_EVENT_SECS <= delta_secs <= _PRE_EVENT_SECS:
                 if nearest_delta is None or abs(delta_secs) < abs(nearest_delta):
                     nearest_delta = delta_secs
@@ -191,11 +221,10 @@ class MacroAgent:
             self._snap.paused_for_event = True
             self._snap.event_name = nearest_name
             self._snap.event_time_utc = nearest_dt
-            self._snap.mins_to_event = int((nearest_dt - now_utc).total_seconds() / 60) if nearest_dt else None
+            mins = int((nearest_dt - now_utc).total_seconds() / 60) if nearest_dt else None
+            self._snap.mins_to_event = mins
             logger.warning(
-                "[macro_agent] PAUSA ACTIVA — {} en ~{} min",
-                nearest_name,
-                self._snap.mins_to_event,
+                "[macro_agent] PAUSA ACTIVA — {} en ~{} min", nearest_name, mins
             )
         else:
             if self._snap.paused_for_event:
@@ -205,15 +234,15 @@ class MacroAgent:
             self._snap.event_time_utc = None
             self._snap.mins_to_event = None
 
-    # ── Noticias CryptoPanic RSS ───────────────────────────────────────────────
+    # ── 2. CryptoPanic RSS ────────────────────────────────────────────────────
 
     async def _news_loop(self) -> None:
         while True:
-            await self._fetch_news()
-            self._evaluate_news()
+            await self._fetch_cryptopanic()
+            self._recalculate_sentiment()
             await asyncio.sleep(_REFRESH_NEWS)
 
-    async def _fetch_news(self) -> None:
+    async def _fetch_cryptopanic(self) -> None:
         timeout = aiohttp.ClientTimeout(total=10)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -223,72 +252,229 @@ class MacroAgent:
                     text = await resp.text()
 
             items = _parse_rss(text)
-            # Solo los últimos 30 min
-            cutoff = time.time() - 1800
-            recent = [i for i in items if i.get("pub_ts", 0) >= cutoff]
-            self._recent_headlines = recent
+            cutoff = time.time() - _ARTICLE_WINDOW
+            self._cp_headlines = [i for i in items if i.get("pub_ts", 0) >= cutoff]
             self._snap.last_news_update = time.time()
-            self._snap.news_stale = False
-            logger.debug("[macro_agent] noticias: {} en últimos 30 min", len(recent))
+            logger.debug(
+                "[macro_agent] CryptoPanic: {} noticias en últimos 30 min",
+                len(self._cp_headlines),
+            )
         except Exception as exc:
-            logger.warning("[macro_agent] noticias fallo (no bloquea): {}", exc)
-            self._snap.news_stale = True
+            logger.warning("[macro_agent] CryptoPanic fallo (no bloquea): {}", exc)
 
-    def _evaluate_news(self) -> None:
-        """Analiza headlines y calcula sentiment_adjustment."""
-        bearish_hit: Optional[str] = None
-        bullish_hit: Optional[str] = None
+    # ── 3. Reddit ─────────────────────────────────────────────────────────────
+
+    async def _reddit_loop(self) -> None:
+        while True:
+            await self._fetch_reddit()
+            self._recalculate_sentiment()
+            await asyncio.sleep(_REFRESH_REDDIT)
+
+    async def _fetch_reddit(self) -> None:
+        timeout = aiohttp.ClientTimeout(total=12)
+        headers = {"User-Agent": _REDDIT_USER_AGENT}
+        posts: list[dict] = []
+        cutoff = time.time() - _ARTICLE_WINDOW
+
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            for url in _REDDIT_FEEDS:
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json(content_type=None)
+
+                    children = data.get("data", {}).get("children", [])
+                    for child in children:
+                        p = child.get("data", {})
+                        created = p.get("created_utc", 0)
+                        if created < cutoff:
+                            continue
+                        posts.append({
+                            "title":   p.get("title", ""),
+                            "score":   p.get("score", 0),
+                            "subreddit": p.get("subreddit", ""),
+                            "pub_ts":  created,
+                        })
+                except Exception as exc:
+                    logger.debug("[macro_agent] Reddit {} fallo: {}", url, exc)
+
+        self._reddit_posts = posts
+        self._snap.last_reddit_update = time.time()
+        if posts:
+            logger.debug(
+                "[macro_agent] Reddit: {} posts en últimos 30 min", len(posts)
+            )
+
+    # ── 4. X / Twitter via Nitter RSS ────────────────────────────────────────
+
+    async def _twitter_loop(self) -> None:
+        # Espera inicial para no saturar al arrancar junto con los otros loops
+        await asyncio.sleep(30)
+        while True:
+            await self._fetch_twitter()
+            self._recalculate_sentiment()
+            await asyncio.sleep(_REFRESH_TWITTER)
+
+    async def _fetch_twitter(self) -> None:
+        timeout = aiohttp.ClientTimeout(total=10)
+        tweets: list[dict] = []
+        cutoff = time.time() - _ARTICLE_WINDOW
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for account in _TWITTER_ACCOUNTS:
+                fetched = False
+                for nitter in _NITTER_INSTANCES:
+                    if fetched:
+                        break
+                    url = f"{nitter}/{account}/rss"
+                    try:
+                        async with session.get(url) as resp:
+                            if resp.status != 200:
+                                continue
+                            text = await resp.text()
+
+                        items = _parse_rss(text)
+                        recent = [i for i in items if i.get("pub_ts", 0) >= cutoff]
+                        for item in recent:
+                            item["account"] = account
+                            tweets.append(item)
+                        fetched = True
+                        if recent:
+                            logger.debug(
+                                "[macro_agent] @{}: {} tweets recientes", account, len(recent)
+                            )
+                    except Exception:
+                        continue   # intentar siguiente instancia Nitter
+
+        self._tweets = tweets
+        self._snap.last_twitter_update = time.time()
+
+    # ── Recalcular sentimiento (combina todas las fuentes) ────────────────────
+
+    def _recalculate_sentiment(self) -> None:
+        """Combina señales de CryptoPanic + Reddit + Twitter en un único score."""
         bearish_weight = 0
         bullish_weight = 0
+        bearish_hit: Optional[str] = None
+        bullish_hit: Optional[str] = None
+        cp_bearish = ""
+        cp_bullish = ""
+        reddit_bearish = ""
+        reddit_bullish = ""
+        twitter_bearish = ""
+        twitter_bullish = ""
+        twitter_account = ""
+        reddit_max_score = 0
 
-        for item in self._recent_headlines:
+        # ── CryptoPanic ───────────────────────────────────────────────────────
+        for item in self._cp_headlines:
             title = (item.get("title") or "").lower()
-
             for kw in _BEARISH_KEYWORDS:
                 if kw.lower() in title:
-                    # Peso mayor si es hack/ban/SEC
-                    w = 2 if kw in ("hack", "hacked", "ban", "banned", "SEC", "exploit") else 1
+                    w = 3 if kw in ("hack", "hacked", "ban", "banned", "SEC", "exploit") else 1
                     bearish_weight += w
-                    if bearish_hit is None:
-                        bearish_hit = item.get("title", "")
+                    if not cp_bearish:
+                        cp_bearish = item.get("title", "")
                     break
-
             for kw in _BULLISH_KEYWORDS:
                 if kw.lower() in title:
                     bullish_weight += 1
-                    if bullish_hit is None:
-                        bullish_hit = item.get("title", "")
+                    if not cp_bullish:
+                        cp_bullish = item.get("title", "")
                     break
 
-        # Calcular ajuste neto
-        if bearish_weight >= 4:
+        # ── Reddit ────────────────────────────────────────────────────────────
+        for post in self._reddit_posts:
+            title = (post.get("title") or "").lower()
+            score = post.get("score", 0)
+            # Posts con muchos upvotes pesan más
+            multiplier = 2 if score > 500 else 1
+
+            for kw in _BEARISH_KEYWORDS:
+                if kw.lower() in title:
+                    bearish_weight += multiplier
+                    if not reddit_bearish or score > reddit_max_score:
+                        reddit_bearish = post.get("title", "")
+                        reddit_max_score = score
+                    break
+            for kw in _BULLISH_KEYWORDS:
+                if kw.lower() in title:
+                    bullish_weight += multiplier
+                    if not reddit_bullish:
+                        reddit_bullish = post.get("title", "")
+                    break
+
+        # ── Twitter / X ────────────────────────────────────────────────────────
+        for tweet in self._tweets:
+            title = (tweet.get("title") or "").lower()
+            account = tweet.get("account", "")
+            # Elon, Saylor, CZ tienen mayor impacto — peso 3x
+            high_impact_account = account in ("elonmusk", "saylor", "cz_binance")
+            w = 3 if high_impact_account else 1
+
+            for kw in _BEARISH_KEYWORDS:
+                if kw.lower() in title:
+                    bearish_weight += w
+                    if not twitter_bearish:
+                        twitter_bearish = f"@{account}: {tweet.get('title','')[:80]}"
+                        twitter_account = account
+                    break
+            for kw in _BULLISH_KEYWORDS:
+                if kw.lower() in title:
+                    bullish_weight += w
+                    if not twitter_bullish:
+                        twitter_bullish = f"@{account}: {tweet.get('title','')[:80]}"
+                    break
+
+        # ── Calcular ajuste neto ───────────────────────────────────────────────
+        if bearish_weight >= 8:
+            adj = -20
+        elif bearish_weight >= 5:
             adj = -15
-        elif bearish_weight >= 2:
-            adj = -8
-        elif bearish_weight == 1:
+        elif bearish_weight >= 3:
+            adj = -10
+        elif bearish_weight >= 1:
             adj = -5
+        elif bullish_weight >= 4:
+            adj = 15
         elif bullish_weight >= 2:
             adj = 10
-        elif bullish_weight == 1:
+        elif bullish_weight >= 1:
             adj = 5
         else:
             adj = 0
 
-        prev_adj = self._snap.news_sentiment_adj
-        self._snap.news_sentiment_adj = adj
-        self._snap.bearish_headline = bearish_hit or ""
-        self._snap.bullish_headline = bullish_hit or ""
+        prev = self._snap.news_sentiment_adj
+        self._snap.news_sentiment_adj    = adj
+        self._snap.cp_bearish_headline   = cp_bearish
+        self._snap.cp_bullish_headline   = cp_bullish
+        self._snap.reddit_bearish_headline = reddit_bearish
+        self._snap.reddit_bullish_headline = reddit_bullish
+        self._snap.twitter_bearish_tweet = twitter_bearish
+        self._snap.twitter_bullish_tweet = twitter_bullish
+        self._snap.twitter_account_hit   = twitter_account
 
-        if adj != prev_adj:
+        if adj != prev:
+            source_summary = []
+            if cp_bearish or cp_bullish:
+                source_summary.append("CryptoPanic")
+            if reddit_bearish or reddit_bullish:
+                source_summary.append("Reddit")
+            if twitter_bearish or twitter_bullish:
+                source_summary.append(f"X/@{twitter_account}" if twitter_account else "X")
+
             if adj < 0:
+                hit = twitter_bearish or reddit_bearish or cp_bearish or ""
                 logger.warning(
-                    "[macro_agent] sentimiento BEARISH adj={} — {}",
-                    adj, bearish_hit or "múltiples noticias",
+                    "[macro_agent] BEARISH adj={} fuentes={} — {}",
+                    adj, "+".join(source_summary) or "ninguna", hit[:80],
                 )
             elif adj > 0:
+                hit = twitter_bullish or reddit_bullish or cp_bullish or ""
                 logger.info(
-                    "[macro_agent] sentimiento BULLISH adj=+{} — {}",
-                    adj, bullish_hit or "múltiples noticias",
+                    "[macro_agent] BULLISH adj=+{} fuentes={} — {}",
+                    adj, "+".join(source_summary) or "ninguna", hit[:80],
                 )
             else:
                 logger.info("[macro_agent] sentimiento NEUTRO")
@@ -297,21 +483,12 @@ class MacroAgent:
 # ── Parsers auxiliares ─────────────────────────────────────────────────────────
 
 def _parse_ff_datetime(date_str: str, time_str: str) -> Optional[datetime.datetime]:
-    """
-    Parsea fecha y hora de Forex Factory.
-    date_str ejemplo: "2026-04-04T00:00:00-05:00"   (EST)
-    time_str ejemplo: "8:30am"
-    Retorna datetime en UTC o None si falla.
-    """
+    """Parsea fecha y hora de Forex Factory a datetime UTC."""
     try:
-        # Extraer sólo la parte de fecha
-        date_part = date_str[:10]  # "YYYY-MM-DD"
+        date_part = date_str[:10]
         year, month, day = map(int, date_part.split("-"))
-
-        # Parsear hora: "8:30am", "12:00pm", "All Day"
         time_str = time_str.strip().lower()
         if "all day" in time_str or time_str == "":
-            # Eventos sin hora específica: usar mediodía EST
             hour, minute = 12, 0
         else:
             m = re.match(r"(\d+):(\d+)(am|pm)", time_str)
@@ -322,10 +499,10 @@ def _parse_ff_datetime(date_str: str, time_str: str) -> Optional[datetime.dateti
                 hour += 12
             if ampm == "am" and hour == 12:
                 hour = 0
-
-        # Forex Factory usa EST (UTC-5)
-        est_dt = datetime.datetime(year, month, day, hour, minute,
-                                   tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
+        est_dt = datetime.datetime(
+            year, month, day, hour, minute,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=-5)),
+        )
         return est_dt.astimezone(datetime.timezone.utc)
     except Exception:
         return None
@@ -350,7 +527,7 @@ def _parse_rss(xml_text: str) -> list[dict]:
 
 
 def _parse_rss_date(date_str: str) -> float:
-    """Parsea fecha RSS como 'Fri, 04 Apr 2026 12:00:00 +0000' a timestamp."""
+    """Parsea fecha RSS a Unix timestamp."""
     try:
         from email.utils import parsedate_to_datetime
         return parsedate_to_datetime(date_str).timestamp()
