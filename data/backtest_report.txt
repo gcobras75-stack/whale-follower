@@ -1,0 +1,85 @@
+====================================================
+  WHALE FOLLOWER BOT — INFORME DE BACKTESTING
+====================================================
+Fecha:    2026-04-04 01:29 UTC
+Período:  60 días BTC/USDT (velas de 1 minuto)
+Params:   threshold=80 | drop=0.50% | bounce=0.20% | vol=1.3x | sl=0.30%
+
+====================================================
+  RESUMEN GENERAL
+====================================================
+  Total de trades:       51
+  Ganadores:             17
+  Perdedores:            34
+  Win Rate:              33.3%
+  Profit Factor:         1.72
+  Max Drawdown:          10.5%
+  Retorno total:         +28.50%
+  Capital final:         $12,850.30
+  Racha max. ganadora:   4 trades seguidos
+  Racha max. perdedora:  11 trades seguidos
+  Promedio ganador:      +1.07%
+  Promedio perdedor:     -0.30%
+
+====================================================
+  WIN RATE POR SEMANA
+====================================================
+  Semana  1:  29.4%  [#####---------------]   17 trades  5 gan.
+  Semana  2:  50.0%  [##########----------]   10 trades  5 gan.
+  Semana  3:  75.0%  [###############-----]    4 trades  3 gan.
+  Semana  4:  37.5%  [#######-------------]    8 trades  3 gan.
+  Semana  5:   0.0%  [--------------------]    3 trades  0 gan.
+  Semana  6:   0.0%  [--------------------]    4 trades  0 gan.
+  Semana  7:   0.0%  [--------------------]    1 trades  0 gan.
+  Semana  8:   0.0%  [--------------------]    3 trades  0 gan.
+  Semana  9:  100.0%  [####################]    1 trades  1 gan.
+
+====================================================
+  WIN RATE POR SESION
+====================================================
+  overlap     :  41.0%  [########------------]   39 trades  16 gan.
+  new_york    :   8.3%  [#-------------------]   12 trades  1 gan.
+
+====================================================
+  WIN RATE POR RANGO DE SCORE
+====================================================
+  Score 75-85:  23.1%  [####----------------]   13 trades  3 gan.
+  Score 85-100:  36.8%  [#######-------------]   38 trades  14 gan.
+
+====================================================
+  TOP 5 COMBINACIONES DE PARAMETROS
+====================================================
+  #1  WR=33.3%  PF=1.72  DD=10.5%  Trades=51
+      threshold=80  drop=0.50%  bounce=0.20%  vol=1.3x  sl=0.30%
+  #2  WR=33.3%  PF=1.72  DD=10.5%  Trades=51
+      threshold=80  drop=0.50%  bounce=0.20%  vol=1.5x  sl=0.30%
+  #3  WR=33.3%  PF=1.72  DD=10.5%  Trades=51
+      threshold=80  drop=0.50%  bounce=0.20%  vol=1.8x  sl=0.30%
+  #4  WR=33.3%  PF=1.72  DD=10.5%  Trades=51
+      threshold=80  drop=0.50%  bounce=0.20%  vol=2.0x  sl=0.30%
+  #5  WR=33.8%  PF=1.64  DD=15.0%  Trades=68
+      threshold=80  drop=0.40%  bounce=0.25%  vol=1.3x  sl=0.30%
+
+====================================================
+  CURVA DE CAPITAL POR SEMANA
+====================================================
+  Inicio:   $ 10,000.00
+  Semana  1: $ 10,275.63  (+275.63 USD | +2.8% total)
+  Semana  2: $ 11,328.45  (+1,052.82 USD | +13.3% total)
+  Semana  3: $ 13,409.15  (+2,080.70 USD | +34.1% total)
+  Semana  4: $ 13,934.42  (+525.27 USD | +39.3% total)
+  Semana  5: $ 13,520.55  (-413.87 USD | +35.2% total)
+  Semana  6: $ 12,987.79  (-532.76 USD | +29.9% total)
+  Semana  7: $ 12,857.91  (-129.88 USD | +28.6% total)
+  Semana  8: $ 12,476.02  (-381.89 USD | +24.8% total)
+  Semana  9: $ 12,850.30  (+374.28 USD | +28.5% total)
+
+====================================================
+  NOTAS
+====================================================
+  - CVD aproximado desde OHLCV (sin ticks individuales).
+  - Sin datos historicos de Funding Rate / Open Interest.
+  - Slippage y comisiones NO incluidos (~0.1% por operacion).
+  - Los resultados son indicativos, no garantizan rendimiento futuro.
+  - Minimo 50 trades para significancia estadistica.
+====================================================
