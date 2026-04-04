@@ -141,6 +141,7 @@ async def trading_loop() -> None:
     session_vol_mod = _try_import("session_volume")
     ml_mod          = _try_import("ml_model")
     dashboard_mod   = _try_import("dashboard")
+    macro_mod       = _try_import("macro_agent")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -150,6 +151,7 @@ async def trading_loop() -> None:
     onchain       = onchain_mod.OnChainEngine()         if onchain_mod     else None
     orderbook     = orderbook_mod.OrderBookEngine()     if orderbook_mod   else None
     correlation   = correlation_mod.CorrelationEngine() if correlation_mod else None
+    macro_agent   = macro_mod.MacroAgent()              if macro_mod       else None
     session_vol   = session_vol_mod.SessionVolumeTracker() if session_vol_mod else None
     ml_model      = ml_mod.MLModel()                   if ml_mod          else None
 
@@ -188,6 +190,8 @@ async def trading_loop() -> None:
         asyncio.create_task(arb_engine.run(), name="arb_engine")
     if dn_eng:
         asyncio.create_task(dn_eng.run(), name="delta_neutral")
+    if macro_agent:
+        asyncio.create_task(macro_agent.run(), name="macro_agent")
 
     _ready = True
 
@@ -198,6 +202,7 @@ async def trading_loop() -> None:
         onchain is not None,      orderbook is not None,
         correlation is not None,  session_vol is not None,
         ml_model is not None,     dashboard is not None,
+        macro_agent is not None,
     ])
     logger.info(f" Arbitraje:  {'ACTIVO (4 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
     strats_active = sum([mean_rev is not None, grid_eng is not None,
@@ -210,13 +215,15 @@ async def trading_loop() -> None:
     logger.info(f"  Delta Neutral:    {'ON' if dn_eng    else 'OFF'}")
 
     logger.info("=" * 60)
-    logger.info(" Whale Follower Bot -- Sprint 4")
-    logger.info(f" Pares:     {', '.join(config.TRADING_PAIRS)}")
-    logger.info(f" Threshold: {config.SIGNAL_SCORE_THRESHOLD} | High: {config.HIGH_CONFIDENCE_SCORE}")
-    logger.info(f" Capital:   ${config.PAPER_CAPITAL:,.0f} | Modo: {config.ALLOCATION_MODE}")
-    logger.info(f" Capas S4:  {active_layers}/10 activas")
-    logger.info(f" ML:        {'DISPONIBLE' if ml_model else 'NO DISPONIBLE'}")
-    logger.info(f" Dashboard: {'SI' if dashboard else 'NO'}")
+    logger.info(" Whale Follower Bot -- Sprint 6")
+    logger.info(f" Pares:        {', '.join(config.TRADING_PAIRS)}")
+    logger.info(f" Threshold:    {config.SIGNAL_SCORE_THRESHOLD} | High: {config.HIGH_CONFIDENCE_SCORE}")
+    capital_label = config.REAL_CAPITAL if config.PRODUCTION else config.PAPER_CAPITAL
+    logger.info(f" Capital:      ${capital_label:,.0f} | Produccion: {config.PRODUCTION}")
+    logger.info(f" Capas:        {active_layers}/11 activas")
+    logger.info(f" ML:           {'DISPONIBLE' if ml_model else 'NO DISPONIBLE'}")
+    logger.info(f" Macro agent:  {'ACTIVO (calendario+noticias)' if macro_agent else 'OFF'}")
+    logger.info(f" Dashboard:    {'SI' if dashboard else 'NO'}")
     logger.info("=" * 60)
 
     recent_signals: list = []
@@ -291,6 +298,15 @@ async def trading_loop() -> None:
             ext.news_blocked = blocked
             ext.news_reason  = reason
 
+        # Macro agent — pausa por evento económico (bloqueo temprano, ahorra cómputo)
+        if macro_agent:
+            macro_paused, macro_reason = macro_agent.is_paused()
+            if macro_paused:
+                logger.warning(
+                    f"[main] {signal.pair} BLOQUEADO por macro: {macro_reason}"
+                )
+                continue
+
         if onchain:
             oc = onchain.snapshot()
             ext.onchain_signal = oc.signal
@@ -325,7 +341,16 @@ async def trading_loop() -> None:
             ext           = ext,
         )
 
-        # 5b. Aplicar ML (ultimo filtro)
+        # 5b. Ajuste de sentimiento macro (noticias CryptoPanic)
+        if macro_agent:
+            macro_adj = macro_agent.sentiment_adjustment()
+            if macro_adj != 0:
+                new_score = max(0, new_score + macro_adj)
+                logger.info(
+                    f"[main] {signal.pair} macro adj={macro_adj:+d} → score={new_score}"
+                )
+
+        # 5c. Aplicar ML (ultimo filtro)
         if ml_model:
             features = {
                 "cvd_velocity_3s":     signal.cvd_metrics.velocity_3s,
