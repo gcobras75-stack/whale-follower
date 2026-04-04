@@ -42,6 +42,8 @@ from typing import Dict, List, Optional
 import aiohttp
 from loguru import logger
 
+import db_writer
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _CVD_VEL_3S_MIN    = 15.0    # BTC equivalente minimo en 3s
 _CVD_VEL_10S_MIN   = 40.0    # BTC en 10s
@@ -232,6 +234,7 @@ class MomentumScalingEngine:
             pair, size1, price, vel3, vel10, vel30, ob_ratio,
         )
         asyncio.create_task(self._alert_open(trade))
+        asyncio.create_task(db_writer.save_momentum_open(trade))
         asyncio.create_task(self._force_close_after(trade, _MAX_HOLD_SECS))
 
     def _try_pyramid(self, pair: str, price: float, vel3: float, accel: float) -> None:
@@ -312,6 +315,7 @@ class MomentumScalingEngine:
             trade.pair, trade.stage, exit_price, trade.pnl_usd, reason,
         )
         asyncio.create_task(self._alert_close(trade, reason))
+        asyncio.create_task(db_writer.save_momentum_close(trade, reason))
 
     async def _force_close_after(self, trade: MomentumTrade, secs: float) -> None:
         await asyncio.sleep(secs)

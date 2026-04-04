@@ -41,6 +41,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import aiohttp
 from loguru import logger
 
+import db_writer
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _OFI_THRESHOLD    = 0.65    # umbral para abrir posicion
 _OFI_EXIT         = 0.20    # cerrar si OFI revierte a este nivel
@@ -287,6 +289,7 @@ class OFIEngine:
             direction.upper(), pair, ofi, self._cvd_vel_10s, price, tp, sl,
         )
         asyncio.create_task(self._alert_open(trade))
+        asyncio.create_task(db_writer.save_ofi_open(trade))
         # Auto-cierre por timeout
         asyncio.create_task(self._timeout_close(trade))
 
@@ -341,6 +344,7 @@ class OFIEngine:
         logger.info("[ofi] CIERRE {} {} @ {:.4f} pnl={:+.4f} ({})",
                     trade.direction, trade.pair, exit_price, trade.pnl_usd, reason)
         asyncio.create_task(self._alert_close(trade, reason))
+        asyncio.create_task(db_writer.save_ofi_close(trade, reason))
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 

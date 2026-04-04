@@ -382,6 +382,8 @@ class BybitTestnetExecutor:
             loop = asyncio.get_running_loop()
             row = {
                 "signal_id":    signal_id,
+                "strategy":     "wyckoff",
+                "pair":         trade.pair,
                 "side":         trade.side,
                 "entry_price":  trade.entry_price,
                 "stop_loss":    trade.stop_loss,

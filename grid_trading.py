@@ -34,6 +34,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import aiohttp
 from loguru import logger
 
+import db_writer
+
 # ── Config por par ────────────────────────────────────────────────────────────
 _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
@@ -79,6 +81,7 @@ class GridLevel:
     size_usd:   float
     filled:     bool = False
     fill_ts:    float = 0.0
+    fill_price: float = 0.0   # precio real al que se compró
     pnl:        float = 0.0
 
 
@@ -269,12 +272,16 @@ class GridTradingEngine:
                 self._fill_buy(grid, level, price, pair)
 
     def _fill_buy(self, grid: GridState, level: GridLevel, price: float, pair: str) -> None:
-        level.filled  = True
-        level.fill_ts = time.time()
+        level.filled     = True
+        level.fill_ts    = time.time()
+        level.fill_price = price
 
         # Convertir nivel de compra en nivel de venta en el siguiente grid arriba
         sell_price = price * (1 + grid.spacing_pct)
-        sell_level = GridLevel(price=sell_price, side="sell", size_usd=level.size_usd)
+        sell_level = GridLevel(
+            price=sell_price, side="sell", size_usd=level.size_usd,
+            fill_price=price,   # guardar buy_price en el sell_level para el writer
+        )
         grid.levels.append(sell_level)
 
         logger.info("[grid] {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
@@ -291,6 +298,16 @@ class GridTradingEngine:
         logger.info("[grid] {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
                     grid.pair, price, pnl, grid.pnl_total)
         asyncio.create_task(self._alert_cycle(grid, price, pnl))
+        asyncio.create_task(db_writer.save_grid_cycle(
+            pair=grid.pair,
+            center=grid.center_price,
+            spacing_pct=grid.spacing_pct,
+            buy_price=level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
+            sell_price=price,
+            size_usd=level.size_usd,
+            pnl_usd=pnl,
+            production=self._production,
+        ))
 
     # ── ATR y Bollinger ───────────────────────────────────────────────────────
 

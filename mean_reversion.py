@@ -34,6 +34,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import aiohttp
 from loguru import logger
 
+import db_writer
+
 # ── Configuracion ─────────────────────────────────────────────────────────────
 _STOP_LOSS_PCT        = 0.0035   # 0.35% SL
 _TRAILING_TRIGGER_PCT = 0.006    # activar trailing a 0.6% ganancia
@@ -272,6 +274,7 @@ class MeanReversionEngine:
             tp_pct * 100, _STOP_LOSS_PCT * 100, ob_ratio,
         )
         asyncio.create_task(self._alert_open(trade))
+        asyncio.create_task(db_writer.save_mr_open(trade))
 
     def _add_tramo(self, trade: MRTrade, price: float, tramo_num: int) -> None:
         size = _BASE_SIZE_USD * _TRAMO_SIZES[tramo_num - 1]
@@ -330,6 +333,7 @@ class MeanReversionEngine:
             trade.pair, trade.trade_id[:8], exit_price, trade.pnl_usd, reason,
         )
         asyncio.create_task(self._alert_close(trade, reason))
+        asyncio.create_task(db_writer.save_mr_close(trade, reason))
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 

@@ -49,6 +49,8 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 from loguru import logger
 
+import db_writer
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _MIN_FUNDING_DIFF     = 0.005   # % diferencial minimo para abrir (cubre fees)
 _MIN_BASIS_SPREAD     = 0.008   # % basis spread minimo para abrir
@@ -290,6 +292,7 @@ class DeltaNeutralEngine:
             trade.long_exchange, trade.short_exchange, f.diff_pct,
         )
         await self._alert_opened(trade)
+        asyncio.create_task(db_writer.save_dn_open(trade))
 
     async def _open_basis(self, basis_pct: float) -> None:
         # Si basis > 0: perp > spot → short perp (bybit), long spot (okx)
@@ -313,12 +316,14 @@ class DeltaNeutralEngine:
             long_ex, short_ex, abs(basis_pct),
         )
         await self._alert_opened(trade)
+        asyncio.create_task(db_writer.save_dn_open(trade))
 
     def _close_trade(self, trade: DNTrade, reason: str) -> None:
         trade.status = "closed"
         logger.info("[delta_neutral] CERRADO {} {} pnl={:.4f} ({})",
                     trade.strategy, trade.trade_id[:8], trade.total_pnl, reason)
         asyncio.create_task(self._alert_closed(trade))
+        asyncio.create_task(db_writer.save_dn_close(trade))
 
     # ── Funding settlement ────────────────────────────────────────────────────
 
@@ -338,6 +343,9 @@ class DeltaNeutralEngine:
                 trade.add_payment(payment)
                 logger.info("[delta_neutral] Pago funding {} +${:.4f} (total: ${:.4f})",
                             trade.trade_id[:8], payment, trade.total_pnl)
+                asyncio.create_task(db_writer.save_dn_payment(
+                    trade.trade_id, trade.total_pnl, len(trade.payments)
+                ))
 
     # ── Rebalanceo ────────────────────────────────────────────────────────────
 
