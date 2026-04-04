@@ -20,13 +20,17 @@ Estrategia (maximizada):
   6. Confirmacion de volumen: el volumen de trades debe ser >1.5x media
   7. Anti-spoofing: ignorar si grandes ordenes aparecen/desaparecen en < 2s
 
-Senales:
-  OFI > +0.65 + CVD positivo + volumen elevado → LONG
-  OFI < -0.65 + CVD negativo + volumen elevado → SHORT (solo si habilitado)
+Senales (v2 — viable en real):
+  OFI > +0.80 + CVD positivo + volumen elevado + sesion overlap → LONG
+  OFI < -0.80 + CVD negativo + volumen elevado + sesion overlap → SHORT
 
-TP/SL: corto plazo (15-30s de duracion media):
-  TP: +0.25% (captura movimiento inmediato)
-  SL: -0.18% (muy tight — si OFI se equivoca, salir rapido)
+  Umbral subido a 0.80 (desde 0.65) para filtrar solo señales de alta calidad.
+  Solo durante overlap Londres+NY (13:00-17:00 UTC): mayor liquidez, menor
+  slippage, mejor ejecucion de TP al 0.40%.
+
+TP/SL: medio plazo (30-90s de duracion media):
+  TP: +0.40% (cubre fees 0.11% RT con margen positivo)
+  SL: -0.18% (RR = 2.22:1 — tight porque señal de alta calidad)
 """
 from __future__ import annotations
 
@@ -43,12 +47,25 @@ from loguru import logger
 
 import db_writer
 
+# ── Session filter ────────────────────────────────────────────────────────────
+
+def _in_overlap_session() -> bool:
+    """True durante el overlap Londres+NY (13:00-17:00 UTC).
+
+    Esta ventana concentra el mayor volumen de perpetuos en Bybit/OKX:
+    - Menor spread bid/ask → mejor ejecución del TP 0.40%
+    - Mayor liquidez → menos slippage en OFI longs/shorts
+    """
+    from datetime import datetime, timezone
+    hour = datetime.now(tz=timezone.utc).hour
+    return 13 <= hour < 17
+
 # ── Config ────────────────────────────────────────────────────────────────────
-_OFI_THRESHOLD    = 0.65    # umbral para abrir posicion
+_OFI_THRESHOLD    = 0.80    # subido de 0.65 → solo señales de alta calidad
 _OFI_EXIT         = 0.20    # cerrar si OFI revierte a este nivel
-_TP_PCT           = 0.0025  # 0.25% TP (rapido — OFI opera en segundos)
-_SL_PCT           = 0.0018  # 0.18% SL
-_MAX_HOLD_SECS    = 45      # cierre forzado a los 45s
+_TP_PCT           = 0.0040  # 0.40% TP — cubre fees 0.11% RT con EV positivo
+_SL_PCT           = 0.0018  # 0.18% SL → RR = 2.22:1
+_MAX_HOLD_SECS    = 90      # extendido de 45s → 90s para alcanzar TP 0.40%
 _VOLUME_MULT      = 1.5     # volumen debe ser >1.5x media
 _CVD_CONFIRM_SECS = 10      # CVD en los ultimos 10s debe coincidir
 _COOLDOWN_SECS    = 20      # cooldown entre senales
@@ -147,8 +164,10 @@ class OFIEngine:
         self._prices: Dict[str, float]      = {}
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[ofi] Iniciado en modo {} | threshold={} pares={}",
-                    mode, _OFI_THRESHOLD, _OFI_PAIRS)
+        logger.info(
+            "[ofi] Iniciado en modo {} | threshold={} tp={}% sl={}% sesion=13-17UTC pares={}",
+            mode, _OFI_THRESHOLD, _TP_PCT * 100, _SL_PCT * 100, _OFI_PAIRS,
+        )
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -235,6 +254,10 @@ class OFIEngine:
     def _evaluate(self, pair: str) -> None:
         now = time.time()
         if now - self._last_open < _COOLDOWN_SECS:
+            return
+
+        # Solo operar durante overlap Londres+NY (13:00-17:00 UTC)
+        if not _in_overlap_session():
             return
 
         open_count = sum(1 for t in self._trades if t.status == "open")
