@@ -56,6 +56,10 @@ TRADING_PAIRS: list[str] = [
 ALLOCATION_MODE:         str = os.getenv("ALLOCATION_MODE", "B")   # A | B | C
 CORRELATION_WINDOW_SECS: int = int(os.getenv("CORRELATION_WINDOW_SECS", "60"))
 
+# ── Dynamic leverage ─────────────────────────────────────────────────────────
+MAX_LEVERAGE:            int   = int(os.getenv("MAX_LEVERAGE",            "7"))
+MIN_TRADES_FOR_LEVERAGE: int   = int(os.getenv("MIN_TRADES_FOR_LEVERAGE", "20"))
+
 # ── Reconnection back-off ─────────────────────────────────────────────────────
 BACKOFF_BASE: float = 1.0
 BACKOFF_MAX:  float = 60.0

@@ -26,6 +26,7 @@ import aiohttp
 from loguru import logger
 
 import config
+from leverage_manager import LeverageManager
 
 
 @dataclass
@@ -76,6 +77,11 @@ class BybitTestnetExecutor:
         self._capital    = config.PAPER_CAPITAL
         self._trades: List[PaperTrade] = []
         self._enabled = bool(self._api_key and self._api_secret)
+        self._leverage_mgr = LeverageManager(
+            initial_capital = config.PAPER_CAPITAL,
+            min_trades      = config.MIN_TRADES_FOR_LEVERAGE,
+            max_leverage    = config.MAX_LEVERAGE,
+        )
 
         if not self._enabled:
             logger.warning(
@@ -111,15 +117,25 @@ class BybitTestnetExecutor:
         if not self._enabled:
             return None
 
+        # Verificar pausa por racha perdedora
+        if self._leverage_mgr.is_paused():
+            rem = self._leverage_mgr.pause_remaining_secs()
+            logger.info("[executor] Trading pausado por racha perdedora. Reanuda en {}s.", rem)
+            return None
+
         # Limitar trades abiertos simultáneos (máx 3)
         open_trades = [t for t in self._trades if t.status in ("open", "partial")]
         if len(open_trades) >= 3:
             logger.info("[executor] Maximo de trades abiertos alcanzado (3). Skip.")
             return None
 
-        # Tamaño de posición
+        # Tamaño de posición con apalancamiento dinámico
+        leverage = self._leverage_mgr.get_leverage()
         if size_usd is None:
-            size_usd = self._capital * 0.01
+            base_usd = self._capital * 0.01          # 1% de capital = margen
+            size_usd = base_usd * leverage            # posicion efectiva
+        if leverage > 1:
+            logger.info("[executor] Apalancamiento activo: {}x (size_usd=${:.0f})", leverage, size_usd)
         size_contracts = round(size_usd / entry_price, 3)
         size_contracts = max(size_contracts, 0.001)
 
@@ -163,6 +179,21 @@ class BybitTestnetExecutor:
             if trade.pair != pair:
                 continue
             await self._manage_trade(trade, current_price)
+
+    def leverage_status(self) -> Dict:
+        """Resumen del estado de apalancamiento para /status y healthcheck."""
+        lm = self._leverage_mgr
+        total = len(lm._outcomes)
+        return {
+            "leverage":     lm.get_leverage(),
+            "win_rate_pct": round(lm._win_rate_pct(), 1),
+            "trades_total": total,
+            "min_trades":   lm._min_trades,
+            "drawdown_pct": round(lm._drawdown_pct() * 100, 2),
+            "paused":       lm.is_paused(),
+            "pause_secs":   lm.pause_remaining_secs(),
+            "level_cap":    lm._level_cap,
+        }
 
     def active_trades_summary(self) -> List[Dict]:
         """Resumen de trades activos para /trades comando de Telegram."""
@@ -251,8 +282,14 @@ class BybitTestnetExecutor:
         logger.info(
             f"[executor] Trade {trade.trade_id[:8]} cerrado ({reason}) "
             f"en {price:.2f} | P&L: ${trade.pnl_usd:.2f} ({trade.pnl_pct:.2f}%) "
-            f"| duración: {duration}s"
+            f"| duracion: {duration}s"
         )
+
+        # Notificar al gestor de apalancamiento
+        won = reason == "take_profit" or (reason == "trailing_stop" and trade.pnl_usd > 0)
+        self._leverage_mgr.record_trade(won=won, pnl_usd=trade.pnl_usd)
+        logger.info("[executor] {}", self._leverage_mgr.summary())
+
         await self._update_supabase_close(trade, duration)
 
     # ── Bybit Testnet API ─────────────────────────────────────────────────────

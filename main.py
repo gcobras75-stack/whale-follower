@@ -29,12 +29,13 @@ _start_time   = time.time()
 _signal_count = 0
 _ready        = False
 _error_msg    = ""
+_executor_ref = None   # set once trading_loop starts, for healthcheck
 
 
 # ── Healthcheck HTTP ─────────────────────────────────────────────────────────
 async def health_handler(request: web.Request) -> web.Response:
     uptime = int(time.time() - _start_time)
-    return web.json_response({
+    payload = {
         "status":          "ok",
         "uptime_secs":     uptime,
         "signals_emitted": _signal_count,
@@ -46,7 +47,10 @@ async def health_handler(request: web.Request) -> web.Response:
             "okx":     os.getenv("ENABLE_OKX",     "true").lower() == "true",
         },
         "error": _error_msg or None,
-    })
+    }
+    if _executor_ref is not None:
+        payload["leverage"] = _executor_ref.leverage_status()
+    return web.json_response(payload)
 
 
 async def start_healthcheck() -> web.AppRunner:
@@ -82,6 +86,7 @@ async def trading_loop() -> None:
             await asyncio.sleep(60)
 
     # ── Inicializar motores ────────────────────────────────────────────────────
+    global _executor_ref
     aggregator = Aggregator()
     context    = ContextEngine()
     monitor    = MultiPairMonitor()
@@ -89,6 +94,7 @@ async def trading_loop() -> None:
     allocator  = CapitalAllocator()
     risk_mgr   = RiskManager(config.PAPER_CAPITAL)
     executor   = BybitTestnetExecutor()
+    _executor_ref = executor
 
     asyncio.create_task(context.run(), name="context_engine")
     asyncio.create_task(
