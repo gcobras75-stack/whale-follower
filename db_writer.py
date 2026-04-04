@@ -407,3 +407,58 @@ async def save_dn_payment(trade_id: str, new_total_pnl: float, payments_count: i
         .eq("trade_id", trade_id)
         .execute()
     )
+
+
+# ── Range Trader ──────────────────────────────────────────────────────────────
+
+async def save_range_open(trade) -> None:
+    """Insert range_trades on open."""
+    row = {
+        "trade_id":    trade.trade_id,
+        "pair":        trade.pair,
+        "side":        trade.side,
+        "entry_price": trade.entry_price,
+        "tp":          trade.tp,
+        "sl":          trade.sl,
+        "size_usd":    trade.size_usd,
+        "status":      "open",
+        "production":  trade.production,
+        "open_at":     _ts(trade.open_ts),
+    }
+    await _run(
+        lambda: _client().table("range_trades").insert(row).execute()
+    )
+    await _save_paper_open(
+        trade_id    = trade.trade_id,
+        pair        = trade.pair,
+        entry_price = trade.entry_price,
+        stop_loss   = trade.sl,
+        take_profit = trade.tp,
+        size_usd    = trade.size_usd,
+        strategy    = "range",
+        production  = trade.production,
+    )
+
+
+async def save_range_close(trade, reason: str, exit_price: float, pnl_net: float) -> None:
+    """Update range_trades on close."""
+    upd = {
+        "exit_price": exit_price,
+        "pnl_usd":    round(pnl_net, 6),
+        "close_reason": reason,
+        "status":     "closed",
+        "closed_at":  _now_ts(),
+    }
+    await _run(
+        lambda: _client()
+        .table("range_trades")
+        .update(upd)
+        .eq("trade_id", trade.trade_id)
+        .execute()
+    )
+    await _save_paper_close(
+        trade_id   = trade.trade_id,
+        exit_price = exit_price,
+        pnl_usd    = pnl_net,
+        reason     = reason,
+    )

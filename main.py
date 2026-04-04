@@ -142,6 +142,8 @@ async def trading_loop() -> None:
     ml_mod          = _try_import("ml_model")
     dashboard_mod   = _try_import("dashboard")
     macro_mod       = _try_import("macro_agent")
+    regime_mod      = _try_import("market_regime")
+    range_mod       = _try_import("range_trader")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -152,6 +154,7 @@ async def trading_loop() -> None:
     orderbook     = orderbook_mod.OrderBookEngine()     if orderbook_mod   else None
     correlation   = correlation_mod.CorrelationEngine() if correlation_mod else None
     macro_agent   = macro_mod.MacroAgent()              if macro_mod       else None
+    regime_det    = regime_mod.MarketRegimeDetector()   if regime_mod      else None
     session_vol   = session_vol_mod.SessionVolumeTracker() if session_vol_mod else None
     ml_model      = ml_mod.MLModel()                   if ml_mod          else None
 
@@ -164,6 +167,9 @@ async def trading_loop() -> None:
     risk_mgr   = RiskManager(config.PAPER_CAPITAL)
     executor   = BybitTestnetExecutor()
     _executor_ref = executor
+
+    range_trader = (range_mod.RangeTrader(executor, regime_det, production=prod)
+                    if range_mod and regime_det else None)
 
     dashboard  = (dashboard_mod.DashboardReporter(executor)
                   if dashboard_mod else None)
@@ -202,7 +208,8 @@ async def trading_loop() -> None:
         onchain is not None,      orderbook is not None,
         correlation is not None,  session_vol is not None,
         ml_model is not None,     dashboard is not None,
-        macro_agent is not None,
+        macro_agent is not None,  regime_det is not None,
+        range_trader is not None,
     ])
     logger.info(f" Arbitraje:  {'ACTIVO (4 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
     strats_active = sum([mean_rev is not None, grid_eng is not None,
@@ -220,9 +227,11 @@ async def trading_loop() -> None:
     logger.info(f" Threshold:    {config.SIGNAL_SCORE_THRESHOLD} | High: {config.HIGH_CONFIDENCE_SCORE}")
     capital_label = config.REAL_CAPITAL if config.PRODUCTION else config.PAPER_CAPITAL
     logger.info(f" Capital:      ${capital_label:,.0f} | Produccion: {config.PRODUCTION}")
-    logger.info(f" Capas:        {active_layers}/11 activas")
+    logger.info(f" Capas:        {active_layers}/13 activas")
     logger.info(f" ML:           {'DISPONIBLE' if ml_model else 'NO DISPONIBLE'}")
-    logger.info(f" Macro agent:  {'ACTIVO (calendario+noticias)' if macro_agent else 'OFF'}")
+    logger.info(f" Macro agent:  {'ACTIVO (calendario+Reddit+X)' if macro_agent else 'OFF'}")
+    logger.info(f" Regime det:   {'ACTIVO (threshold dinámico)' if regime_det else 'OFF'}")
+    logger.info(f" Range trader: {'ACTIVO (RSI+BB lateral)' if range_trader else 'OFF'}")
     logger.info(f" Dashboard:    {'SI' if dashboard else 'NO'}")
     logger.info("=" * 60)
 
@@ -265,6 +274,13 @@ async def trading_loop() -> None:
                 ofi_eng.on_cvd_snapshot(snap_cvd.weighted_velocity)
         if dn_eng:
             dn_eng.on_perp_price(trade.exchange, trade.price)
+
+        # Regime detector + Range trader (operan en cada tick, sin spring)
+        if regime_det:
+            regime_det.on_price(trade.pair, trade.price)
+        if range_trader:
+            await range_trader.on_price(trade.pair, trade.price)
+
 
         # 3. Procesar spring detection
         ctx_snapshot = context.snapshot()
@@ -385,13 +401,24 @@ async def trading_loop() -> None:
                 dashboard.record_signal(new_score, operated=False, blocked_by_ml=False)
             continue
 
-        if new_score < config.SIGNAL_SCORE_THRESHOLD:
+        # Threshold dinámico ajustado por régimen de mercado
+        regime_adj = regime_det.threshold_adjustment(signal.pair) if regime_det else 0
+        effective_threshold = config.SIGNAL_SCORE_THRESHOLD + regime_adj
+        if regime_adj != 0:
+            logger.debug(
+                f"[main] {signal.pair} regime_adj={regime_adj:+d} "
+                f"threshold={config.SIGNAL_SCORE_THRESHOLD}→{effective_threshold}"
+            )
+
+        if new_score < effective_threshold:
             continue
 
         _signal_count += 1
+        regime_label = regime_det.regime(signal.pair).value if regime_det else "UNKNOWN"
         logger.info(
             f"[main] *** SIGNAL #{_signal_count} {signal.pair} "
             f"score={new_score} entry={signal.entry_price:.2f} "
+            f"regime={regime_label} thresh={effective_threshold} "
             f"fg={ext.fear_greed_value} ml={ext.ml_probability:.2f} ***"
         )
 
