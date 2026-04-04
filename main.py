@@ -33,6 +33,7 @@ _signal_count = 0
 _ready        = False
 _error_msg    = ""
 _executor_ref = None   # para healthcheck
+_arb_ref      = None   # para healthcheck arb
 
 
 # ── Healthcheck HTTP ─────────────────────────────────────────────────────────
@@ -53,6 +54,15 @@ async def health_handler(request: web.Request) -> web.Response:
     }
     if _executor_ref is not None:
         payload["leverage"] = _executor_ref.leverage_status()
+    if _arb_ref is not None:
+        s = _arb_ref.summary()
+        payload["arb"] = {
+            "total_pnl_usd":    s.total_pnl_usd,
+            "funding_pnl":      s.funding_pnl_usd,
+            "cross_opps_1h":    s.cross_opps_1h,
+            "lead_triggers_1h": s.lead_triggers_1h,
+            "tri_spread_pct":   s.tri_spread_pct,
+        }
     return web.json_response(payload)
 
 
@@ -82,7 +92,7 @@ def _try_import(module_name: str):
 
 # ── Trading loop ─────────────────────────────────────────────────────────────
 async def trading_loop() -> None:
-    global _signal_count, _ready, _error_msg, _executor_ref
+    global _signal_count, _ready, _error_msg, _executor_ref, _arb_ref
 
     try:
         import config
@@ -100,6 +110,11 @@ async def trading_loop() -> None:
         logger.error(f"[main] Import error: {exc}")
         while True:
             await asyncio.sleep(60)
+
+    # ── Arbitraje (tolerante a fallos) ───────────────────────────────────────
+    arb_mod = _try_import("arb_engine")
+    arb_engine = arb_mod.ArbEngine(production=False) if arb_mod else None
+    _arb_ref = arb_engine
 
     # ── Modulos Sprint 4 (tolerantes a fallos) ────────────────────────────────
     cvd_comb_mod    = _try_import("cvd_combined")
@@ -155,6 +170,8 @@ async def trading_loop() -> None:
         asyncio.create_task(session_vol.run(), name="session_volume")
     if dashboard:
         asyncio.create_task(dashboard.run(), name="dashboard")
+    if arb_engine:
+        asyncio.create_task(arb_engine.run(), name="arb_engine")
 
     _ready = True
 
@@ -166,6 +183,7 @@ async def trading_loop() -> None:
         correlation is not None,  session_vol is not None,
         ml_model is not None,     dashboard is not None,
     ])
+    logger.info(f" Arbitraje: {'ACTIVO (4 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
 
     logger.info("=" * 60)
     logger.info(" Whale Follower Bot -- Sprint 4")
@@ -193,6 +211,8 @@ async def trading_loop() -> None:
             correlation.update(trade)
         if session_vol:
             session_vol.record_volume(trade.quantity, trade.timestamp)
+        if arb_engine:
+            arb_engine.on_trade(trade.exchange, trade.pair, trade.price, trade.timestamp * 1000)
 
         # 3. Procesar spring detection
         ctx_snapshot = context.snapshot()
@@ -304,6 +324,10 @@ async def trading_loop() -> None:
             f"score={new_score} entry={signal.entry_price:.2f} "
             f"fg={ext.fear_greed_value} ml={ext.ml_probability:.2f} ***"
         )
+
+        # Activar lead-lag arb en BTC spring
+        if signal.pair == "BTCUSDT" and arb_engine:
+            arb_engine.on_btc_spring(signal.entry_price)
 
         # 6. Buffer de señales recientes
         now = time.time()
