@@ -174,6 +174,10 @@ async def _send_telegram(text: str) -> None:
         logger.error(f"[telegram] Error: {exc}")
 
 
+async def send_system_message(text: str) -> None:
+    await _send_telegram(text)
+
+
 async def _save_supabase(
     score: int, bd: ScoreBreakdown, spring_data: Dict,
     exchange: str, entry: float, sl: float, tp: float,
@@ -238,12 +242,19 @@ async def dispatch_multi(
         "ts": time.time(),
     }
 
+    score_min = config.SIGNAL_SCORE_THRESHOLD
+    try:
+        from learning_manager import get_threshold
+        score_min = int(get_threshold())
+    except Exception:
+        pass
+
     score_lines = []
     for pair, score in sorted(all_scores.items(), key=lambda x: -x[1]):
         is_trading = allocation and any(t.pair == pair for t in allocation.trades)
         if is_trading:
             tag = "OPERANDO"
-        elif score >= config.SIGNAL_SCORE_THRESHOLD:
+        elif score >= score_min:
             tag = "En espera"
         else:
             tag = "Sin senal"
@@ -269,7 +280,7 @@ async def dispatch_multi(
         + ("\n".join(capital_lines) if capital_lines else "  (ninguno)") + "\n"
         "------------------------------\n"
         f"Modo: {mode_label}\n"
-        f"Score min: {config.SIGNAL_SCORE_THRESHOLD} | RR 1:{config.RISK_REWARD:.0f}\n"
+        f"Score min: {score_min} | RR 1:{config.RISK_REWARD:.0f}\n"
         "Solo analisis. No es consejo financiero."
     )
 
@@ -343,6 +354,14 @@ async def _reply(text: str) -> None:
 async def _cmd_status() -> None:
     uptime = int(time.time() - _stats["start_time"])
     h, m   = divmod(uptime // 60, 60)
+
+    score_min = config.SIGNAL_SCORE_THRESHOLD
+    try:
+        from learning_manager import get_manager
+        score_min = int(get_manager().get_threshold())
+    except Exception:
+        pass
+
     await _reply(
         f"Estado del bot\n"
         f"--------------\n"
@@ -350,7 +369,7 @@ async def _cmd_status() -> None:
         f"Uptime: {h}h {m}m\n"
         f"Señales detectadas: {_stats['signals_total']}\n"
         f"Alta confianza (80+): {_stats['signals_high']}\n"
-        f"Score minimo: {config.SIGNAL_SCORE_THRESHOLD}\n"
+        f"Score minimo: {score_min}\n"
         f"Exchanges: Binance/Bybit/OKX activos"
     )
 

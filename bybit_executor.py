@@ -102,6 +102,13 @@ class BybitTestnetExecutor:
         self._daily_reset_ts: float = time.time()
         self._trade_history: List[tuple] = []   # (won: bool, pnl_usd: float) para Kelly
 
+        self._ml_model = None
+        try:
+            from ml_model import MLModel
+            self._ml_model = MLModel()
+        except Exception as exc:
+            logger.warning("[executor] MLModel init error: {}", exc)
+
         # En producción: leverage forzado a 1x, sin apalancamiento dinámico
         max_lev = 1 if self._production else config.MAX_LEVERAGE
         self._leverage_mgr = LeverageManager(
@@ -373,14 +380,19 @@ class BybitTestnetExecutor:
         logger.info("[executor] {}", self._leverage_mgr.summary())
 
         # Notificar al modelo ML para aprendizaje continuo
-        if trade.signal_features:
+        if trade.signal_features and self._ml_model is not None:
             try:
-                from ml_model import MLModel
-                ml = MLModel()
-                ml.record_outcome(trade.signal_features, won)
+                self._ml_model.record_outcome(trade.signal_features, won)
                 logger.debug("[executor] ML outcome registrado won={} trade={}", won, trade.trade_id[:8])
             except Exception as exc:
                 logger.warning("[executor] ML record_outcome error: {}", exc)
+
+        # Learning mode manager: auto-ajustar threshold y persistir learning_history
+        try:
+            from learning_manager import get_manager
+            get_manager().record_trade_close(won=won, ml_accuracy=None)
+        except Exception as exc:
+            logger.warning("[executor] learning_manager record_trade_close error: {}", exc)
 
         await self._update_supabase_close(trade, duration)
 

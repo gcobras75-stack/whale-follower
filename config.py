@@ -20,7 +20,7 @@ PORT: int = int(os.getenv("PORT", "8080"))
 
 # ── Trading parameters ────────────────────────────────────────────────────────
 TRADING_PAIR             = os.getenv("TRADING_PAIR", "BTC/USDT")
-SIGNAL_SCORE_THRESHOLD:  int   = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "75"))  # subio de 65 -> 75
+SIGNAL_SCORE_THRESHOLD:  int   = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "65"))  # learning default
 HIGH_CONFIDENCE_SCORE:   int   = int(os.getenv("HIGH_CONFIDENCE_SCORE",  "80"))
 
 # ── Exchange enable flags ─────────────────────────────────────────────────────

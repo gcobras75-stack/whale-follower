@@ -205,6 +205,17 @@ async def trading_loop() -> None:
 
     _ready = True
 
+    try:
+        from learning_manager import get_manager
+    except Exception:
+        get_manager = None
+
+    if get_manager:
+        try:
+            get_manager().ensure_announced()
+        except Exception as exc:
+            logger.warning("[main] learning mode announce failed: {}", exc)
+
     # ── Banner ────────────────────────────────────────────────────────────────
     active_layers = sum([
         cvd_combined is not None, liq_map is not None,
@@ -415,13 +426,30 @@ async def trading_loop() -> None:
                 dashboard.record_signal(new_score, operated=False, blocked_by_ml=False)
             continue
 
+        signal_id_for_signal = str(uuid.uuid4())
+        if ml_model and features:
+            try:
+                from db_writer import save_signal_features
+                asyncio.create_task(
+                    save_signal_features(
+                        signal_id=signal_id_for_signal,
+                        pair=signal.pair,
+                        signal_score=int(new_score),
+                        features=features,
+                        timestamp=time.time(),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("[main] could not save signal features: {}", exc)
+
         # Threshold dinámico ajustado por régimen de mercado
         regime_adj = regime_det.threshold_adjustment(signal.pair) if regime_det else 0
-        effective_threshold = config.SIGNAL_SCORE_THRESHOLD + regime_adj
+        base_threshold = get_manager().get_threshold() if get_manager else config.SIGNAL_SCORE_THRESHOLD
+        effective_threshold = int(base_threshold) + regime_adj
         if regime_adj != 0:
             logger.debug(
                 f"[main] {signal.pair} regime_adj={regime_adj:+d} "
-                f"threshold={config.SIGNAL_SCORE_THRESHOLD}→{effective_threshold}"
+                f"threshold={base_threshold}→{effective_threshold}"
             )
 
         if new_score < effective_threshold:
@@ -501,12 +529,14 @@ async def trading_loop() -> None:
 
         # 9. Ejecutar trades (features guardadas para ML record_outcome al cierre)
         for alloc in allocation.trades:
+            signal_id = signal_id_for_signal if alloc.pair == signal.pair else str(uuid.uuid4())
+
             paper = await executor.open_trade(
                 signal_score     = alloc.signal_score,
                 entry_price      = alloc.entry_price,
                 stop_loss        = alloc.stop_loss,
                 take_profit      = alloc.take_profit,
-                signal_id        = str(uuid.uuid4()),
+                signal_id        = signal_id,
                 pair             = alloc.pair,
                 size_usd         = alloc.size_usd,
                 signal_features  = features if ml_model else None,

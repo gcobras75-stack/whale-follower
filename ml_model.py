@@ -29,7 +29,9 @@ except ImportError:
 
 _MODEL_PATH = Path(__file__).parent / "models" / "xgboost_model.pkl"
 _BLOCK_THRESHOLD = 0.65
-_RETRAIN_EVERY = 20
+_RETRAIN_EVERY = 10
+_RECENT_WINDOW = 50
+_RECENT_WEIGHT = 3
 
 _FEATURE_KEYS = [
     "cvd_velocity_3s",
@@ -173,7 +175,7 @@ class MLModel:
 
     def record_outcome(self, features: Dict[str, float], won: bool) -> None:
         """
-        Record a real trade outcome and retrain when 20 new samples accumulate.
+        Record a real trade outcome and retrain when 10 new samples accumulate.
         """
         if not _XGBOOST_AVAILABLE:
             return
@@ -201,9 +203,15 @@ class MLModel:
             "[ml_model] Retraining with {} warm-start + {} new samples",
             len(self._warmstart_X), len(self._new_samples),
         )
-        all_X = list(self._warmstart_X) + [s[0] for s in self._new_samples]
-        all_y = list(self._warmstart_y) + [s[1] for s in self._new_samples]
-        self._fit(all_X, all_y)
+        base_X = list(self._warmstart_X) + [s[0] for s in self._new_samples]
+        base_y = list(self._warmstart_y) + [s[1] for s in self._new_samples]
+
+        recent = self._new_samples[-_RECENT_WINDOW:]
+        if recent:
+            base_X += [s[0] for s in recent] * (_RECENT_WEIGHT - 1)
+            base_y += [s[1] for s in recent] * (_RECENT_WEIGHT - 1)
+
+        self._fit(base_X, base_y)
         self._save_model()
         self._new_samples.clear()
 

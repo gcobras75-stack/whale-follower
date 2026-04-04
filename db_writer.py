@@ -47,6 +47,42 @@ async def _run(fn) -> Optional[Any]:
         return None
 
 
+# ── Learning mode tables ─────────────────────────────────────────────────────
+
+async def save_learning_history(
+    trade_number: int,
+    score_threshold_at_time: int,
+    win_rate_at_time: float,
+    ml_accuracy: Optional[float],
+    timestamp: float,
+) -> None:
+    row = {
+        "trade_number":            int(trade_number),
+        "score_threshold_at_time": int(score_threshold_at_time),
+        "win_rate_at_time":        float(win_rate_at_time),
+        "ml_accuracy":             float(ml_accuracy) if ml_accuracy is not None else None,
+        "timestamp":               _ts(timestamp),
+    }
+    await _run(lambda: _client().table("learning_history").insert(row).execute())
+
+
+async def save_signal_features(
+    signal_id: str,
+    pair: str,
+    signal_score: int,
+    features: Dict[str, Any],
+    timestamp: float,
+) -> None:
+    row = {
+        "signal_id":    signal_id,
+        "pair":         pair,
+        "signal_score": int(signal_score),
+        "features":     features,
+        "timestamp":    _ts(timestamp),
+    }
+    await _run(lambda: _client().table("signal_features").insert(row).execute())
+
+
 # ── Unified paper_trades row ──────────────────────────────────────────────────
 
 async def _save_paper_open(
