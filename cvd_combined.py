@@ -28,9 +28,9 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 EXCHANGE_WEIGHTS: dict[str, float] = {
-    "binance": 0.40,
-    "bybit": 0.35,
-    "okx": 0.25,
+    "kraken": 0.40,   # reemplaza Binance — Kraken no geo-bloquea Railway
+    "bybit":  0.35,
+    "okx":    0.25,
 }
 WINDOW_30S: float = 30.0
 WINDOW_10S: float = 10.0

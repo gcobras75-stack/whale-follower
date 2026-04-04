@@ -1,6 +1,7 @@
 """
 aggregator.py — Whale Follower Bot
-Simultaneous WebSocket connections to Binance, Bybit, OKX.
+Simultaneous WebSocket connections to Kraken, Bybit, OKX.
+Kraken reemplaza Binance (geo-bloqueado en Railway, HTTP 451).
 Normalizes trades, computes CVD + CVD velocity, detects stop cascades.
 """
 from __future__ import annotations
@@ -10,6 +11,7 @@ import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Callable, Deque, Dict, List
 
 import websockets
@@ -124,10 +126,11 @@ class Aggregator:
 
     def _launch_exchange_tasks(self) -> List[asyncio.Task]:
         tasks = []
-        if config.ENABLE_BINANCE:
+        # Binance geo-bloquea Railway (HTTP 451) — reemplazado por Kraken
+        if config.ENABLE_KRAKEN:
             tasks.append(asyncio.create_task(
-                self._connect_with_backoff("binance", self._binance_handler),
-                name="binance"
+                self._connect_with_backoff("kraken", self._kraken_handler),
+                name="kraken"
             ))
         if config.ENABLE_BYBIT:
             tasks.append(asyncio.create_task(
@@ -174,33 +177,53 @@ class Aggregator:
         base = pair.replace("USDT", "")
         return f"{base}-USDT"
 
-    # ── Binance ───────────────────────────────────────────────────────────────
-    # Combined stream: wss://stream.binance.com:9443/stream?streams=s1/s2/...
-    # Each message: {"stream":"btcusdt@aggtrade","data":{p,q,m,T,...}}
+    # ── Kraken ────────────────────────────────────────────────────────────────
+    # Kraken WS v2: wss://ws.kraken.com/v2
+    # Subscribe: {"method":"subscribe","params":{"channel":"trade","symbol":["BTC/USD","ETH/USD"]}}
+    # Message: {"channel":"trade","type":"update","data":[{"symbol":"BTC/USD","side":"buy","price":65000,"qty":0.1,"timestamp":"..."}]}
+    # Nota: Kraken usa USD (no USDT) — precio equivalente para CVD
 
-    async def _binance_handler(self) -> None:
-        streams = "/".join(self._binance_stream_name(p) for p in config.TRADING_PAIRS)
-        url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+    @staticmethod
+    def _kraken_symbol(pair: str) -> str:
+        """BTCUSDT → BTC/USD  |  ETHUSDT → ETH/USD  |  SOLUSDT → SOL/USD"""
+        base = pair.replace("USDT", "").replace("BUSD", "")
+        return f"{base}/USD"
+
+    @staticmethod
+    def _kraken_to_pair(symbol: str) -> str:
+        """BTC/USD → BTCUSDT"""
+        base = symbol.split("/")[0]
+        return f"{base}USDT"
+
+    async def _kraken_handler(self) -> None:
+        url = "wss://ws.kraken.com/v2"
+        symbols = [self._kraken_symbol(p) for p in config.TRADING_PAIRS]
+        sub_msg = json.dumps({
+            "method": "subscribe",
+            "params": {"channel": "trade", "symbol": symbols},
+        })
         async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
-            logger.success(f"[binance] Connected ({len(config.TRADING_PAIRS)} pairs).")
+            await ws.send(sub_msg)
+            logger.success(f"[kraken] Connected ({len(symbols)} pairs).")
             async for raw in ws:
                 msg = json.loads(raw)
-                data = msg.get("data", {})
-                if data.get("e") != "aggTrade":
+                if msg.get("channel") != "trade" or msg.get("type") not in ("update", "snapshot"):
                     continue
-                # stream name "ethusdt@aggtrade" → "ETHUSDT"
-                stream: str = msg.get("stream", "btcusdt@aggtrade")
-                pair = stream.split("@")[0].upper()
-                side = "sell" if data["m"] else "buy"
-                trade = Trade(
-                    exchange="binance",
-                    price=float(data["p"]),
-                    quantity=float(data["q"]),
-                    side=side,
-                    timestamp=data["T"] / 1000.0,
-                    pair=pair,
-                )
-                await self._enqueue(trade)
+                for t in msg.get("data", []):
+                    pair = self._kraken_to_pair(t.get("symbol", "BTC/USD"))
+                    trade = Trade(
+                        exchange="kraken",
+                        price=float(t["price"]),
+                        quantity=float(t["qty"]),
+                        side=t["side"],          # "buy" | "sell"
+                        # Kraken timestamp es ISO string "2024-01-01T00:00:00.000000Z"
+                        timestamp=datetime.fromisoformat(
+                            t["timestamp"].replace("Z", "+00:00")
+                        ).timestamp() if isinstance(t.get("timestamp"), str)
+                        else float(t.get("timestamp", time.time())),
+                        pair=pair,
+                    )
+                    await self._enqueue(trade)
 
     # ── Bybit ─────────────────────────────────────────────────────────────────
     # Subscribe all pairs in one message: args=["publicTrade.BTCUSDT",...]

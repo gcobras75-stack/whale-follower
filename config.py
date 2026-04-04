@@ -24,9 +24,11 @@ SIGNAL_SCORE_THRESHOLD:  int   = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "75")) 
 HIGH_CONFIDENCE_SCORE:   int   = int(os.getenv("HIGH_CONFIDENCE_SCORE",  "80"))
 
 # ── Exchange enable flags ─────────────────────────────────────────────────────
-ENABLE_BINANCE: bool = os.getenv("ENABLE_BINANCE", "true").lower() == "true"
+# Binance geo-bloquea Railway (HTTP 451) — usar Kraken como tercera fuente
+ENABLE_KRAKEN:  bool = os.getenv("ENABLE_KRAKEN",  "true").lower() == "true"
 ENABLE_BYBIT:   bool = os.getenv("ENABLE_BYBIT",   "true").lower() == "true"
 ENABLE_OKX:     bool = os.getenv("ENABLE_OKX",     "true").lower() == "true"
+ENABLE_BINANCE: bool = os.getenv("ENABLE_BINANCE", "false").lower() == "true"  # desactivado
 
 # ── Spring detection thresholds ───────────────────────────────────────────────
 SPRING_DROP_PCT:   float = float(os.getenv("SPRING_DROP_PCT",   "0.003"))
