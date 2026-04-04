@@ -20,7 +20,7 @@ PORT: int = int(os.getenv("PORT", "8080"))
 
 # ── Trading parameters ────────────────────────────────────────────────────────
 TRADING_PAIR             = os.getenv("TRADING_PAIR", "BTC/USDT")
-SIGNAL_SCORE_THRESHOLD:  int   = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "65"))
+SIGNAL_SCORE_THRESHOLD:  int   = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "75"))  # subio de 65 -> 75
 HIGH_CONFIDENCE_SCORE:   int   = int(os.getenv("HIGH_CONFIDENCE_SCORE",  "80"))
 
 # ── Exchange enable flags ─────────────────────────────────────────────────────
@@ -59,6 +59,11 @@ CORRELATION_WINDOW_SECS: int = int(os.getenv("CORRELATION_WINDOW_SECS", "60"))
 # ── Dynamic leverage ─────────────────────────────────────────────────────────
 MAX_LEVERAGE:            int   = int(os.getenv("MAX_LEVERAGE",            "7"))
 MIN_TRADES_FOR_LEVERAGE: int   = int(os.getenv("MIN_TRADES_FOR_LEVERAGE", "20"))
+
+# ── Sprint 4 — Extended layers ────────────────────────────────────────────────
+NEWS_API_KEY:       str   = os.getenv("NEWS_API_KEY",        "")
+WHALE_ALERT_KEY:    str   = os.getenv("WHALE_ALERT_KEY",     "")
+ML_BLOCK_THRESHOLD: float = float(os.getenv("ML_BLOCK_THRESHOLD", "0.65"))
 
 # ── Reconnection back-off ─────────────────────────────────────────────────────
 BACKOFF_BASE: float = 1.0
