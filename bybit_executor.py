@@ -377,9 +377,11 @@ class BybitTestnetExecutor:
 
     # ── Bybit Testnet API ─────────────────────────────────────────────────────
 
-    def _sign(self, params: str, timestamp: int) -> str:
-        """Genera firma HMAC-SHA256 para Bybit v5."""
-        payload = f"{timestamp}{self._api_key}5000{params}"
+    def _sign(self, body_str: str, timestamp: int) -> str:
+        """Genera firma HMAC-SHA256 para Bybit v5 POST.
+        Formato: timestamp + api_key + recv_window + body
+        """
+        payload = f"{timestamp}{self._api_key}5000{body_str}"
         return hmac.new(
             self._api_secret.encode("utf-8"),
             payload.encode("utf-8"),
@@ -393,27 +395,28 @@ class BybitTestnetExecutor:
 
         ts = int(time.time() * 1000)
         body = {
-            "category":   "linear",
-            "symbol":     "BTCUSDT",
-            "side":       trade.side,
-            "orderType":  "Market",
-            "qty":        str(trade.size_contracts),
-            "stopLoss":   str(round(trade.stop_loss, 2)),
-            "takeProfit": str(round(trade.take_profit, 2)),
+            "category":    "linear",
+            "symbol":      trade.pair,          # usa el par real del trade
+            "side":        trade.side,
+            "orderType":   "Market",
+            "qty":         str(trade.size_contracts),
+            "stopLoss":    str(round(trade.stop_loss, 2)),
+            "takeProfit":  str(round(trade.take_profit, 2)),
             "timeInForce": "GTC",
             "positionIdx": 0,
         }
-        body_str  = json.dumps(body)
+        body_str  = json.dumps(body, separators=(",", ":"))
         signature = self._sign(body_str, ts)
 
         headers = {
-            "X-BAPI-API-KEY":   self._api_key,
-            "X-BAPI-TIMESTAMP": str(ts),
-            "X-BAPI-SIGN":      signature,
+            "X-BAPI-API-KEY":     self._api_key,
+            "X-BAPI-TIMESTAMP":   str(ts),
+            "X-BAPI-SIGN":        signature,
             "X-BAPI-RECV-WINDOW": "5000",
-            "Content-Type":     "application/json",
+            "Content-Type":       "application/json",
         }
 
+        mode_label = "REAL" if self._production else "TESTNET"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -427,17 +430,18 @@ class BybitTestnetExecutor:
                     if ret_code == 0:
                         order_id = data.get("result", {}).get("orderId", "")
                         logger.success(
-                            f"[executor] Orden Bybit Testnet OK: {order_id}"
+                            "[executor] Orden Bybit {} OK | {} {} | orderId={}",
+                            mode_label, trade.pair, trade.side, order_id,
                         )
                         return True
                     else:
                         logger.warning(
-                            f"[executor] Bybit Testnet error {ret_code}: "
-                            f"{data.get('retMsg')}"
+                            "[executor] Bybit {} error {} | {} | msg={}",
+                            mode_label, ret_code, trade.pair, data.get("retMsg"),
                         )
                         return False
         except Exception as exc:
-            logger.warning(f"[executor] Bybit Testnet API error: {exc}")
+            logger.warning("[executor] Bybit {} API error: {}", mode_label, exc)
             return False
 
     # ── Supabase ──────────────────────────────────────────────────────────────
