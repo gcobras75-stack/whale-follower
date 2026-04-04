@@ -116,6 +116,19 @@ async def trading_loop() -> None:
     arb_engine = arb_mod.ArbEngine(production=False) if arb_mod else None
     _arb_ref = arb_engine
 
+    # ── Estrategias avanzadas (tolerantes a fallos) ───────────────────────────
+    mr_mod  = _try_import("mean_reversion")
+    grid_mod = _try_import("grid_trading")
+    ofi_mod  = _try_import("ofi_strategy")
+    mom_mod  = _try_import("momentum_scaling")
+    dn_mod   = _try_import("delta_neutral")
+
+    mean_rev  = mr_mod.MeanReversionEngine(production=False)   if mr_mod  else None
+    grid_eng  = grid_mod.GridTradingEngine(production=False)   if grid_mod else None
+    ofi_eng   = ofi_mod.OFIEngine(production=False)            if ofi_mod  else None
+    mom_eng   = mom_mod.MomentumScalingEngine(production=False) if mom_mod else None
+    dn_eng    = dn_mod.DeltaNeutralEngine(production=False)    if dn_mod  else None
+
     # ── Modulos Sprint 4 (tolerantes a fallos) ────────────────────────────────
     cvd_comb_mod    = _try_import("cvd_combined")
     liq_map_mod     = _try_import("liquidation_map")
@@ -172,6 +185,8 @@ async def trading_loop() -> None:
         asyncio.create_task(dashboard.run(), name="dashboard")
     if arb_engine:
         asyncio.create_task(arb_engine.run(), name="arb_engine")
+    if dn_eng:
+        asyncio.create_task(dn_eng.run(), name="delta_neutral")
 
     _ready = True
 
@@ -183,7 +198,15 @@ async def trading_loop() -> None:
         correlation is not None,  session_vol is not None,
         ml_model is not None,     dashboard is not None,
     ])
-    logger.info(f" Arbitraje: {'ACTIVO (4 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
+    logger.info(f" Arbitraje:  {'ACTIVO (4 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
+    strats_active = sum([mean_rev is not None, grid_eng is not None,
+                         ofi_eng is not None, mom_eng is not None, dn_eng is not None])
+    logger.info(f" Estrategias avanzadas: {strats_active}/5 activas")
+    logger.info(f"  Mean Reversion:   {'ON' if mean_rev else 'OFF'}")
+    logger.info(f"  Grid Trading:     {'ON' if grid_eng  else 'OFF'}")
+    logger.info(f"  OFI Strategy:     {'ON' if ofi_eng   else 'OFF'}")
+    logger.info(f"  Momentum Scaling: {'ON' if mom_eng   else 'OFF'}")
+    logger.info(f"  Delta Neutral:    {'ON' if dn_eng    else 'OFF'}")
 
     logger.info("=" * 60)
     logger.info(" Whale Follower Bot -- Sprint 4")
@@ -213,6 +236,15 @@ async def trading_loop() -> None:
             session_vol.record_volume(trade.quantity, trade.timestamp)
         if arb_engine:
             arb_engine.on_trade(trade.exchange, trade.pair, trade.price, trade.timestamp * 1000)
+
+        # Estrategias avanzadas — datos en tiempo real
+        if grid_eng:
+            grid_eng.on_price(trade.pair, trade.price)
+        if ofi_eng:
+            ofi_eng.on_trade_volume(trade.pair, trade.quantity)
+            ofi_eng.on_price(trade.pair, trade.price)
+        if dn_eng:
+            dn_eng.on_perp_price(trade.exchange, trade.price)
 
         # 3. Procesar spring detection
         ctx_snapshot = context.snapshot()
@@ -328,6 +360,38 @@ async def trading_loop() -> None:
         # Activar lead-lag arb en BTC spring
         if signal.pair == "BTCUSDT" and arb_engine:
             arb_engine.on_btc_spring(signal.entry_price)
+
+        # Mean Reversion: pasar datos de cascade al motor
+        if mean_rev:
+            cascade = signal.cascade_event
+            ob_ratio_mr, _, _ = orderbook.imbalance(signal.pair) if orderbook else (0.5, False, 0)
+            cvd_delta = signal.cvd_metrics.velocity_3s if hasattr(signal, "cvd_metrics") else 0.0
+            mean_rev.on_trade(
+                pair              = signal.pair,
+                price             = signal.entry_price,
+                cascade_intensity = cascade.intensity,
+                cascade_velocity  = cascade.trades_per_sec,
+                ob_ratio          = ob_ratio_mr,
+                cvd_delta_3s      = cvd_delta,
+            )
+            mean_rev.try_add_tramo(signal.pair, signal.entry_price, cvd_delta)
+
+        # Momentum Scaling: pasar todas las metricas CVD + OB
+        if mom_eng and hasattr(signal, "cvd_metrics"):
+            cv = signal.cvd_metrics
+            ob_ratio_mom, _, _ = orderbook.imbalance(signal.pair) if orderbook else (0.5, False, 0)
+            cvd_snap = cvd_combined.snapshot() if cvd_combined else None
+            mom_eng.on_tick(
+                pair               = signal.pair,
+                price              = signal.entry_price,
+                cvd_vel_3s         = cv.velocity_3s,
+                cvd_vel_10s        = cv.velocity_10s,
+                cvd_vel_30s        = cv.velocity_30s,
+                cvd_acceleration   = cv.acceleration,
+                all_three_positive = cvd_snap.all_three_positive if cvd_snap else False,
+                ob_ratio           = ob_ratio_mom,
+                fg_blocked         = ext.fear_greed_block_long,
+            )
 
         # 6. Buffer de señales recientes
         now = time.time()
