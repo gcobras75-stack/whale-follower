@@ -59,6 +59,9 @@ REAL_CAPITAL:     float = float(os.getenv("REAL_CAPITAL", "75"))
 RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "0.01"))   # 1% por trade
 MAX_TRADES_OPEN:  int   = int(os.getenv("MAX_TRADES_OPEN",  "2"))
 DAILY_LOSS_LIMIT: float = float(os.getenv("DAILY_LOSS_LIMIT", "0.05")) # 5% máx diario
+# Par preferido en produccion con capital pequeño (orden min ETH ~$20 vs BTC ~$67)
+PREFERRED_PAIR:       str   = os.getenv("PREFERRED_PAIR",        "ETHUSDT")
+MAX_ORDER_PCT_CAPITAL: float = float(os.getenv("MAX_ORDER_PCT_CAPITAL", "0.35"))  # máx 35% capital por orden
 
 # ── Multi-pair monitoring ─────────────────────────────────────────────────────
 TRADING_PAIRS: list[str] = [

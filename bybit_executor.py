@@ -182,6 +182,28 @@ class BybitTestnetExecutor:
             size_usd = base_usd * leverage           # posicion efectiva
         if leverage > 1:
             logger.info("[executor] Apalancamiento activo: {}x (size_usd=${:.0f})", leverage, size_usd)
+        # ── Protección de capital en producción ───────────────────────────────
+        # Si la orden mínima del par es demasiado grande (>35% del capital),
+        # sustituir por el par preferido (ETH, orden mín ~$20 vs BTC ~$67).
+        if self._production:
+            # Tamaños mínimos de contrato por par (Bybit linear)
+            _MIN_QTY = {"BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 0.1, "BNBUSDT": 0.01}
+            min_qty   = _MIN_QTY.get(pair, 0.001)
+            min_order = min_qty * entry_price
+            max_allowed = self._capital * config.MAX_ORDER_PCT_CAPITAL
+            if min_order > max_allowed:
+                logger.warning(
+                    "[executor] {} min_order=${:.2f} > {:.0f}% capital (${:.2f}) "
+                    "→ sustituyendo por {}",
+                    pair, min_order, config.MAX_ORDER_PCT_CAPITAL * 100,
+                    max_allowed, config.PREFERRED_PAIR,
+                )
+                pair = config.PREFERRED_PAIR
+                # Recalcular size_usd con precio del par preferido (aproximado)
+                # entry_price se recalculará en _place_order con precio real
+                min_qty_pref = _MIN_QTY.get(pair, 0.01)
+                size_usd = max(size_usd, min_qty_pref * entry_price * 0.1)
+
         size_contracts = round(size_usd / entry_price, 3)
         size_contracts = max(size_contracts, 0.001)
 
