@@ -493,6 +493,14 @@ class GridTradingEngine:
                         headers=headers,
                         timeout=aiohttp.ClientTimeout(total=8),
                     ) as r:
+                        if r.status == 403:
+                            logger.info(
+                                "[grid] Bybit balance REST bloqueado (403) → usando REAL_CAPITAL=${:.2f}",
+                                config.REAL_CAPITAL,
+                            )
+                            self._bybit_balance = config.REAL_CAPITAL
+                            self._balance_ts    = time.time()
+                            return config.REAL_CAPITAL
                         data = await r.json()
                         if data.get("retCode") == 0:
                             for c in data["result"]["list"][0].get("coin", []):
