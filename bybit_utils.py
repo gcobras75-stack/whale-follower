@@ -153,6 +153,7 @@ async def place_spot_order(
     }
     body_str = json.dumps(body, separators=(",", ":"))
     ts  = str(int(time.time() * 1000))
+    # HMAC-SHA256: timestamp + api_key + recv_window + body_json
     msg = f"{ts}{config.BYBIT_API_KEY}{_RECV_WINDOW}{body_str}"
     sig = hmac.new(
         config.BYBIT_API_SECRET.encode("utf-8"),
@@ -167,14 +168,28 @@ async def place_spot_order(
         "Content-Type":       "application/json",
         **_BYBIT_HEADERS_EXTRA,
     }
+
+    logger.info(
+        "[{}] → Bybit ORDER REQUEST {} {} qty={} | url={} | body={}",
+        caller, side, symbol, qty, url, body_str,
+    )
+
     try:
         async with aiohttp.ClientSession() as s:
             async with s.post(
                 url, headers=headers, data=body_str,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
+                http_status = r.status
                 data = await r.json()
                 ret_code = data.get("retCode", -1)
+                ret_msg  = data.get("retMsg", "")
+
+                logger.info(
+                    "[{}] ← Bybit ORDER RESPONSE http={} retCode={} retMsg='{}' | full={}",
+                    caller, http_status, ret_code, ret_msg, data,
+                )
+
                 if ret_code == 0:
                     order_id = data.get("result", {}).get("orderId", "")
                     logger.info(
@@ -183,12 +198,15 @@ async def place_spot_order(
                     )
                 else:
                     logger.error(
-                        "[{}] Bybit spot order retCode={} msg='{}' {} {} qty={}",
-                        caller, ret_code, data.get("retMsg", ""), side, symbol, qty,
+                        "[{}] ORDER FAILED {} {} qty={} — retCode={} msg='{}'",
+                        caller, side, symbol, qty, ret_code, ret_msg,
                     )
                 return data
     except Exception as exc:
-        logger.error("[{}] place_spot_order exception {}/{}: {}", caller, symbol, side, exc)
+        logger.error(
+            "[{}] place_spot_order EXCEPCIÓN {}/{} qty={}: {}",
+            caller, symbol, side, qty, exc,
+        )
         return {}
 
 
