@@ -324,37 +324,55 @@ class CrossExchangeArb:
         buy_price  = trade.buy_price
         sell_price = trade.sell_price
         pair       = trade.pair
-        size_usd   = min(trade.size_usd, config.CROSS_ARB_MAX_SIZE_USD)
+        coin       = pair.replace("USDT", "")   # ETHUSDT → ETH
 
-        logger.info(
-            "[cross_arb] REAL EXECUTION {} buy@{} sell@{} size=${:.0f}",
-            pair, trade.buy_exchange, trade.sell_exchange, size_usd,
-        )
-
-        # Verificar que el exchange vendedor tiene el asset (no solo USDT)
-        coin = pair.replace("USDT", "")   # ETHUSDT → ETH
-        qty_needed = size_usd / sell_price if sell_price > 0 else 0
+        # ── Calcular size dinámico según balance del sell-side ────────────────
+        size_usd = min(trade.size_usd, config.CROSS_ARB_MAX_SIZE_USD)
 
         if trade.sell_exchange == "okx" and self._okx_exec:
-            okx_coin_bal = await self._okx_exec.get_coin_balance(coin)
+            okx_coin_bal  = await self._okx_exec.get_coin_balance(coin)
+            available_usd = okx_coin_bal * sell_price
+            size_usd      = self._calc_size(coin, available_usd)
+            if size_usd < 10.0:
+                logger.warning(
+                    "[cross_arb] OKX {} balance insuficiente (${:.2f}) — mínimo $10 — saltando",
+                    coin, available_usd,
+                )
+                self._trades.append(trade)
+                return
+            qty_needed = size_usd / sell_price
             if okx_coin_bal < qty_needed:
                 logger.warning(
-                    "[cross_arb] OKX no tiene {} suficiente para vender "
-                    "(tiene={:.4f} necesita={:.4f}) — saltando arb",
+                    "[cross_arb] OKX {} tiene={:.4f} necesita={:.4f} — saltando",
                     coin, okx_coin_bal, qty_needed,
                 )
                 self._trades.append(trade)
                 return
-        elif trade.sell_exchange == "bybit" and self._bybit_session:
+
+        elif trade.sell_exchange == "bybit" and self._bybit_ready:
             bybit_coin_bal = await self._bybit_coin_balance(coin)
+            available_usd  = bybit_coin_bal * sell_price
+            size_usd       = self._calc_size(coin, available_usd)
+            if size_usd < 10.0:
+                logger.warning(
+                    "[cross_arb] Bybit {} balance insuficiente (${:.2f}) — mínimo $10 — saltando",
+                    coin, available_usd,
+                )
+                self._trades.append(trade)
+                return
+            qty_needed = size_usd / sell_price
             if bybit_coin_bal < qty_needed:
                 logger.warning(
-                    "[cross_arb] Bybit no tiene {} suficiente para vender "
-                    "(tiene={:.4f} necesita={:.4f}) — saltando arb",
+                    "[cross_arb] Bybit {} tiene={:.4f} necesita={:.4f} — saltando",
                     coin, bybit_coin_bal, qty_needed,
                 )
                 self._trades.append(trade)
                 return
+
+        logger.info(
+            "[cross_arb] REAL EXECUTION {} buy@{} sell@{} size=${:.2f}",
+            pair, trade.buy_exchange, trade.sell_exchange, size_usd,
+        )
 
         # Execute both legs simultaneously
         buy_result  = None
@@ -415,6 +433,21 @@ class CrossExchangeArb:
 
         else:
             logger.warning("[cross_arb] BOTH LEGS FAILED {} — no action needed", pair)
+
+    # ── Dynamic size ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _calc_size(coin: str, available_balance_usd: float) -> float:
+        """Calcula size dinámico: 80% del balance disponible, entre $10 y $50."""
+        max_size = config.CROSS_ARB_MAX_SIZE_USD  # 50 por defecto
+        min_size = 10.0
+        dynamic  = available_balance_usd * 0.80
+        size     = max(min_size, min(max_size, dynamic))
+        logger.info(
+            "[cross_arb] {} size dinámico: balance=${:.2f} → size=${:.2f}",
+            coin, available_balance_usd, size,
+        )
+        return size
 
     # ── Exchange order helpers ────────────────────────────────────────────────
 
