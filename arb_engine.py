@@ -99,6 +99,7 @@ class ArbEngine:
 
     async def run(self) -> None:
         """Tarea de fondo: arranca todas las subtareas de arbitraje."""
+        asyncio.create_task(self._triangular.startup_check(), name="cross_arb_startup")
         await asyncio.gather(
             self._funding.run(),
             self._bitso.run(),

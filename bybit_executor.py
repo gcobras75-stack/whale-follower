@@ -233,11 +233,16 @@ class BybitTestnetExecutor:
             signal_features = signal_features,
         )
 
-        # Intentar orden en Bybit Testnet
         success = await self._place_order(trade)
         if not success:
-            # Si falla la API, igual registramos como paper local
-            logger.warning("[executor] Bybit Testnet no disponible — registrando solo en Supabase.")
+            if self._production:
+                logger.error(
+                    "[executor] PRODUCCION: Bybit rechaz\u00f3 la orden {} {} — trade NO registrado.",
+                    trade.pair, trade.side,
+                )
+                return None
+            else:
+                logger.warning("[executor] Bybit Testnet no disponible — registrando solo en Supabase.")
 
         self._trades.append(trade)
         await self._save_to_supabase(trade, signal_id)
@@ -478,32 +483,40 @@ class BybitTestnetExecutor:
         }
 
         mode_label = "REAL" if self._production else "TESTNET"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._BASE_URL}/v5/order/create",
-                    headers=headers,
-                    data=body_str,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    data = await resp.json()
-                    ret_code = data.get("retCode", -1)
-                    if ret_code == 0:
-                        order_id = data.get("result", {}).get("orderId", "")
-                        logger.success(
-                            "[executor] Orden Bybit {} OK | {} {} | orderId={}",
-                            mode_label, trade.pair, trade.side, order_id,
-                        )
-                        return True
-                    else:
-                        logger.warning(
-                            "[executor] Bybit {} error {} | {} | msg={}",
-                            mode_label, ret_code, trade.pair, data.get("retMsg"),
-                        )
-                        return False
-        except Exception as exc:
-            logger.warning("[executor] Bybit {} API error: {}", mode_label, exc)
-            return False
+        for attempt in (1, 2):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self._BASE_URL}/v5/order/create",
+                        headers=headers,
+                        data=body_str,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        data = await resp.json()
+                        ret_code = data.get("retCode", -1)
+                        if ret_code == 0:
+                            order_id = data.get("result", {}).get("orderId", "")
+                            logger.success(
+                                "[executor] Orden Bybit {} OK | {} {} | orderId={}",
+                                mode_label, trade.pair, trade.side, order_id,
+                            )
+                            return True
+                        else:
+                            logger.error(
+                                "[executor] Bybit {} FALLO retCode={} pair={} msg={} (intento {})",
+                                mode_label, ret_code, trade.pair, data.get("retMsg"), attempt,
+                            )
+                            if attempt == 1:
+                                await asyncio.sleep(1)
+                            else:
+                                return False
+            except Exception as exc:
+                logger.error("[executor] Bybit {} API error (intento {}): {}", mode_label, attempt, exc)
+                if attempt == 1:
+                    await asyncio.sleep(1)
+                else:
+                    return False
+        return False
 
     # ── Supabase ──────────────────────────────────────────────────────────────
 

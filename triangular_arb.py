@@ -197,6 +197,103 @@ class TriangularArb:
         """Retorna conteo de ejecuciones reales por par."""
         return dict(self._exec_by_pair)
 
+    async def startup_check(self) -> None:
+        """Verifica conectividad Bybit SPOT y OKX SPOT al inicio. Envia resultado a Telegram."""
+        if not self._production:
+            logger.info("[cross_arb] startup_check omitido (modo PAPEL)")
+            return
+
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+        # ── Bybit SPOT balance ────────────────────────────────────────────────
+        bybit_ok  = False
+        bybit_bal = 0.0
+        bybit_err = ""
+        try:
+            from pybit.unified_trading import HTTP as BybitHTTP
+            session = BybitHTTP(
+                testnet=False,
+                api_key=config.BYBIT_API_KEY,
+                api_secret=config.BYBIT_API_SECRET,
+            )
+            loop   = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: session.get_wallet_balance(accountType="UNIFIED", coin="USDT"),
+            )
+            if result.get("retCode") == 0:
+                coins = result.get("result", {}).get("list", [{}])[0].get("coin", [])
+                for c in coins:
+                    if c.get("coin") == "USDT":
+                        bybit_bal = float(c.get("walletBalance", 0))
+                bybit_ok = True
+            else:
+                bybit_err = f"retCode={result.get('retCode')} {result.get('retMsg','')}"
+        except Exception as exc:
+            bybit_err = str(exc)[:120]
+
+        if bybit_ok:
+            logger.info("[cross_arb] Bybit SPOT \u2705 balance=${:.2f}", bybit_bal)
+        else:
+            logger.error("[cross_arb] Bybit SPOT \u274c {}", bybit_err)
+
+        # ── OKX SPOT balance ──────────────────────────────────────────────────
+        okx_ok  = False
+        okx_bal = 0.0
+        okx_err = ""
+        try:
+            from datetime import datetime, timezone as _tz
+            ts_okx  = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path    = "/api/v5/asset/balances?ccy=USDT"
+            prehash = ts_okx + "GET" + path
+            sig_okx = base64.b64encode(
+                hmac.new(config.OKX_SECRET.encode(), prehash.encode(), hashlib.sha256).digest()
+            ).decode()
+            headers_okx = {
+                "OK-ACCESS-KEY":        config.OKX_API_KEY,
+                "OK-ACCESS-SIGN":       sig_okx,
+                "OK-ACCESS-TIMESTAMP":  ts_okx,
+                "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE,
+            }
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://www.okx.com" + path,
+                    headers=headers_okx,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                okx_bal = float(item.get("availBal", 0))
+                        okx_ok = True
+                    else:
+                        okx_err = f"code={data.get('code')} {data.get('msg','')}"
+        except Exception as exc:
+            okx_err = str(exc)[:120]
+
+        if okx_ok:
+            logger.info("[cross_arb] OKX SPOT \u2705 balance=${:.2f}", okx_bal)
+        else:
+            logger.error("[cross_arb] OKX SPOT \u274c {}", okx_err)
+
+        # ── Telegram summary ──────────────────────────────────────────────────
+        if not token or not chat_id:
+            return
+        b_line = f"\u2705 Bybit SPOT: ${bybit_bal:.2f} USDT" if bybit_ok else f"\u274c Bybit: {bybit_err}"
+        o_line = f"\u2705 OKX SPOT:   ${okx_bal:.2f} USDT" if okx_ok  else f"\u274c OKX:   {okx_err}"
+        msg = f"\U0001f50c Cross-Arb Startup Check\n{b_line}\n{o_line}"
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+        except Exception:
+            pass
+
     def active_summary(self) -> List[dict]:
         return [
             {

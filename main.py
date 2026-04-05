@@ -255,6 +255,20 @@ async def trading_loop() -> None:
     logger.info(f"  Momentum Scaling: {'ON' if mom_eng   else 'OFF'}")
     logger.info(f"  Delta Neutral:    {'ON' if dn_eng    else 'OFF'}")
 
+    # ── Credential verification log ───────────────────────────────────────────
+    def _mask(val: str) -> str:
+        return (val[:4] + "****") if len(val) >= 4 else "\u274c VACIO"
+    _ok = lambda v: "\u2705" if v else "\u274c VACIO"
+    logger.info("[config] === CREDENCIALES AL INICIO ===")
+    logger.info("[config] Bybit KEY:            {} {}", _mask(config.BYBIT_API_KEY),    _ok(config.BYBIT_API_KEY))
+    logger.info("[config] Bybit SECRET:         {} {}", _mask(config.BYBIT_API_SECRET), _ok(config.BYBIT_API_SECRET))
+    logger.info("[config] OKX KEY:              {} {}", _mask(config.OKX_API_KEY),      _ok(config.OKX_API_KEY))
+    logger.info("[config] OKX SECRET:           {} {}", _mask(config.OKX_SECRET),       _ok(config.OKX_SECRET))
+    logger.info("[config] OKX PASSPHRASE:       {} {}", _mask(config.OKX_PASSPHRASE),   _ok(config.OKX_PASSPHRASE))
+    logger.info("[config] PRODUCTION:           {}", config.PRODUCTION)
+    logger.info("[config] ENABLE_CROSS_ARB_REAL:{}", cross_arb_real)
+    logger.info("[config] ================================")
+
     logger.info("=" * 60)
     logger.info(" Whale Follower Bot -- Sprint 6")
     logger.info(f" Pares:        {', '.join(config.TRADING_PAIRS)}")
