@@ -14,6 +14,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 
 from aiohttp import web
 from loguru import logger
@@ -716,28 +717,71 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def _log_server_ip() -> None:
-    """Log IP pública al arranque para confirmar región del servidor Railway."""
+    """Log IP pública al arranque y envía alerta Telegram de inicio."""
     import aiohttp as _aiohttp
+    ip = "desconocida"
     for url in ("https://api.ipify.org?format=json", "https://ifconfig.me/ip"):
         try:
             async with _aiohttp.ClientSession() as s:
                 async with s.get(url, timeout=_aiohttp.ClientTimeout(total=6)) as r:
                     text = await r.text()
                     ip   = text.strip().strip('"').replace('{"ip":"', '').replace('"}', '')
-                    logger.info(
-                        "[startup] 🌍 IP pública del servidor: {} | RAILWAY_REGION={}",
-                        ip, os.getenv("RAILWAY_REGION", "no-env"),
-                    )
-                    return
+                    logger.info("[startup] 🌍 IP pública del servidor: {}", ip)
+                    break
         except Exception:
             continue
-    logger.warning("[startup] No se pudo obtener IP pública del servidor")
+    else:
+        logger.warning("[startup] No se pudo obtener IP pública del servidor")
+
+    # Alerta Telegram de inicio
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return
+    prod = os.environ.get("PRODUCTION", "false").lower() == "true"
+    msg  = (
+        f"🚀 Whale Follower Bot iniciado\n"
+        f"🌍 IP: {ip} Singapore ✅\n"
+        f"🔧 Modo: {'REAL' if prod else 'PAPEL'}\n"
+        f"📊 Estrategias: Cross-Arb + Grid Bybit + Grid OKX + Wyckoff"
+    )
+    try:
+        async with _aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg},
+                timeout=_aiohttp.ClientTimeout(total=8),
+            )
+    except Exception as exc:
+        logger.warning("[startup] Telegram inicio error: {}", exc)
+
+
+async def _send_telegram(msg: str) -> None:
+    """Envía mensaje Telegram. No lanza excepciones."""
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return
+    try:
+        import aiohttp as _ah
+        async with _ah.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg},
+                timeout=_ah.ClientTimeout(total=8),
+            )
+    except Exception:
+        pass
 
 
 async def main() -> None:
     runner = await start_healthcheck()
     asyncio.create_task(_log_server_ip())
-    _restart_delay = 30
+
+    _restart_delay    = 30
+    _restart_history: deque = deque(maxlen=10)  # timestamps de reinicios recientes
+    _MAX_RESTARTS_HOUR = 5
+
     while True:
         trading_task = asyncio.create_task(trading_loop())
         try:
@@ -747,12 +791,27 @@ async def main() -> None:
             logger.info("[main] Cancelled — shutdown limpio.")
             break
         except Exception as exc:
+            now = time.time()
+            _restart_history.append(now)
+            recent = sum(1 for t in _restart_history if now - t < 3600)
             logger.error(
-                "[main] trading_loop crasheo: {} — reintentando en {}s",
-                exc, _restart_delay,
+                "[main] trading_loop crasheo: {} — reinicio {}/{} en 1h",
+                exc, recent, _MAX_RESTARTS_HOUR,
             )
-            await asyncio.sleep(_restart_delay)
-            _restart_delay = min(_restart_delay * 2, 300)  # backoff hasta 5min
+            if recent >= _MAX_RESTARTS_HOUR:
+                wait_secs = 3600
+                logger.error("[main] {} reinicios en 1h — pausa {}s", recent, wait_secs)
+                asyncio.create_task(_send_telegram(
+                    f"🚨 Whale Follower Bot\n"
+                    f"⚠️ {recent} reinicios en 1 hora\n"
+                    f"Bot pausado 1 hora. Revisar logs."
+                ))
+                await asyncio.sleep(wait_secs)
+                _restart_history.clear()
+                _restart_delay = 30
+            else:
+                await asyncio.sleep(_restart_delay)
+                _restart_delay = min(_restart_delay * 2, 300)  # backoff hasta 5min
     await runner.cleanup()
 
 

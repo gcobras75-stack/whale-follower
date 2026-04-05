@@ -40,7 +40,11 @@ _CLOSE_AFTER_SECS = 60     # cerrar ambas patas despues de N segundos
 _MIN_BALANCE_USD  = config.CROSS_ARB_MIN_BALANCE_USD  # default $10
 _ETH_MIN_USD      = 15.0   # inventario mínimo ETH en USD por exchange — replenish si cae aquí
 _ETH_REPLENISH_USD = 20.0  # cuánto ETH comprar al replenish
+_SOL_MIN_USD       = 10.0  # inventario mínimo SOL en OKX
+_SOL_REPLENISH_USD = 15.0  # cuánto SOL comprar al replenish
 _INVENTORY_CHECK_SECS = 300  # verificar inventario cada 5 min
+_CB_MAX_ERRORS    = 3    # errores seguidos antes de circuit breaker
+_CB_PAUSE_SECS    = 300  # 5 min de pausa al activar CB
 
 
 @dataclass
@@ -99,9 +103,15 @@ class CrossExchangeArb:
         self._balance_ok  = True       # flip to False if balance < threshold
         self._last_balance_check: float = 0.0
 
-        # Inventario ETH
+        # Inventario ETH/SOL
         self._replenishing: set  = set()   # exchanges con replenish en curso
         self._inventory_started: bool = False  # arranca loop en primer _check_arb
+
+        # Circuit breaker por exchange
+        self._bybit_errors:       int   = 0
+        self._bybit_paused_until: float = 0.0
+        self._okx_errors:         int   = 0
+        self._okx_paused_until:   float = 0.0
 
         if production:
             self._init_real_executors()
@@ -502,7 +512,8 @@ class CrossExchangeArb:
             await self._check_and_replenish_inventory()
 
     async def _check_and_replenish_inventory(self) -> None:
-        """Revisa inventario ETH en ambos exchanges y replenish si < mínimo."""
+        """Revisa inventario ETH (ambos) y SOL (OKX) cada 5 min. Replenish si < mínimo."""
+        # ETH en Bybit y OKX
         for coin in ["ETH"]:
             pair = f"{coin}USDT"
             for exchange in ["bybit", "okx"]:
@@ -527,6 +538,21 @@ class CrossExchangeArb:
                         asyncio.create_task(self._replenish_eth(exchange, coin))
                 except Exception as exc:
                     logger.warning("[cross_arb] _check_inventory {}/{}: {}", exchange, coin, exc)
+
+        # SOL en OKX
+        if self._okx_exec and "okx_sol" not in self._replenishing:
+            try:
+                sol_bal   = await self._okx_exec.get_coin_balance("SOL")
+                sol_price = self._get_price("SOLUSDT", "okx")
+                sol_usd   = sol_bal * sol_price
+                if sol_usd < _SOL_MIN_USD:
+                    logger.info(
+                        "[cross_arb] 📦 Inventario OKX SOL ${:.2f} < ${:.0f} — reabasteciendo",
+                        sol_usd, _SOL_MIN_USD,
+                    )
+                    asyncio.create_task(self._replenish_eth("okx", "SOL"))
+            except Exception as exc:
+                logger.warning("[cross_arb] _check_inventory okx/SOL: {}", exc)
 
     async def _replenish_eth(self, exchange: str, coin: str) -> None:
         """Compra ETH en el exchange indicado usando USDT para reponer inventario."""
@@ -562,6 +588,30 @@ class CrossExchangeArb:
         finally:
             self._replenishing.discard(exchange)
 
+    # ── Circuit breaker alert ─────────────────────────────────────────────────
+
+    async def _alert_circuit_breaker(self, exchange: str, action: str) -> None:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        icon = "⏸" if "pausa" in action else "▶️"
+        msg  = (
+            f"{icon} [cross_arb] Circuit Breaker\n"
+            f"Exchange: {exchange}\n"
+            f"Acción: {action}\n"
+            f"3 errores seguidos detectados."
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+        except Exception:
+            pass
+
     # ── Exchange order helpers ────────────────────────────────────────────────
 
     async def _bybit_market_order(
@@ -569,6 +619,12 @@ class CrossExchangeArb:
     ) -> Optional[Dict]:
         """Place a market order on Bybit SPOT via aiohttp (sin pybit)."""
         if not self._bybit_ready:
+            return None
+
+        # Circuit breaker check
+        if time.time() < self._bybit_paused_until:
+            secs = int(self._bybit_paused_until - time.time())
+            logger.warning("[cross_arb] Bybit CB activo — pausa {}s restantes", secs)
             return None
 
         # Calculate qty in base asset
@@ -590,8 +646,16 @@ class CrossExchangeArb:
         result   = await place_spot_order(pair, side, qty, caller="cross_arb", price=price)
         ret_code = result.get("retCode", -1)
         if ret_code != 0:
+            self._bybit_errors += 1
+            if self._bybit_errors >= _CB_MAX_ERRORS:
+                self._bybit_paused_until = time.time() + _CB_PAUSE_SECS
+                self._bybit_errors = 0
+                logger.warning("[cross_arb] Bybit CB activado: {} errores -> pausa {}min",
+                               _CB_MAX_ERRORS, _CB_PAUSE_SECS // 60)
+                asyncio.create_task(self._alert_circuit_breaker("Bybit", "pausa 5min"))
             return None
 
+        self._bybit_errors = 0
         order_id = result.get("result", {}).get("orderId", "")
         return {
             "exchange":   "bybit",
@@ -613,7 +677,25 @@ class CrossExchangeArb:
         """Place a market order on OKX real (USDT perp) via okx_executor."""
         if not self._okx_exec:
             return None
-        return await self._okx_exec.market_order(pair, side, size_usd, price)
+
+        # Circuit breaker check
+        if time.time() < self._okx_paused_until:
+            secs = int(self._okx_paused_until - time.time())
+            logger.warning("[cross_arb] OKX CB activo — pausa {}s restantes", secs)
+            return None
+
+        result = await self._okx_exec.market_order(pair, side, size_usd, price)
+        if result is None:
+            self._okx_errors += 1
+            if self._okx_errors >= _CB_MAX_ERRORS:
+                self._okx_paused_until = time.time() + _CB_PAUSE_SECS
+                self._okx_errors = 0
+                logger.warning("[cross_arb] OKX CB activado: {} errores -> pausa {}min",
+                               _CB_MAX_ERRORS, _CB_PAUSE_SECS // 60)
+                asyncio.create_task(self._alert_circuit_breaker("OKX", "pausa 5min"))
+        else:
+            self._okx_errors = 0
+        return result
 
     # ── Auto-close ───────────────────────────────────────────────────────────
 

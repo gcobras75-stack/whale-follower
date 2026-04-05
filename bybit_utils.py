@@ -42,6 +42,12 @@ _WS_PRIVATE_ENDPOINTS = [
     "wss://stream.bytick.com/v5/private",
 ]
 
+# Circuit breaker WS: skip WS después de N fallos seguidos
+_ws_consecutive_failures: int   = 0
+_ws_skip_until:           float = 0.0
+_WS_MAX_FAILURES                = 3
+_WS_COOLDOWN_SECS               = 300  # 5 min REST-only tras 3 fallos WS
+
 
 def _make_bybit_get_headers(query: str) -> dict:
     """Genera headers de autenticación para GET requests a Bybit v5."""
@@ -181,44 +187,37 @@ async def _place_order_via_ws(
         "args": [config.BYBIT_API_KEY, expires, ws_sig],
     }
 
-    # ── Order message ─────────────────────────────────────────────────────
-    req_id    = str(uuid.uuid4())[:12]
-    ts_now    = str(int(time.time() * 1000))
-    order_msg = {
-        "reqId": req_id,
-        "header": {
-            "X-BAPI-TIMESTAMP":   ts_now,
-            "X-BAPI-RECV-WINDOW": _RECV_WINDOW,
-        },
-        "op": "order.create",
-        "args": [{
-            "category":    "spot",
-            "symbol":      symbol,
-            "side":        side,
-            "orderType":   "Market",
-            "qty":         str(qty),
-            "timeInForce": "IOC",
-        }],
-    }
+    # ── Order message — 3 formatos para máxima compatibilidad ──────────────
+    # Fmt1: con header + IOC (original)  Fmt2: sin header + GTC  Fmt3: sin tif
+    def _order_formats() -> list:
+        ts = str(int(time.time() * 1000))
+        base = {"category": "spot", "symbol": symbol, "side": side,
+                "orderType": "Market", "qty": str(qty)}
+        return [
+            {"reqId": str(uuid.uuid4())[:12],
+             "header": {"X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": _RECV_WINDOW},
+             "op": "order.create", "args": [{**base, "timeInForce": "IOC"}]},
+            {"reqId": str(uuid.uuid4())[:12],
+             "op": "order.create", "args": [{**base, "timeInForce": "GTC"}]},
+            {"reqId": str(uuid.uuid4())[:12],
+             "op": "order.create", "args": [base]},
+        ]
+
+    global _ws_consecutive_failures, _ws_skip_until
 
     for ws_url in _WS_PRIVATE_ENDPOINTS:
         try:
-            logger.info(
-                "[{}] → Bybit WS ORDER {} {} qty={} reqId={} | {}",
-                caller, side, symbol, qty, req_id, ws_url,
-            )
+            logger.info("[{}] → Bybit WS ORDER {} {} qty={} | {}",
+                        caller, side, symbol, qty, ws_url)
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(
-                    ws_url,
-                    heartbeat=20,
+                    ws_url, heartbeat=20,
                     timeout=aiohttp.ClientTimeout(total=15),
                     headers={"User-Agent": "Mozilla/5.0"},
                 ) as ws:
 
-                    # 1. Enviar auth
+                    # 1. Auth
                     await ws.send_str(json.dumps(auth_msg))
-
-                    # 2. Esperar respuesta de auth (op=auth)
                     auth_ok = False
                     deadline = time.time() + 6
                     while time.time() < deadline:
@@ -230,10 +229,7 @@ async def _place_order_via_ws(
                             d = json.loads(msg.data)
                             if d.get("op") == "auth":
                                 auth_ok = d.get("success", False)
-                                logger.info(
-                                    "[{}] WS auth op=auth success={}",
-                                    caller, auth_ok,
-                                )
+                                logger.info("[{}] WS auth success={}", caller, auth_ok)
                                 break
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             break
@@ -242,46 +238,63 @@ async def _place_order_via_ws(
                         logger.warning("[{}] WS auth FAILED en {} — probando siguiente", caller, ws_url)
                         continue
 
-                    # 3. Enviar orden
-                    await ws.send_str(json.dumps(order_msg))
+                    # 2. Probar 3 formatos de orden (IOC→GTC→sin-tif)
+                    for fmt_idx, omsg in enumerate(_order_formats()):
+                        active_req = omsg["reqId"]
+                        await ws.send_str(json.dumps(omsg))
+                        logger.info("[{}] WS fmt{} reqId={}", caller, fmt_idx + 1, active_req)
 
-                    # 4. Esperar respuesta de la orden (op=order.create o reqId match)
-                    deadline = time.time() + 10
-                    while time.time() < deadline:
-                        try:
-                            msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            d = json.loads(msg.data)
-                            if d.get("op") == "order.create" or d.get("reqId") == req_id:
-                                ret_code = d.get("retCode", -1)
-                                ret_msg  = d.get("retMsg", "")
-                                logger.info(
-                                    "[{}] ← WS {} retCode={} retMsg='{}' | full={}",
-                                    caller, ws_url, ret_code, ret_msg, d,
-                                )
-                                if ret_code == 0:
-                                    order_id = d.get("data", {}).get("orderId", "")
-                                    logger.info(
-                                        "[{}] Bybit WS {} {} qty={} orderId={} ✅",
-                                        caller, side, symbol, qty, order_id,
-                                    )
-                                    # Normalizar: WS usa 'data', REST usa 'result'
-                                    d.setdefault("result", d.get("data", {}))
-                                else:
-                                    logger.error(
-                                        "[{}] WS ORDER FAILED retCode={} msg='{}'",
-                                        caller, ret_code, ret_msg,
-                                    )
-                                return d
-                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            break
+                        deadline   = time.time() + 10
+                        params_err = False
+                        while time.time() < deadline:
+                            try:
+                                msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                            except asyncio.TimeoutError:
+                                continue
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                d = json.loads(msg.data)
+                                if d.get("op") == "order.create" or d.get("reqId") == active_req:
+                                    ret_code = d.get("retCode", -1)
+                                    ret_msg  = d.get("retMsg", "")
+                                    logger.info("[{}] ← WS fmt{} retCode={} retMsg='{}'",
+                                                caller, fmt_idx + 1, ret_code, ret_msg)
+                                    if ret_code == 0:
+                                        _ws_consecutive_failures = 0
+                                        order_id = d.get("data", {}).get("orderId", "")
+                                        logger.info("[{}] Bybit WS {} {} qty={} orderId={} ✅",
+                                                    caller, side, symbol, qty, order_id)
+                                        d.setdefault("result", d.get("data", {}))
+                                        return d
+                                    elif ret_code in (10001, 10005):
+                                        logger.warning("[{}] WS fmt{} Params Error → siguiente formato",
+                                                       caller, fmt_idx + 1)
+                                        params_err = True
+                                    else:
+                                        logger.error("[{}] WS ORDER FAILED retCode={} msg='{}'",
+                                                     caller, ret_code, ret_msg)
+                                        _ws_consecutive_failures += 1
+                                        if _ws_consecutive_failures >= _WS_MAX_FAILURES:
+                                            _ws_skip_until = time.time() + _WS_COOLDOWN_SECS
+                                            logger.warning("[{}] WS {} fallos → REST-only {}min",
+                                                           caller, _ws_consecutive_failures,
+                                                           _WS_COOLDOWN_SECS // 60)
+                                        return d
+                                    break
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+                        if not params_err:
+                            break  # timeout o WS cerrado — salir del loop de formatos
 
-                    logger.warning("[{}] WS order response timeout en {}", caller, ws_url)
+                    logger.warning("[{}] WS order timeout/todos los formatos fallaron en {}",
+                                   caller, ws_url)
 
         except Exception as exc:
             logger.warning("[{}] WS {} excepción: {} → probando siguiente", caller, ws_url, exc)
+            _ws_consecutive_failures += 1
+            if _ws_consecutive_failures >= _WS_MAX_FAILURES:
+                _ws_skip_until = time.time() + _WS_COOLDOWN_SECS
+                logger.warning("[{}] WS {} fallos → REST-only {}min",
+                               caller, _ws_consecutive_failures, _WS_COOLDOWN_SECS // 60)
             continue
 
     return {}  # todos los WS fallaron
@@ -334,17 +347,28 @@ async def place_spot_order(
             )
             qty = min_qty
 
-    # ── 1. Intentar vía WebSocket (evita bloqueo IP Railway en REST) ─────────
-    ws_result = await _place_order_via_ws(symbol, side, qty, caller)
-    if ws_result and ws_result.get("retCode") == 0:
-        return ws_result
-    if ws_result:
-        logger.warning(
-            "[{}] WS retCode={} msg='{}' — probando REST como fallback",
-            caller, ws_result.get("retCode"), ws_result.get("retMsg", ""),
-        )
+    # ── Cancelar si valor < $5 (absoluto — no enviar ni con ajuste) ────────────
+    if price > 0 and qty * price < 5.0:
+        logger.warning("[{}] ORDER CANCELADA {} {} — valor ${:.2f} < $5 mínimo absoluto",
+                       caller, symbol, side, qty * price)
+        return {}
+
+    # ── 1. WebSocket (saltear si en cooldown por fallos) ─────────────────────
+    global _ws_skip_until
+    if time.time() >= _ws_skip_until:
+        ws_result = await _place_order_via_ws(symbol, side, qty, caller)
+        if ws_result and ws_result.get("retCode") == 0:
+            return ws_result
+        if ws_result:
+            logger.warning(
+                "[{}] WS retCode={} msg='{}' — probando REST como fallback",
+                caller, ws_result.get("retCode"), ws_result.get("retMsg", ""),
+            )
+        else:
+            logger.info("[{}] WS no respondió — probando REST como fallback", caller)
     else:
-        logger.info("[{}] WS no respondió — probando REST como fallback", caller)
+        secs = int(_ws_skip_until - time.time())
+        logger.info("[{}] WS cooldown ({}s restantes) — usando REST directamente", caller, secs)
 
     # ── 2. Fallback REST multi-endpoint ──────────────────────────────────────
     body = {
