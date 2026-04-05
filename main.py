@@ -452,6 +452,9 @@ async def trading_loop() -> None:
                     f"[main] {signal.pair} BLOQUEADO por macro: {macro_reason}"
                 )
                 continue
+            # Capa 12 — DXY: alimentar ExtendedContext para multiplicador 0.85x
+            _dxy_chg, _dxy_up = macro_agent.dxy_trend()
+            ext.dxy_strong_up = _dxy_up
 
         if onchain:
             oc = onchain.snapshot()
@@ -536,6 +539,11 @@ async def trading_loop() -> None:
                 "spring_bounce_pct":   signal.spring_data.get("bounce_pct", 0.0),
                 "price_vs_vwap":       0.0,
                 "hour_of_day":         float(time.gmtime().tm_hour),
+                # Nuevas features ML (IV aproximada + Z-score volúmen)
+                "implied_volatility":  float(getattr(deribit_eng, "last_iv", 0.0) if deribit_eng else 0.0),
+                "volume_zscore":       max(-3.0, min(3.0,
+                    (signal.spring_data.get("vol_ratio", 1.0) - 1.0) / 0.30
+                )),
             }
             ml_block, ml_prob = ml_model.should_block(features)
             ext.ml_probability = ml_prob
