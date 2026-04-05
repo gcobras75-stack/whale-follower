@@ -1,0 +1,117 @@
+# WHALE FOLLOWER BOT — Contexto automático para Cascade
+# Automatia Negocios Inteligentes — Antonio Gutiérrez
+
+## PROYECTO
+Bot de trading algorítmico 24/7
+GitHub: gcobras75-stack/whale-follower
+Railway: https://whale-follower-production.up.railway.app
+Stack: Python + Supabase + Telegram + Bybit + OKX
+Región: Singapur
+
+## CAPITAL REAL ACTIVO
+Bybit:  ~$90 USD  (PRODUCTION=true)
+OKX:    ~$51 USD  (PRODUCTION=true)
+Total:  ~$141 USD operando
+
+## REGLAS CRÍTICAS — NUNCA VIOLAR
+1. NUNCA usar PAPER_CAPITAL=$10,000 para órdenes reales
+2. Tamaño máximo por orden = 15% del capital real
+3. Siempre leer balance real via API antes de operar
+4. Siempre verificar credenciales al inicio del bot
+5. Siempre hacer git push después de cualquier cambio
+6. Railway auto-deploya desde GitHub main en ~3 minutos
+7. Nunca hardcodear credenciales en el código
+
+## CREDENCIALES (están en Railway como variables de entorno)
+BYBIT_API_KEY      = FvuTfWOpEDEIf6lELK
+BYBIT_SECRET       = IrYqWBtNvzQ7S5TQRJm6jBXtXE68iMzqNqfp
+OKX_API_KEY        = 0faf49ea-ccde-47e4-89eb-7c347e469b1a
+OKX_SECRET         = 11D03B681A925119042B5D9808C333C7
+OKX_PASSPHRASE     = Automatia2026$
+TELEGRAM_BOT_TOKEN = 8620020996:AAFL6r5zhlA7mdfwXlc2jgxIPna3aLT2pa4
+TELEGRAM_CHAT_ID   = 5985169283
+SUPABASE_URL       = https://dunlkxbcsxzwnencrklx.supabase.co
+PRODUCTION         = true
+
+## ARCHIVOS PRINCIPALES
+main.py             → orquestador principal + asyncio
+config.py           → credenciales y variables Railway
+triangular_arb.py   → cross-arb Bybit↔OKX (BTC/ETH/SOL)
+grid_trader.py      → grid trading BTC/ETH (SOL papel)
+spring_detector.py  → Whale Spring Wyckoff
+delta_neutral.py    → delta neutral (papel < $500)
+funding_arb.py      → funding rate arb (papel < $300)
+lead_lag.py         → lead-lag BTC→ETH/SOL (papel < $200)
+mean_reversion.py   → mean reversion (papel < $300)
+ofi_strategy.py     → OFI strategy (papel < $500)
+momentum_strategy.py→ momentum scaling
+daily_report.py     → reporte automático 8AM CST
+alerts.py           → todas las notificaciones Telegram
+btc_dominance.py    → termómetro dominancia BTC
+dxy_monitor.py      → termómetro DXY dólar
+liquidations_global.py → termómetro liquidaciones
+bitso_arb.py        → termómetro prima MXN
+
+## ESTRATEGIAS ACTIVAS EN REAL
+✅ Cross-Arb Bybit↔OKX → BTC/ETH/SOL threshold 0.03/0.04/0.05%
+✅ Whale Spring Wyckoff → score > 65, espera movimiento > 0.5%
+✅ Grid BTC/USDT        → $7.50/nivel, 4 niveles, real Bybit
+✅ Grid ETH/USDT        → $6.25/nivel, 4 niveles, real Bybit
+📊 Grid SOL/USDT        → papel (mínimo Bybit=$67 > capital)
+
+## ESTRATEGIAS EN PAPEL CON GATES AUTOMÁTICOS
+📊 Lead-Lag      → activa automático cuando capital >= $200
+📊 Funding Arb   → activa automático cuando capital >= $300
+📊 Mean Reversion→ activa automático cuando capital >= $300
+📊 Delta Neutral → activa automático cuando capital >= $500
+📊 OFI Strategy  → activa automático cuando capital >= $500
+📊 Momentum      → 1.5x < $300 / 2x < $500 / 3x >= $500
+
+## SISTEMA DE SCORING (0-130 puntos)
+Threshold actual: 65 puntos para abrir trade
+Wyckoff Spring:   +20 pts
+CVD 3 exchanges:  +20 pts
+Liquidaciones:    +15 pts
+BTC-ETH correlación: +10 pts
+Filtros ML XGBoost: bloquea si prob < 65%
+
+## TERMÓMETROS ACTIVOS (solo lectura, sin API key)
+- BTC Dominancia  → CoinGecko cada 5 min
+- DXY Dólar       → Yahoo Finance cada 10 min
+- Liquidaciones   → Binance FAPI cada 2 min
+- Prima Bitso     → api.bitso.com cada 30s
+
+## VARIABLES RAILWAY IMPORTANTES
+PRODUCTION=true
+SIGNAL_SCORE_THRESHOLD=65
+ENABLE_BYBIT=true
+ENABLE_OKX=true
+ENABLE_BINANCE=false
+MAX_LEVERAGE=7
+PAPER_CAPITAL=10000
+RISK_PER_TRADE=0.01
+MAX_TRADES_OPEN=2
+DAILY_LOSS_LIMIT=0.05
+LEVERAGE_AUTO=true
+MIN_TRADES_FOR_LEVERAGE=20
+
+## FORMATO DE COMMITS SIEMPRE
+git add .
+git commit -m "tipo: descripción corta en español"
+git push origin main
+git log --oneline -3
+
+Tipos de commit:
+feat: nueva funcionalidad
+fix: corrección de bug
+chore: mantenimiento
+docs: documentación
+
+## CONTEXTO ADICIONAL
+- Binance bloqueado en México → ENABLE_BINANCE=false
+- Backtest v2: 36.4% WR, +42.3% retorno 60 días
+- Live papel: 65.1% WR, 833+ trades
+- Primer trade real Wyckoff espera movimiento BTC > 0.5%
+- Mercado lateral = ideal para Grid y Cross-Arb
+- Claude Code regresa 1 mayo 2026
+- Hasta entonces usar Windsurf para desarrollo
