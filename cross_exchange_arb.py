@@ -334,6 +334,11 @@ class CrossExchangeArb:
                 return
 
         # Balance check
+        if config.BYBIT_ORDERS_BLOCKED:
+            logger.info("[cross_arb] BYBIT_ORDERS_BLOCKED=true — ejecución real cancelada, modo papel")
+            self._trades.append(trade)
+            return
+
         if not await self._check_balances():
             logger.warning("[cross_arb] REAL execution skipped — balance too low")
             self._trades.append(trade)

@@ -127,6 +127,16 @@ async def trading_loop() -> None:
 
     mean_rev  = mr_mod.MeanReversionEngine(production=prod)    if mr_mod  else None
     grid_eng  = grid_mod.GridTradingEngine(production=prod)    if grid_mod else None
+
+    # OKX Grid — activo siempre que ENABLE_OKX_GRID=true (no depende de Bybit)
+    okx_grid_mod = _try_import("okx_grid")
+    okx_grid_eng = (
+        okx_grid_mod.OKXGridEngine(production=prod)
+        if okx_grid_mod and getattr(config, "ENABLE_OKX_GRID", True)
+        else None
+    )
+    if okx_grid_eng:
+        logger.info("[main] OKX Grid Engine iniciado ✅ (independiente de Bybit)")
     ofi_eng   = ofi_mod.OFIEngine(production=prod)             if ofi_mod  else None
     mom_eng   = mom_mod.MomentumScalingEngine(production=prod) if mom_mod else None
     dn_eng    = dn_mod.DeltaNeutralEngine(production=prod)     if dn_mod  else None
@@ -368,6 +378,8 @@ async def trading_loop() -> None:
         # Estrategias avanzadas — datos en tiempo real
         if grid_eng:
             grid_eng.on_price(trade.pair, trade.price)
+        if okx_grid_eng:
+            okx_grid_eng.on_price(trade.pair, trade.price)
         if ofi_eng:
             ofi_eng.on_trade_volume(trade.pair, trade.quantity)
             ofi_eng.on_price(trade.pair, trade.price)

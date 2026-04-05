@@ -41,6 +41,7 @@ from loguru import logger
 
 import config
 import db_writer
+from bybit_utils import place_spot_order as _bybit_ws_order
 
 # ── Config por par ────────────────────────────────────────────────────────────
 _GRID_CONFIG: Dict[str, dict] = {
@@ -278,10 +279,15 @@ class GridTradingEngine:
         # Verificar si el nivel supera el minimo de Bybit spot
         min_usd   = _MIN_ORDER_USD.get(pair, 5.0)
         meets_min = cap_per_level >= min_usd
-        paper     = (not self._production) or (not meets_min)
+        paper     = (not self._production) or (not meets_min) or config.BYBIT_ORDERS_BLOCKED
 
         if self._production:
-            if meets_min:
+            if config.BYBIT_ORDERS_BLOCKED:
+                logger.warning(
+                    "[grid] {} BYBIT_ORDERS_BLOCKED=true \u2192 forzando modo PAPEL",
+                    pair,
+                )
+            elif meets_min:
                 logger.info(
                     "[grid] {} minimo=${:.0f} nivel=${:.2f} \u2705 real",
                     pair, min_usd, cap_per_level,
@@ -520,17 +526,22 @@ class GridTradingEngine:
     async def _bybit_spot_order(self, pair: str, side: str, size_usd: float,
                                  price: float) -> Optional[str]:
         """
-        Coloca una orden MARKET en Bybit SPOT.
+        Coloca orden MARKET en Bybit SPOT via bybit_utils (WS primero, REST fallback).
         Retorna orderId si OK, None si falla.
         """
+        if config.BYBIT_ORDERS_BLOCKED:
+            logger.warning("[grid] BYBIT_ORDERS_BLOCKED=true — orden cancelada {} {} ${:.0f}",
+                           side, pair, size_usd)
+            return None
+
         if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
             logger.error("[grid] Faltan credenciales Bybit")
             return None
 
-        # Calcular qty en activo base
         if price <= 0:
             logger.error("[grid] {} precio invalido: {}", pair, price)
             return None
+
         qty = round(size_usd / price, 6)
         min_qty = _MIN_QTY.get(pair, 0.001)
         if qty < min_qty:
@@ -538,62 +549,17 @@ class GridTradingEngine:
                          pair, qty, min_qty, size_usd, price)
             return None
 
-        ts       = str(int(time.time() * 1000))
-        body_dict = {
-            "category":    "spot",
-            "symbol":      pair,
-            "side":        side,        # "Buy" | "Sell"
-            "orderType":   "Market",
-            "qty":         str(qty),
-            "timeInForce": "IOC",
-        }
-        body_str = json.dumps(body_dict, separators=(",", ":"))
-        payload  = f"{ts}{config.BYBIT_API_KEY}5000{body_str}"
-        sig      = hmac.new(
-            config.BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256
-        ).hexdigest()
-        headers = {
-            "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
-            "X-BAPI-TIMESTAMP":   ts,
-            "X-BAPI-SIGN":        sig,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "Content-Type":       "application/json",
-            "User-Agent":         "Mozilla/5.0",
-            "Referer":            "https://www.bybit.com",
-        }
+        result = await _bybit_ws_order(pair, side, qty, caller="grid")
+        if result and result.get("retCode") == 0:
+            order_id = result.get("result", {}).get("orderId", "")
+            logger.info("[grid] \U0001f7e2 ORDER OK {} {} ${:.0f} qty={} orderId={}",
+                        side.upper(), pair, size_usd, qty, order_id)
+            self._bybit_balance = max(0, self._bybit_balance - size_usd)
+            return order_id
 
-        for attempt in (1, 2):
-            try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.post(
-                        "https://api.bytick.com/v5/order/create",
-                        headers=headers, data=body_str,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        data = await resp.json()
-                        ret_code = data.get("retCode", -1)
-                        if ret_code == 0:
-                            order_id = data.get("result", {}).get("orderId", "")
-                            logger.info("[grid] \U0001f7e2 REAL ORDER {} {} ${:.0f} qty={} orderId={}",
-                                        side.upper(), pair, size_usd, qty, order_id)
-                            self._bybit_balance = max(0, self._bybit_balance - size_usd)
-                            return order_id
-                        else:
-                            logger.error("[grid] \u274c ORDER RECHAZADA {} {} retCode={} msg={} (intento {})",
-                                         side, pair, ret_code, data.get("retMsg"), attempt)
-                            if attempt == 1:
-                                await asyncio.sleep(1)
-                            else:
-                                await self._alert_order_error(
-                                    pair, side, size_usd, data.get("retMsg", "")
-                                )
-                                return None
-            except Exception as exc:
-                logger.error("[grid] _bybit_spot_order exception (intento {}): {}", attempt, exc)
-                if attempt == 1:
-                    await asyncio.sleep(1)
-                else:
-                    return None
+        ret_msg = result.get("retMsg", "sin respuesta") if result else "sin respuesta"
+        logger.error("[grid] \u274c ORDER FALLIDA {} {} — {}", side, pair, ret_msg)
+        await self._alert_order_error(pair, side, size_usd, ret_msg)
         return None
 
     async def _handle_buy(self, grid: GridState, level: GridLevel,

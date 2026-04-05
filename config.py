@@ -87,6 +87,10 @@ BYBIT_ORDER_ENDPOINT:      str   = os.getenv("BYBIT_ORDER_ENDPOINT", "")
 CROSS_ARB_MIN_SPREAD_PCT:  float = float(os.getenv("CROSS_ARB_MIN_SPREAD_PCT",  "0.08"))
 CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", "10"))
 
+# ── Modo OKX-only (Bybit bloqueado por Railway IPs) ───────────────────────────
+BYBIT_ORDERS_BLOCKED: bool = os.getenv("BYBIT_ORDERS_BLOCKED", "false").lower() == "true"
+ENABLE_OKX_GRID:      bool = os.getenv("ENABLE_OKX_GRID",      "true").lower()  == "true"
+
 # ── Bitso (BTC/MXN monitoring) ───────────────────────────────────────────────
 BITSO_API_KEY: str = os.getenv("BITSO_API_KEY", "")   # vacio = solo lectura
 BITSO_SECRET:  str = os.getenv("BITSO_SECRET",  "")   # vacio = solo lectura
