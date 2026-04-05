@@ -211,26 +211,11 @@ class TriangularArb:
         bybit_bal = 0.0
         bybit_err = ""
         try:
-            from pybit.unified_trading import HTTP as BybitHTTP
-            session = BybitHTTP(
-                testnet=False,
-                api_key=config.BYBIT_API_KEY,
-                api_secret=config.BYBIT_API_SECRET,
-                base_url="https://api.bytick.com",
-            )
-            loop   = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: session.get_wallet_balance(accountType="UNIFIED", coin="USDT"),
-            )
-            if result.get("retCode") == 0:
-                coins = result.get("result", {}).get("list", [{}])[0].get("coin", [])
-                for c in coins:
-                    if c.get("coin") == "USDT":
-                        bybit_bal = float(c.get("walletBalance", 0))
-                bybit_ok = True
-            else:
-                bybit_err = f"retCode={result.get('retCode')} {result.get('retMsg','')}"
+            from bybit_utils import fetch_usdt_balance
+            bybit_bal = await fetch_usdt_balance(caller="triangular_arb")
+            bybit_ok  = bybit_bal > 0
+            if not bybit_ok:
+                bybit_err = "No USDT balance found (UNIFIED/SPOT/CONTRACT)"
         except Exception as exc:
             bybit_err = str(exc)[:120]
 
@@ -472,20 +457,19 @@ class TriangularArb:
             pair, buy_ex, size_usd, trade.eth_btc_real, sell_ex, trade.eth_btc_impl,
         )
 
-        session = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET, base_url="https://api.bytick.com")
-        loop    = asyncio.get_event_loop()
-        _qty    = asset_qty
+        _qty = asset_qty
 
         if trade.route == "A":
-            bybit_fn = lambda: session.place_order(category="spot", symbol=pair, side="Buy",  orderType="Market", qty=str(_qty))
-            okx_side = "sell"
+            bybit_side = "Buy"
+            okx_side   = "sell"
         else:
-            bybit_fn = lambda: session.place_order(category="spot", symbol=pair, side="Sell", orderType="Market", qty=str(_qty))
-            okx_side = "buy"
+            bybit_side = "Sell"
+            okx_side   = "buy"
 
+        from bybit_utils import place_spot_order
         try:
             bybit_result, okx_result = await asyncio.gather(
-                loop.run_in_executor(None, bybit_fn),
+                place_spot_order(pair, bybit_side, _qty, caller="triangular_arb"),
                 self._okx_spot_order(okx_symbol, okx_side, _qty, size_usd=size_usd),
                 return_exceptions=True,
             )

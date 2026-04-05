@@ -91,9 +91,9 @@ class CrossExchangeArb:
         self._last_check: Dict[str, float] = {}   # par -> ultimo ts de arb
 
         # Real executors (lazy init)
-        self._okx_exec = None
-        self._bybit_session = None
-        self._balance_ok = True        # flip to False if balance < threshold
+        self._okx_exec    = None
+        self._bybit_ready = False      # True cuando keys OK — sin pybit SDK
+        self._balance_ok  = True       # flip to False if balance < threshold
         self._last_balance_check: float = 0.0
 
         if production:
@@ -240,34 +240,24 @@ class CrossExchangeArb:
             logger.error("[cross_arb] OKX executor init ERROR: {}", exc)
             self._okx_exec = None
 
-        # Bybit (using pybit)
-        try:
-            from pybit.unified_trading import HTTP as BybitHTTP
-            if config.BYBIT_API_KEY and config.BYBIT_API_SECRET:
-                self._bybit_session = BybitHTTP(
-                    testnet=False,
-                    api_key=config.BYBIT_API_KEY,
-                    api_secret=config.BYBIT_API_SECRET,
-                    base_url="https://api.bytick.com",
-                )
-                logger.info("[cross_arb] Bybit session OK ✅ (key={}****)", config.BYBIT_API_KEY[:4])
-            else:
-                logger.error(
-                    "[cross_arb] Bybit keys FALTANTES — "
-                    "BYBIT_API_KEY={} BYBIT_API_SECRET={}",
-                    bool(config.BYBIT_API_KEY), bool(config.BYBIT_API_SECRET),
-                )
-        except ImportError:
-            logger.error("[cross_arb] pybit no instalado — 'pip install pybit'")
-        except Exception as exc:
-            logger.error("[cross_arb] Bybit session init ERROR: {}", exc)
+        # Bybit — via aiohttp directo a api.bytick.com (sin pybit SDK)
+        if config.BYBIT_API_KEY and config.BYBIT_API_SECRET:
+            self._bybit_ready = True
+            logger.info("[cross_arb] Bybit keys OK ✅ (key={}****)", config.BYBIT_API_KEY[:4])
+        else:
+            self._bybit_ready = False
+            logger.error(
+                "[cross_arb] Bybit keys FALTANTES — "
+                "BYBIT_API_KEY={} BYBIT_API_SECRET={}",
+                bool(config.BYBIT_API_KEY), bool(config.BYBIT_API_SECRET),
+            )
 
     def _can_execute_real(self) -> bool:
         """Check if both exchanges are ready for real execution."""
         return (
             self._production
             and self._okx_exec is not None
-            and self._bybit_session is not None
+            and self._bybit_ready
             and self._balance_ok
         )
 
@@ -312,14 +302,14 @@ class CrossExchangeArb:
         """
         if not self._can_execute_real():
             # Reintentar init si algún executor es None
-            if self._okx_exec is None or self._bybit_session is None:
+            if self._okx_exec is None or not self._bybit_ready:
                 logger.warning("[cross_arb] Executors no listos — reintentando init...")
                 self._init_real_executors()
             if not self._can_execute_real():
                 logger.error(
-                    "[cross_arb] REAL skipped — okx_exec={} bybit_session={} balance_ok={}",
+                    "[cross_arb] REAL skipped — okx_exec={} bybit_ready={} balance_ok={}",
                     self._okx_exec is not None,
-                    self._bybit_session is not None,
+                    self._bybit_ready,
                     self._balance_ok,
                 )
                 self._trades.append(trade)  # still record as paper
@@ -431,19 +421,18 @@ class CrossExchangeArb:
     async def _bybit_market_order(
         self, pair: str, side: str, size_usd: float, price: float
     ) -> Optional[Dict]:
-        """Place a market order on Bybit SPOT via pybit."""
-        if not self._bybit_session:
+        """Place a market order on Bybit SPOT via aiohttp (sin pybit)."""
+        if not self._bybit_ready:
             return None
 
         # Calculate qty in base asset
         qty = size_usd / price if price > 0 else 0
-        # Round to appropriate precision
         if pair == "BTCUSDT":
-            qty = round(qty, 3)     # min 0.001 BTC
+            qty = round(qty, 3)
         elif pair == "ETHUSDT":
-            qty = round(qty, 2)     # min 0.01 ETH
+            qty = round(qty, 2)
         elif pair == "SOLUSDT":
-            qty = round(qty, 1)     # min 0.1 SOL
+            qty = round(qty, 1)
         else:
             qty = round(qty, 3)
 
@@ -451,62 +440,26 @@ class CrossExchangeArb:
             logger.warning("[cross_arb] Bybit qty too small for {} (${:.0f})", pair, size_usd)
             return None
 
-        try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._bybit_session.place_order(
-                    category="spot",
-                    symbol=pair,
-                    side=side,
-                    orderType="Market",
-                    qty=str(qty),
-                ),
-            )
-
-            ret_code = result.get("retCode", -1)
-            if ret_code != 0:
-                logger.error(
-                    "[cross_arb] Bybit order FAILED {}: {}",
-                    pair, result.get("retMsg", "unknown"),
-                )
-                return None
-
-            order_id = result.get("result", {}).get("orderId", "")
-            logger.info("[cross_arb] Bybit {} {} {} qty={} orderId={}", side, pair, "OK", qty, order_id)
-            return {
-                "exchange": "bybit",
-                "order_id": order_id,
-                "pair": pair,
-                "side": side,
-                "qty": qty,
-                "price_hint": price,
-            }
-
-        except Exception as exc:
-            logger.error("[cross_arb] Bybit order exception: {}", exc)
+        from bybit_utils import place_spot_order
+        result   = await place_spot_order(pair, side, qty, caller="cross_arb")
+        ret_code = result.get("retCode", -1)
+        if ret_code != 0:
             return None
 
+        order_id = result.get("result", {}).get("orderId", "")
+        return {
+            "exchange":   "bybit",
+            "order_id":   order_id,
+            "pair":       pair,
+            "side":       side,
+            "qty":        qty,
+            "price_hint": price,
+        }
+
     async def _bybit_coin_balance(self, coin: str) -> float:
-        """Fetch available balance of a specific coin on Bybit UNIFIED account."""
-        if not self._bybit_session:
-            return 0.0
-        try:
-            loop   = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._bybit_session.get_wallet_balance(
-                    accountType="UNIFIED", coin=coin
-                ),
-            )
-            if result.get("retCode") == 0:
-                coins = result.get("result", {}).get("list", [{}])[0].get("coin", [])
-                for c in coins:
-                    if c.get("coin") == coin:
-                        return float(c.get("availableToWithdraw", c.get("walletBalance", 0)))
-        except Exception as exc:
-            logger.warning("[cross_arb] _bybit_coin_balance({}) error: {}", coin, exc)
-        return 0.0
+        """Fetch available balance of a specific coin on Bybit (aiohttp, sin pybit)."""
+        from bybit_utils import get_bybit_coin_balance
+        return await get_bybit_coin_balance(coin, caller="cross_arb")
 
     async def _okx_market_order(
         self, pair: str, side: str, size_usd: float, price: float
