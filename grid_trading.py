@@ -466,36 +466,43 @@ class GridTradingEngine:
                     asyncio.create_task(self._handle_sell(grid, level, price))
 
     async def _fetch_bybit_balance(self) -> float:
-        """Balance USDT disponible en Bybit Unified account."""
+        """Balance USDT disponible en Bybit. Intenta UNIFIED primero, luego SPOT."""
         if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
             return 0.0
         if time.time() - self._balance_ts < 60:
             return self._bybit_balance   # cache 60 s
         try:
-            ts  = str(int(time.time() * 1000))
-            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
-            sig = hmac.new(
-                config.BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256
-            ).hexdigest()
-            headers = {
-                "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
-                "X-BAPI-TIMESTAMP":   ts,
-                "X-BAPI-SIGN":        sig,
-                "X-BAPI-RECV-WINDOW": "5000",
-            }
-            url = "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT"
             async with aiohttp.ClientSession() as s:
-                async with s.get(url, headers=headers,
-                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
-                    data = await r.json()
-                    if data.get("retCode") == 0:
-                        for c in data["result"]["list"][0].get("coin", []):
-                            if c.get("coin") == "USDT":
-                                bal = float(c.get("walletBalance", 0))
-                                self._bybit_balance = bal
-                                self._balance_ts    = time.time()
-                                logger.info("[grid] Bybit balance: ${:.2f}", bal)
-                                return bal
+                for acct_type in ("UNIFIED", "SPOT"):
+                    query = f"accountType={acct_type}&coin=USDT"
+                    ts    = str(int(time.time() * 1000))
+                    msg   = f"{ts}{config.BYBIT_API_KEY}5000{query}"
+                    sig   = hmac.new(
+                        config.BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256
+                    ).hexdigest()
+                    headers = {
+                        "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
+                        "X-BAPI-TIMESTAMP":   ts,
+                        "X-BAPI-SIGN":        sig,
+                        "X-BAPI-RECV-WINDOW": "5000",
+                    }
+                    async with s.get(
+                        f"https://api.bybit.com/v5/account/wallet-balance?{query}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as r:
+                        data = await r.json()
+                        if data.get("retCode") == 0:
+                            for c in data["result"]["list"][0].get("coin", []):
+                                if c.get("coin") == "USDT":
+                                    bal = float(c.get("walletBalance", 0))
+                                    if bal > 0:
+                                        self._bybit_balance = bal
+                                        self._balance_ts    = time.time()
+                                        logger.info("[bybit] Balance {}=${:.2f} \u2705", acct_type, bal)
+                                        return bal
+                            logger.info("[bybit] Balance {}=$0 \u2192 intentando siguiente tipo", acct_type)
+            logger.warning("[bybit] Balance UNIFIED=$0 y SPOT=$0 \u2014 subcuenta incorrecta?")
         except Exception as exc:
             logger.warning("[grid] _fetch_bybit_balance error: {}", exc)
         return self._bybit_balance

@@ -79,9 +79,26 @@ class CapitalRebalancer:
         if not config.PRODUCTION:
             return
 
-        bybit_bal = await self._fetch_bybit()
+        bybit_raw = await self._fetch_bybit()   # None = error conexion
         okx_bal   = await self._fetch_okx()
-        total     = bybit_bal + okx_bal
+
+        # Si _fetch_bybit devolvio None → error de conexion, no alertar
+        if bybit_raw is None:
+            logger.warning("[rebalancer] Bybit sin conexion — omitiendo verificacion de balance")
+            return
+
+        bybit_bal = bybit_raw
+
+        # Si bybit=0 pero okx>0 → posible lectura incorrecta de subcuenta, no alertar
+        if bybit_bal == 0.0 and okx_bal > 5.0:
+            logger.warning(
+                "[rebalancer] Bybit=$0 con OKX=${:.2f} — posible subcuenta incorrecta, "
+                "omitiendo alerta hasta proxima verificacion",
+                okx_bal,
+            )
+            return
+
+        total = bybit_bal + okx_bal
 
         if total < 5.0:
             logger.warning("[rebalancer] Balance total muy bajo (${:.2f}) — omitiendo verificacion",
@@ -119,35 +136,47 @@ class CapitalRebalancer:
         if status in ("suggested", "urgent"):
             await self._alert(self._snap)
 
-    async def _fetch_bybit(self) -> float:
+    async def _fetch_bybit(self) -> Optional[float]:
+        """
+        Lee balance USDT en Bybit.
+        Intenta accountType=UNIFIED primero; si retorna 0, intenta SPOT.
+        Retorna None si hubo error de conexion (no confundir con balance=0 valido).
+        """
         if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
             return 0.0
         try:
-            ts  = str(int(time.time() * 1000))
-            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
-            sig = hmac.new(config.BYBIT_API_SECRET.encode(),
-                           msg.encode(), hashlib.sha256).hexdigest()
-            headers = {
-                "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
-                "X-BAPI-TIMESTAMP":   ts,
-                "X-BAPI-SIGN":        sig,
-                "X-BAPI-RECV-WINDOW": "5000",
-            }
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    "https://api.bybit.com/v5/account/wallet-balance"
-                    "?accountType=UNIFIED&coin=USDT",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as r:
-                    data = await r.json()
-                    if data.get("retCode") == 0:
-                        for c in data["result"]["list"][0].get("coin", []):
-                            if c.get("coin") == "USDT":
-                                return float(c.get("walletBalance", 0))
+            for acct_type in ("UNIFIED", "SPOT"):
+                query = f"accountType={acct_type}&coin=USDT"
+                ts    = str(int(time.time() * 1000))
+                msg   = f"{ts}{config.BYBIT_API_KEY}5000{query}"
+                sig   = hmac.new(config.BYBIT_API_SECRET.encode(),
+                                 msg.encode(), hashlib.sha256).hexdigest()
+                headers = {
+                    "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
+                    "X-BAPI-TIMESTAMP":   ts,
+                    "X-BAPI-SIGN":        sig,
+                    "X-BAPI-RECV-WINDOW": "5000",
+                }
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        f"https://api.bybit.com/v5/account/wallet-balance?{query}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as r:
+                        data = await r.json()
+                        if data.get("retCode") == 0:
+                            for c in data["result"]["list"][0].get("coin", []):
+                                if c.get("coin") == "USDT":
+                                    bal = float(c.get("walletBalance", 0))
+                                    if bal > 0:
+                                        logger.info("[bybit] Balance {}=${:.2f} ✅", acct_type, bal)
+                                        return bal
+                            logger.info("[bybit] Balance {}=$0 → intentando siguiente tipo", acct_type)
+            logger.warning("[bybit] Balance UNIFIED=$0 y SPOT=$0 — cuenta vacia o subcuenta incorrecta")
+            return 0.0
         except Exception as exc:
-            logger.warning("[rebalancer] Bybit balance error: {}", exc)
-        return 0.0
+            logger.warning("[rebalancer] Bybit balance error de conexion: {}", exc)
+            return None
 
     async def _fetch_okx(self) -> float:
         if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:

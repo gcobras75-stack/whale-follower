@@ -135,6 +135,49 @@ class BybitTestnetExecutor:
         in_use = sum(t.size_usd for t in self._trades if t.status in ("open", "partial"))
         return max(self._capital - in_use, 0.0)
 
+    async def fetch_real_balance(self) -> float:
+        """
+        Lee balance USDT real desde Bybit API.
+        Intenta accountType=UNIFIED primero; si retorna 0, intenta SPOT.
+        Actualiza self._capital con el valor real encontrado.
+        """
+        if not self._api_key or not self._api_secret:
+            return self._capital
+        try:
+            async with aiohttp.ClientSession() as s:
+                for acct_type in ("UNIFIED", "SPOT"):
+                    query = f"accountType={acct_type}&coin=USDT"
+                    ts    = str(int(time.time() * 1000))
+                    msg   = f"{ts}{self._api_key}5000{query}"
+                    sig   = hmac.new(
+                        self._api_secret.encode(), msg.encode(), hashlib.sha256
+                    ).hexdigest()
+                    headers = {
+                        "X-BAPI-API-KEY":     self._api_key,
+                        "X-BAPI-TIMESTAMP":   ts,
+                        "X-BAPI-SIGN":        sig,
+                        "X-BAPI-RECV-WINDOW": "5000",
+                    }
+                    async with s.get(
+                        f"https://api.bybit.com/v5/account/wallet-balance?{query}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as r:
+                        data = await r.json()
+                        if data.get("retCode") == 0:
+                            for c in data["result"]["list"][0].get("coin", []):
+                                if c.get("coin") == "USDT":
+                                    bal = float(c.get("walletBalance", 0))
+                                    if bal > 0:
+                                        logger.info("[bybit] Balance {}=${:.2f} ✅", acct_type, bal)
+                                        self._capital = bal
+                                        return bal
+                            logger.info("[bybit] Balance {}=$0 → intentando siguiente tipo", acct_type)
+            logger.warning("[bybit] Balance UNIFIED=$0 y SPOT=$0 — subcuenta incorrecta?")
+        except Exception as exc:
+            logger.warning("[executor] fetch_real_balance error: {}", exc)
+        return self._capital
+
     async def open_trade(
         self,
         signal_score: int,
