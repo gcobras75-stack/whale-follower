@@ -49,6 +49,8 @@ _FEATURE_KEYS = [
     "spring_bounce_pct",
     "price_vs_vwap",
     "hour_of_day",
+    "implied_volatility",  # Volatilidad implícita (opciones/histórica aproximada)
+    "volume_zscore",       # Z-score del volumen actual vs media histórica
 ]
 
 
@@ -85,6 +87,8 @@ def _generate_warmstart_data() -> Tuple[list, list]:
             rng.uniform(0.004, 0.012),   # spring_bounce_pct
             rng.uniform(-0.002, 0.002),  # price_vs_vwap
             float(rng.randint(8, 20)),   # hour_of_day
+            rng.uniform(0.25, 0.60),     # implied_volatility (IV moderada-alta en oportunidades)
+            rng.uniform(1.8, 3.5),       # volume_zscore      (volumen inusual en ganadores)
         ]
 
     def _rand_loser() -> List[float]:
@@ -104,6 +108,8 @@ def _generate_warmstart_data() -> Tuple[list, list]:
             rng.uniform(0.001, 0.003),   # spring_bounce_pct
             rng.uniform(-0.010, 0.010),  # price_vs_vwap
             float(rng.randint(0, 23)),   # hour_of_day
+            rng.uniform(0.05, 0.20),     # implied_volatility (IV baja en señales malas)
+            rng.uniform(-0.5, 1.2),      # volume_zscore      (volumen normal en perdedores)
         ]
 
     for _ in range(17):
@@ -245,7 +251,19 @@ class MLModel:
     def _load_model(self) -> None:
         try:
             with open(_MODEL_PATH, "rb") as fh:
-                self._model = pickle.load(fh)
+                model = pickle.load(fh)
+            # Verificar que el modelo fue entrenado con el mismo número de features
+            n_expected = len(_FEATURE_KEYS)
+            n_model    = getattr(model, "n_features_in_", None)
+            if n_model is not None and n_model != n_expected:
+                logger.warning(
+                    "[ml_model] Modelo tiene {} features, se esperan {} (IV+VolumeZScore añadidos) "
+                    "— reentrenando con warm-start",
+                    n_model, n_expected,
+                )
+                self._train_warmstart()
+                return
+            self._model = model
             logger.info("[ml_model] Loaded model from {}", _MODEL_PATH)
         except Exception as exc:
             logger.warning("[ml_model] Could not load model, retraining: {}", exc)

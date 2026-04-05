@@ -5,8 +5,9 @@ One spring/CVD/cascade engine per pair. Routes trades and returns signals.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -42,6 +43,7 @@ class PairState:
     last_score: int = 0
     last_signal_ts: float = 0.0
     last_spring_data: Optional[Dict] = None
+    price_history: deque = field(default_factory=lambda: deque(maxlen=300))
 
 
 class MultiPairMonitor:
@@ -87,6 +89,9 @@ class MultiPairMonitor:
         state.cvd.update(side=trade.side, quantity=trade.quantity, timestamp=trade.timestamp)
         cvd_metrics: CVDMetrics = state.cvd.metrics()
 
+        # Acumular historial de precios para ATR
+        state.price_history.append((trade.price, trade.timestamp))
+
         # Update cascade
         cascade_event: CascadeEvent = state.cascade.add(
             side=trade.side, quantity=trade.quantity, timestamp=trade.timestamp
@@ -130,9 +135,8 @@ class MultiPairMonitor:
 
         state.last_signal_ts = now
 
-        # Compute entry / exits
-        stop_loss = current_price * (1.0 - config.STOP_LOSS_PCT)
-        take_profit = current_price + (current_price - stop_loss) * config.RISK_REWARD
+        # Compute entry / exits — ATR dinámico con fallback a config fijo
+        stop_loss, take_profit = self._atr_exits(state, current_price)
 
         signal = PairSignal(
             pair=pair,
@@ -155,6 +159,69 @@ class MultiPairMonitor:
             pair, score, current_price, stop_loss, take_profit,
         )
         return signal
+
+    # ── ATR-based dynamic risk management ──────────────────────────────────────────────────
+
+    def _atr_exits(self, state: PairState, entry: float) -> Tuple[float, float]:
+        """SL = entry - 1.5*ATR, TP = entry + 1.5*ATR*RR (RR 3:1).
+        Fallback a STOP_LOSS_PCT / RISK_REWARD fijos de config si no hay datos suficientes.
+        """
+        atr = self._compute_atr14(state)
+        if atr and atr > 0:
+            sl_dist = 1.5 * atr
+            stop_loss   = entry - sl_dist
+            take_profit = entry + sl_dist * config.RISK_REWARD
+            logger.info(
+                "MultiPairMonitor: {} ATR={:.4f} SL={:.4f} TP={:.4f} (dinámico 1.5×ATR)",
+                state.pair, atr, stop_loss, take_profit,
+            )
+            return stop_loss, take_profit
+        # Fallback: valores fijos de config.py
+        stop_loss   = entry * (1.0 - config.STOP_LOSS_PCT)
+        take_profit = entry + (entry - stop_loss) * config.RISK_REWARD
+        logger.debug("MultiPairMonitor: {} SL fijo (ATR insuf. datos)", state.pair)
+        return stop_loss, take_profit
+
+    def _compute_atr14(self, state: PairState) -> Optional[float]:
+        """ATR(14) calculado desde pseudo-velas de 1 minuto usando tick data."""
+        if len(state.price_history) < 14:
+            return None
+
+        # Agrupar en pseudo-velas de 1 minuto
+        buckets: Dict[int, Dict[str, float]] = {}
+        for price, ts in state.price_history:
+            bkt = int(ts // 60)
+            if bkt not in buckets:
+                buckets[bkt] = {"h": price, "l": price, "c": price}
+            else:
+                b = buckets[bkt]
+                if price > b["h"]:
+                    b["h"] = price
+                if price < b["l"]:
+                    b["l"] = price
+                b["c"] = price
+
+        sorted_b = sorted(buckets.items())
+        if len(sorted_b) < 2:
+            return None
+
+        # True Range por cada vela
+        trs: List[float] = []
+        for i in range(1, len(sorted_b)):
+            _, cur  = sorted_b[i]
+            _, prev = sorted_b[i - 1]
+            trs.append(max(
+                cur["h"] - cur["l"],
+                abs(cur["h"] - prev["c"]),
+                abs(cur["l"] - prev["c"]),
+            ))
+
+        if not trs:
+            return None
+
+        # ATR = media de los últimos 14 TR disponibles
+        recent = trs[-14:]
+        return sum(recent) / len(recent)
 
     def get_all_scores(self) -> Dict[str, int]:
         """Return the most recent score for every pair."""

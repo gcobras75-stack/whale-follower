@@ -34,6 +34,11 @@ _REFRESH_CALENDAR = 3600   # cada hora
 _REFRESH_NEWS     = 300    # cada 5 minutos
 _REFRESH_REDDIT   = 180    # cada 3 minutos
 _REFRESH_TWITTER  = 240    # cada 4 minutos
+_REFRESH_DXY      = 300    # cada 5 minutos
+
+# DXY — Yahoo Finance (sin API key, aiohttp directo)
+_DXY_URL         = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=5m&range=1h"
+_DXY_UP_THRESHOLD = 0.30   # % cambio en 5 min para considerar tendencia alcista fuerte
 _PRE_EVENT_SECS   = 1800   # pausar 30 min ANTES del evento
 _POST_EVENT_SECS  = 900    # pausar 15 min DESPUÉS del evento
 _ARTICLE_WINDOW   = 1800   # solo noticias de los últimos 30 min
@@ -116,11 +121,17 @@ class MacroSnapshot:
     # Ajuste total de sentimiento
     news_sentiment_adj: int = 0    # -20 a +15
 
+    # DXY — Índice Dólar
+    dxy_value:      float = 0.0
+    dxy_change_5m:  float = 0.0    # % cambio últimos 5 minutos
+    dxy_strong_up:  bool  = False  # True si DXY subió > 0.30% en 5 min
+
     # Meta
     last_calendar_update: float = 0.0
     last_news_update: float = 0.0
     last_reddit_update: float = 0.0
     last_twitter_update: float = 0.0
+    last_dxy_update: float = 0.0
 
 
 # ── Motor principal ────────────────────────────────────────────────────────────
@@ -148,6 +159,10 @@ class MacroAgent:
     def sentiment_adjustment(self) -> int:
         return self._snap.news_sentiment_adj
 
+    def dxy_trend(self) -> tuple[float, bool]:
+        """Retorna (change_pct_5m, strong_up) del DXY. Sin bloqueo."""
+        return self._snap.dxy_change_5m, self._snap.dxy_strong_up
+
     def snapshot(self) -> MacroSnapshot:
         return self._snap
 
@@ -155,13 +170,14 @@ class MacroAgent:
 
     async def run(self) -> None:
         logger.info(
-            "[macro_agent] iniciando — calendario + CryptoPanic + Reddit + X/Nitter"
+            "[macro_agent] iniciando — calendario + CryptoPanic + Reddit + X/Nitter + DXY"
         )
         await asyncio.gather(
             self._calendar_loop(),
             self._news_loop(),
             self._reddit_loop(),
             self._twitter_loop(),
+            self._dxy_loop(),
         )
 
     # ── 1. Calendario económico ────────────────────────────────────────────────
@@ -349,6 +365,54 @@ class MacroAgent:
 
         self._tweets = tweets
         self._snap.last_twitter_update = time.time()
+
+    # ── 5. DXY — Índice Dólar en tiempo real ──────────────────────────────
+
+    async def _dxy_loop(self) -> None:
+        await asyncio.sleep(15)   # espera inicial para no saturar arranque
+        while True:
+            await self._fetch_dxy()
+            await asyncio.sleep(_REFRESH_DXY)
+
+    async def _fetch_dxy(self) -> None:
+        """Obtiene datos DXY de Yahoo Finance (sin API key). No bloquea si falla."""
+        timeout = aiohttp.ClientTimeout(total=12)
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; WhaleBot/1.0)"}
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(_DXY_URL) as resp:
+                    if resp.status != 200:
+                        raise ValueError(f"HTTP {resp.status}")
+                    data = await resp.json(content_type=None)
+
+            result = data.get("chart", {}).get("result", [{}])[0]
+            closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            closes = [c for c in closes if c is not None]
+
+            if len(closes) < 2:
+                return
+
+            current   = closes[-1]
+            prev_5m   = closes[-2]
+            change    = (current - prev_5m) / prev_5m * 100
+
+            self._snap.dxy_value     = current
+            self._snap.dxy_change_5m = change
+            self._snap.dxy_strong_up = change >= _DXY_UP_THRESHOLD
+            self._snap.last_dxy_update = time.time()
+
+            if self._snap.dxy_strong_up:
+                logger.info(
+                    "[macro_agent] DXY alcista fuerte: {:.4f} ({:+.3f}% en 5m) "
+                    "→ multiplicador Long 0.85x activo",
+                    current, change,
+                )
+            else:
+                logger.debug(
+                    "[macro_agent] DXY: {:.4f} ({:+.3f}% en 5m)", current, change
+                )
+        except Exception as exc:
+            logger.debug("[macro_agent] DXY fetch fallo (no bloquea): {}", exc)
 
     # ── Recalcular sentimiento (combina todas las fuentes) ────────────────────
 

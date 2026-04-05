@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from loguru import logger
 from cascade_detector import CascadeEvent
 from context_engine import MarketContext
 from cvd_real import CVDMetrics
@@ -86,6 +87,9 @@ class ExtendedContext:
     options_bullish_sweep: bool  = False  # large call sweep → +8 pts
     options_bearish_sweep: bool  = False  # large put sweep → -8 pts
     options_pts:           int   = 0      # ajuste final calculado
+
+    # Capa 12 — DXY Macro Correlation
+    dxy_strong_up: bool = False   # DXY +0.30% en 5m → multiplicador 0.85x en Long
 
 
 # ── Score breakdown ────────────────────────────────────────────────────────────
@@ -354,6 +358,14 @@ class ScoringEngine:
 
         # Aplicar Fear & Greed multiplier (0.8 o 1.2)
         raw_adj = raw * ext.fear_greed_multiplier
+
+        # Capa 12 — DXY Macro: si el dólar sube fuerte, reducir score Long
+        if ext.dxy_strong_up:
+            raw_adj *= 0.85
+            logger.info(
+                "[scoring] DXY alcista → 0.85x Long score ({:.1f} → {:.1f})",
+                raw_adj / 0.85, raw_adj,
+            )
 
         # Aplicar session multiplier (max +20%)
         final = raw_adj * min(context.session_multiplier, 1.2)
