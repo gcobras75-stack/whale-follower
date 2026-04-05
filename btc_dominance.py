@@ -86,6 +86,10 @@ class BtcDominanceMonitor:
                     timeout=aiohttp.ClientTimeout(total=15),
                     headers={"Accept": "application/json"},
                 ) as resp:
+                    if resp.status == 429:
+                        logger.warning("[btc_dom] Rate limit CoinGecko (429) — esperando 60s")
+                        await asyncio.sleep(60)
+                        return
                     if resp.status != 200:
                         logger.warning("[btc_dom] HTTP {}", resp.status)
                         return

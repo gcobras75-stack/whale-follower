@@ -148,8 +148,9 @@ async def trading_loop() -> None:
     deribit_mod     = _try_import("deribit_options")
     btc_dom_mod  = _try_import("btc_dominance")
     liq_glob_mod = _try_import("liquidations_global")
-    dxy_mod      = _try_import("dxy_monitor")
-    daily_rep_mod = _try_import("daily_report")
+    dxy_mod        = _try_import("dxy_monitor")
+    daily_rep_mod  = _try_import("daily_report")
+    rebalancer_mod = _try_import("rebalancer")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -165,8 +166,9 @@ async def trading_loop() -> None:
     btc_dom    = btc_dom_mod.BtcDominanceMonitor()       if btc_dom_mod   else None
     liq_glob   = liq_glob_mod.LiquidationsGlobal()       if liq_glob_mod  else None
     dxy_mon    = dxy_mod.DxyMonitor()                    if dxy_mod       else None
-    daily_rep  = daily_rep_mod.DailyReporter()           if daily_rep_mod else None
-    session_vol   = session_vol_mod.SessionVolumeTracker() if session_vol_mod else None
+    daily_rep     = daily_rep_mod.DailyReporter()              if daily_rep_mod   else None
+    rebalancer    = rebalancer_mod.CapitalRebalancer()          if rebalancer_mod  else None
+    session_vol   = session_vol_mod.SessionVolumeTracker()      if session_vol_mod else None
     ml_model      = ml_mod.MLModel()                   if ml_mod          else None
 
     # ── Motores principales ────────────────────────────────────────────────────
@@ -175,7 +177,7 @@ async def trading_loop() -> None:
     monitor    = MultiPairMonitor()
     selector   = PairSelector()
     allocator  = CapitalAllocator()
-    risk_mgr   = RiskManager(config.PAPER_CAPITAL)
+    risk_mgr   = RiskManager(config.REAL_CAPITAL if config.PRODUCTION else config.PAPER_CAPITAL)
     executor   = BybitTestnetExecutor()
     _executor_ref = executor
 
@@ -226,7 +228,9 @@ async def trading_loop() -> None:
     if dxy_mon:
         asyncio.create_task(dxy_mon.run(),    name="dxy_monitor")
     if daily_rep:
-        asyncio.create_task(daily_rep.run(),  name="daily_report")
+        asyncio.create_task(daily_rep.run(),   name="daily_report")
+    if rebalancer:
+        asyncio.create_task(rebalancer.run(),  name="rebalancer")
 
     _ready = True
 
@@ -276,6 +280,52 @@ async def trading_loop() -> None:
     logger.info("[config] PRODUCTION:           {}", config.PRODUCTION)
     logger.info("[config] ENABLE_CROSS_ARB_REAL:{}", cross_arb_real)
     logger.info("[config] ================================")
+
+    # ── Balance real al inicio ────────────────────────────────────────────────
+    if config.PRODUCTION and config.BYBIT_API_KEY:
+        try:
+            import hmac as _hmac, hashlib as _hashlib
+            _ts  = str(int(__import__('time').time() * 1000))
+            _msg = f"{_ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            _sig = _hmac.new(config.BYBIT_API_SECRET.encode(), _msg.encode(), _hashlib.sha256).hexdigest()
+            _hdrs = {"X-BAPI-API-KEY": config.BYBIT_API_KEY, "X-BAPI-TIMESTAMP": _ts,
+                     "X-BAPI-SIGN": _sig, "X-BAPI-RECV-WINDOW": "5000"}
+            import aiohttp as _aio
+            async with _aio.ClientSession() as _s:
+                async with _s.get(
+                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    headers=_hdrs, timeout=_aio.ClientTimeout(total=8),
+                ) as _r:
+                    _bd = await _r.json()
+                    _bybit_bal = 0.0
+                    if _bd.get("retCode") == 0:
+                        for _c in _bd["result"]["list"][0].get("coin", []):
+                            if _c.get("coin") == "USDT":
+                                _bybit_bal = float(_c.get("walletBalance", 0))
+            _okx_bal = 0.0
+            if config.OKX_API_KEY and config.OKX_PASSPHRASE:
+                from datetime import datetime, timezone as _tz
+                import base64 as _b64
+                _ots = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+                _path = "/api/v5/account/balance?ccy=USDT"
+                _osig = _b64.b64encode(_hmac.new(
+                    config.OKX_SECRET.encode(), (_ots + "GET" + _path).encode(), _hashlib.sha256
+                ).digest()).decode()
+                _ohdrs = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": _osig,
+                          "OK-ACCESS-TIMESTAMP": _ots, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+                async with _aio.ClientSession() as _s:
+                    async with _s.get(f"https://www.okx.com{_path}", headers=_ohdrs,
+                                       timeout=_aio.ClientTimeout(total=8)) as _r:
+                        _od = await _r.json()
+                        if _od.get("code") == "0":
+                            for _d in _od.get("data", [{}])[0].get("details", []):
+                                if _d.get("ccy") == "USDT":
+                                    _okx_bal = float(_d.get("eq", 0))
+            _total_bal = _bybit_bal + _okx_bal
+            logger.info("[config] Balance REAL  — Bybit: ${:.2f} | OKX: ${:.2f} | Total: ${:.2f}",
+                        _bybit_bal, _okx_bal, _total_bal)
+        except Exception as _exc:
+            logger.warning("[config] No se pudo obtener balance real al inicio: {}", _exc)
 
     logger.info("=" * 60)
     logger.info(" Whale Follower Bot -- Sprint 6")

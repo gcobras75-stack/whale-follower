@@ -31,7 +31,14 @@ _PRICE_URL   = "https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT"
 _LS_URL      = ("https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
                 "?symbol=BTCUSDT&period=5m&limit=12")
 
-_POLL_SECS      = 120     # 2 minutos
+_POLL_SECS            = 120     # 2 minutos
+_MAX_BINANCE_FAILURES = 3      # intentos antes de cambiar a Bybit FAPI
+
+# Bybit FAPI fallback (publico, sin API key)
+_BYBIT_OI_URL    = ("https://api.bybit.com/v5/market/open-interest"
+                    "?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=1")
+_BYBIT_PRICE_URL = ("https://api.bybit.com/v5/market/tickers"
+                    "?category=linear&symbol=BTCUSDT")
 _LIQ_LONG_BLOCK = 50e6    # $50M liq LONG  → bloquear LONGS
 _LIQ_SHORT_BOOST = 50e6   # $50M liq SHORT → +10pts rebote
 _NORMAL_MAX      = 20e6   # < $20M → normal
@@ -66,6 +73,7 @@ class LiquidationsGlobal:
         self._signal:       str   = "normal"
         self._block_until:  float = 0.0
         self._long_pct_hist: deque = deque(maxlen=12)   # ultimas 12 lecturas
+        self._binance_failures: int   = 0                  # contador de fallos Binance
 
         logger.info(
             "[liq_global] Monitor iniciado | poll={}s | long_block>${:.0f}M"
@@ -107,6 +115,23 @@ class LiquidationsGlobal:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     async def _fetch(self) -> None:
+        if self._binance_failures >= _MAX_BINANCE_FAILURES:
+            logger.info("[liq_global] Usando Bybit FAPI (Binance fallo {} veces)",
+                        self._binance_failures)
+            await self._fetch_bybit()
+        else:
+            ok = await self._fetch_binance()
+            if not ok:
+                self._binance_failures += 1
+                logger.warning("[liq_global] Binance FAPI error #{}/{} — {}",
+                               self._binance_failures, _MAX_BINANCE_FAILURES,
+                               "cambiando a Bybit fallback" if self._binance_failures >= _MAX_BINANCE_FAILURES
+                               else "reintentando en siguiente ciclo")
+            else:
+                self._binance_failures = 0
+
+    async def _fetch_binance(self) -> bool:
+        """Obtiene OI y precio de Binance FAPI. Retorna True si exitoso."""
         try:
             async with aiohttp.ClientSession() as s:
                 oi_r, px_r, ls_r = await asyncio.gather(
@@ -116,10 +141,9 @@ class LiquidationsGlobal:
                     return_exceptions=True,
                 )
 
-                # Open Interest
                 if isinstance(oi_r, Exception) or isinstance(px_r, Exception):
-                    logger.warning("[liq_global] OI/price fetch error")
-                    return
+                    logger.warning("[liq_global] Binance OI/price fetch error")
+                    return False
 
                 oi_data = await oi_r.json()
                 px_data = await px_r.json()
@@ -128,39 +152,89 @@ class LiquidationsGlobal:
                 new_price = float(px_data["price"])
                 new_oi_usd = new_oi * new_price
 
-                # Estimar liquidaciones desde cambio de OI
                 if self._oi_btc > 0 and self._price > 0:
                     prev_oi_usd = self._oi_btc * self._price
                     oi_drop     = prev_oi_usd - new_oi_usd
-                    if oi_drop > 1e6:   # drop > $1M = evento relevante
+                    if oi_drop > 1e6:
                         price_change = new_price - self._price
                         if price_change < 0:
-                            self._liq_long  += oi_drop   # caida precio → liq LONG
+                            self._liq_long  += oi_drop
                         else:
-                            self._liq_short += oi_drop   # suba precio  → liq SHORT
+                            self._liq_short += oi_drop
 
                 self._oi_btc  = new_oi
                 self._price   = new_price
                 self._oi_usd  = new_oi_usd
 
-                # Long/Short ratio para info adicional
                 if not isinstance(ls_r, Exception):
                     try:
                         ls_data = await ls_r.json()
                         if ls_data and isinstance(ls_data, list):
                             long_pcts = [float(d.get("longAccount", 0.5)) for d in ls_data]
                             self._long_pct_hist.extend(long_pcts)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("[liq_global] L/S ratio parse error: {}", exc)
 
-                # Decaimiento progresivo de acumulados (vida media ~40min)
                 self._liq_long  *= 0.92
                 self._liq_short *= 0.92
-
                 self._evaluate()
+                return True
 
         except Exception as exc:
-            logger.warning("[liq_global] Fetch error: {} — reintento en {}s", exc, _POLL_SECS)
+            logger.warning("[liq_global] Binance _fetch error: {}", exc)
+            return False
+
+    async def _fetch_bybit(self) -> None:
+        """Fallback: obtiene OI y precio de Bybit FAPI (sin API key)."""
+        try:
+            async with aiohttp.ClientSession() as s:
+                oi_r, px_r = await asyncio.gather(
+                    s.get(_BYBIT_OI_URL,    timeout=aiohttp.ClientTimeout(total=10)),
+                    s.get(_BYBIT_PRICE_URL, timeout=aiohttp.ClientTimeout(total=10)),
+                    return_exceptions=True,
+                )
+
+                if isinstance(oi_r, Exception) or isinstance(px_r, Exception):
+                    logger.warning("[liq_global] Bybit fallback error — sin datos")
+                    return
+
+                oi_data = await oi_r.json()
+                px_data = await px_r.json()
+
+                if oi_data.get("retCode") != 0 or px_data.get("retCode") != 0:
+                    logger.warning("[liq_global] Bybit retCode error — sin datos")
+                    return
+
+                oi_list  = oi_data.get("result", {}).get("list", [])
+                px_list  = px_data.get("result", {}).get("list", [])
+                if not oi_list or not px_list:
+                    return
+
+                new_oi    = float(oi_list[0].get("openInterest", 0))
+                new_price = float(px_list[0].get("lastPrice", 0))
+                new_oi_usd = new_oi * new_price
+
+                if self._oi_btc > 0 and self._price > 0:
+                    prev_oi_usd = self._oi_btc * self._price
+                    oi_drop     = prev_oi_usd - new_oi_usd
+                    if oi_drop > 1e6:
+                        price_change = new_price - self._price
+                        if price_change < 0:
+                            self._liq_long  += oi_drop
+                        else:
+                            self._liq_short += oi_drop
+
+                self._oi_btc  = new_oi
+                self._price   = new_price
+                self._oi_usd  = new_oi_usd
+                self._liq_long  *= 0.92
+                self._liq_short *= 0.92
+                self._evaluate()
+                logger.debug("[liq_global] Bybit fallback OK OI={:.0f} price={:.0f}",
+                             new_oi, new_price)
+
+        except Exception as exc:
+            logger.warning("[liq_global] Bybit fallback error: {}", exc)
 
     def _evaluate(self) -> None:
         ll = self._liq_long

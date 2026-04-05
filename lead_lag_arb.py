@@ -66,6 +66,7 @@ class LeadLagTrade:
     pnl_usd:      float = 0.0
     status:       str   = "open"   # "open" | "closed"
     production:   bool  = False
+    order_id:     str   = ""       # Bybit orderId si se ejecuto en real
 
 
 @dataclass
@@ -301,6 +302,8 @@ class LeadLagArb:
             trade.pair, trade.trade_id[:8], exit_price, trade.pnl_usd, reason,
         )
         asyncio.create_task(self._alert_close(trade, reason))
+        if trade.production and trade.order_id:
+            asyncio.create_task(self._close_real(trade, exit_price))
 
     async def _auto_close(self, trade: LeadLagTrade, window_secs: float) -> None:
         await asyncio.sleep(window_secs)
@@ -312,20 +315,104 @@ class LeadLagArb:
     # ── Real execution ────────────────────────────────────────────────────────
 
     async def _execute_real(self, trade: LeadLagTrade) -> None:
-        """
-        Para activar con dinero real:
-          1. Configurar BYBIT_API_KEY real en .env
-          2. Ejecutar market order en Bybit para el altcoin
-          3. Gestionar SL/TP via ordenes condicionadas en Bybit
+        """Ejecuta BUY spot en Bybit para el altcoin cuando capital >= $200."""
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            logger.error("[lead_lag] Faltan credenciales Bybit — abortando real")
+            self._trades.append(trade)
+            return
 
-        Por ahora registra la operacion en papel aunque production=True
-        hasta que las claves reales esten configuradas.
-        """
-        logger.warning(
-            "[lead_lag] REAL execution pendiente — "
-            "necesita BYBIT_API_KEY real y bybit_executor.market_order()."
-        )
+        pair  = trade.pair
+        price = trade.entry_price
+        if price <= 0:
+            logger.error("[lead_lag] Precio invalido para {}: {}", pair, price)
+            self._trades.append(trade)
+            return
+
+        qty = round(trade.size_usd / price, 6)
+        min_qty = {"ETHUSDT": 0.01, "SOLUSDT": 0.1, "BNBUSDT": 0.01}.get(pair, 0.01)
+        if qty < min_qty:
+            logger.warning("[lead_lag] {} qty={} < min={} (${:.2f}) — papel",
+                           pair, qty, min_qty, trade.size_usd)
+            self._trades.append(trade)
+            return
+
+        ts       = str(int(__import__('time').time() * 1000))
+        body_dict = {"category": "spot", "symbol": pair, "side": "Buy",
+                     "orderType": "Market", "qty": str(qty), "timeInForce": "IOC"}
+        import json as _json
+        body_str = _json.dumps(body_dict, separators=(",", ":"))
+        payload  = f"{ts}{config.BYBIT_API_KEY}5000{body_str}"
+        sig      = hmac.new(config.BYBIT_API_SECRET.encode(),
+                             payload.encode(), hashlib.sha256).hexdigest()
+        headers  = {"X-BAPI-API-KEY": config.BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts,
+                    "X-BAPI-SIGN": sig, "X-BAPI-RECV-WINDOW": "5000",
+                    "Content-Type": "application/json"}
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    "https://api.bytick.com/v5/order/create",
+                    headers=headers, data=body_str,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("retCode") == 0:
+                        trade.order_id  = data.get("result", {}).get("orderId", "")
+                        trade.production = True
+                        logger.info("[lead_lag] \U0001f7e2 REAL BUY {} ${:.0f} qty={} orderId={}",
+                                    pair, trade.size_usd, qty, trade.order_id)
+                    else:
+                        logger.error("[lead_lag] Bybit ORDER RECHAZADA {} retCode={} msg={}",
+                                     pair, data.get("retCode"), data.get("retMsg"))
+                        trade.production = False
+        except Exception as exc:
+            logger.error("[lead_lag] _execute_real exception {}: {}", pair, exc)
+            trade.production = False
+
         self._trades.append(trade)
+
+    async def _close_real(self, trade: LeadLagTrade, exit_price: float) -> None:
+        """Ejecuta SELL spot en Bybit para cerrar la posicion real."""
+        if not trade.production or not trade.order_id:
+            return
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return
+
+        pair  = trade.pair
+        price = exit_price if exit_price > 0 else trade.entry_price
+        qty   = round(trade.size_usd / trade.entry_price, 6)
+        min_qty = {"ETHUSDT": 0.01, "SOLUSDT": 0.1, "BNBUSDT": 0.01}.get(pair, 0.01)
+        if qty < min_qty:
+            logger.warning("[lead_lag] _close_real {} qty={} < min={} — skip", pair, qty, min_qty)
+            return
+
+        ts       = str(int(__import__('time').time() * 1000))
+        body_dict = {"category": "spot", "symbol": pair, "side": "Sell",
+                     "orderType": "Market", "qty": str(qty), "timeInForce": "IOC"}
+        import json as _json
+        body_str = _json.dumps(body_dict, separators=(",", ":"))
+        payload  = f"{ts}{config.BYBIT_API_KEY}5000{body_str}"
+        sig      = hmac.new(config.BYBIT_API_SECRET.encode(),
+                             payload.encode(), hashlib.sha256).hexdigest()
+        headers  = {"X-BAPI-API-KEY": config.BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts,
+                    "X-BAPI-SIGN": sig, "X-BAPI-RECV-WINDOW": "5000",
+                    "Content-Type": "application/json"}
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    "https://api.bytick.com/v5/order/create",
+                    headers=headers, data=body_str,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("retCode") == 0:
+                        close_id = data.get("result", {}).get("orderId", "")
+                        logger.info("[lead_lag] \U0001f534 REAL SELL {} qty={} orderId={}",
+                                    pair, qty, close_id)
+                    else:
+                        logger.error("[lead_lag] Bybit CLOSE RECHAZADA {} retCode={} msg={}",
+                                     pair, data.get("retCode"), data.get("retMsg"))
+        except Exception as exc:
+            logger.error("[lead_lag] _close_real exception {}: {}", pair, exc)
 
     # ── Telegram alert ────────────────────────────────────────────────────────
 

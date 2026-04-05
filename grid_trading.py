@@ -547,7 +547,7 @@ class GridTradingEngine:
             try:
                 async with aiohttp.ClientSession() as s:
                     async with s.post(
-                        "https://api.bybit.com/v5/order/create",
+                        "https://api.bytick.com/v5/order/create",
                         headers=headers, data=body_str,
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
