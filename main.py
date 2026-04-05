@@ -114,7 +114,8 @@ async def trading_loop() -> None:
     # ── Arbitraje (tolerante a fallos) ───────────────────────────────────────
     arb_mod = _try_import("arb_engine")
     prod = config.PRODUCTION   # True = dinero real, False = papel
-    arb_engine = arb_mod.ArbEngine(production=prod) if arb_mod else None
+    cross_arb_real = getattr(config, "ENABLE_CROSS_ARB_REAL", False)
+    arb_engine = arb_mod.ArbEngine(production=prod, cross_arb_real=cross_arb_real) if arb_mod else None
     _arb_ref = arb_engine
 
     # ── Estrategias avanzadas (tolerantes a fallos) ───────────────────────────

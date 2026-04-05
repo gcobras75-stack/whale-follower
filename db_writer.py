@@ -445,6 +445,56 @@ async def save_dn_payment(trade_id: str, new_total_pnl: float, payments_count: i
     )
 
 
+# ── Cross-Exchange Arb ────────────────────────────────────────────────────────
+
+async def save_cross_arb_trade(
+    trade_id: str,
+    pair: str,
+    buy_exchange: str,
+    sell_exchange: str,
+    buy_price: float,
+    sell_price: float,
+    spread_pct: float,
+    size_usd: float,
+    gross_pnl: float,
+    net_pnl: float,
+    production: bool,
+) -> None:
+    """Insert a cross-exchange arb trade into cross_arb_trades."""
+    row = {
+        "trade_id":      trade_id,
+        "pair":          pair,
+        "buy_exchange":  buy_exchange,
+        "sell_exchange": sell_exchange,
+        "buy_price":     round(buy_price, 4),
+        "sell_price":    round(sell_price, 4),
+        "spread_pct":    round(spread_pct, 4),
+        "size_usd":      round(size_usd, 2),
+        "gross_pnl":     round(gross_pnl, 6),
+        "net_pnl":       round(net_pnl, 6),
+        "production":    production,
+        "status":        "open",
+        "opened_at":     _now_ts(),
+    }
+    await _run(lambda: _client().table("cross_arb_trades").insert(row).execute())
+
+
+async def close_cross_arb_trade(trade_id: str, net_pnl: float) -> None:
+    """Update cross_arb_trades on close."""
+    upd = {
+        "status":    "closed",
+        "net_pnl":   round(net_pnl, 6),
+        "closed_at": _now_ts(),
+    }
+    await _run(
+        lambda: _client()
+        .table("cross_arb_trades")
+        .update(upd)
+        .eq("trade_id", trade_id)
+        .execute()
+    )
+
+
 # ── Range Trader ──────────────────────────────────────────────────────────────
 
 async def save_range_open(trade) -> None:

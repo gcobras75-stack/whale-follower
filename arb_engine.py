@@ -75,15 +75,18 @@ class ArbEngine:
         summary = arb.summary()
     """
 
-    def __init__(self, production: bool = False) -> None:
+    def __init__(self, production: bool = False, cross_arb_real: bool = False) -> None:
         self._production   = production
+        # Cross-exchange arb can be enabled in real mode independently
+        cross_prod = production or cross_arb_real
         self._funding      = FundingArbEngine(production=production)
-        self._cross        = CrossExchangeArb(production=production)
+        self._cross        = CrossExchangeArb(production=cross_prod)
         self._lead_lag     = LeadLagArb(production=production)
         self._triangular   = TriangularArb(production=production)
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[arb_engine] Iniciado en modo {} con 4 estrategias", mode)
+        cross_mode = "REAL" if cross_prod else "PAPEL"
+        logger.info("[arb_engine] Iniciado en modo {} con 4 estrategias (cross_arb={})", mode, cross_mode)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 

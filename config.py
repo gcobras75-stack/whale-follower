@@ -76,6 +76,15 @@ MIN_TRADES_FOR_LEVERAGE: int   = int(os.getenv("MIN_TRADES_FOR_LEVERAGE", "0"))
 LEVERAGE_WARMUP_WR:      float = float(os.getenv("LEVERAGE_WARMUP_WR",    "50"))
 LEVERAGE_WARMUP_SAMPLES: int   = int(os.getenv("LEVERAGE_WARMUP_SAMPLES", "20"))
 
+# ── OKX Real (cross-exchange arbitrage) ──────────────────────────────────────
+OKX_API_KEY:       str  = os.getenv("OKX_API_KEY",       "")
+OKX_SECRET:        str  = os.getenv("OKX_SECRET",        "")
+OKX_PASSPHRASE:    str  = os.getenv("OKX_PASSPHRASE",    "")
+ENABLE_CROSS_ARB_REAL: bool = os.getenv("ENABLE_CROSS_ARB_REAL", "false").lower() == "true"
+CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    "50"))
+CROSS_ARB_MIN_SPREAD_PCT:  float = float(os.getenv("CROSS_ARB_MIN_SPREAD_PCT",  "0.08"))
+CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", "10"))
+
 # ── Sprint 4 — Extended layers ────────────────────────────────────────────────
 NEWS_API_KEY:       str   = os.getenv("NEWS_API_KEY",        "")
 WHALE_ALERT_KEY:    str   = os.getenv("WHALE_ALERT_KEY",     "")

@@ -27,13 +27,17 @@ from typing import Deque, Dict, List, Optional
 from loguru import logger
 import aiohttp
 
+import config
+
 # ── Config ────────────────────────────────────────────────────────────────────
-_MIN_SPREAD_PCT  = 0.05    # spread minimo para abrir arb (> fees 0.04%)
+_MIN_SPREAD_PCT  = config.CROSS_ARB_MIN_SPREAD_PCT   # default 0.08%
 _MAX_SPREAD_PCT  = 2.0     # spread maximo (> 2% = dato anomalo, ignorar)
-_POSITION_SIZE   = 200.0   # USD por pata en papel
+_POSITION_SIZE   = config.CROSS_ARB_MAX_SIZE_USD     # default $50
 _TAKER_FEE_PCT   = 0.02    # fee por lado (Bybit/OKX taker fee)
 _PAIRS           = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 _PRICE_STALE_MS  = 2000    # precio stale si > 2 segundos
+_CLOSE_AFTER_SECS = 60     # cerrar ambas patas despues de N segundos
+_MIN_BALANCE_USD  = config.CROSS_ARB_MIN_BALANCE_USD  # default $10
 
 
 @dataclass
@@ -86,8 +90,20 @@ class CrossExchangeArb:
         self._opportunities: Deque[float] = deque(maxlen=1000)  # timestamps
         self._last_check: Dict[str, float] = {}   # par -> ultimo ts de arb
 
+        # Real executors (lazy init)
+        self._okx_exec = None
+        self._bybit_session = None
+        self._balance_ok = True        # flip to False if balance < threshold
+        self._last_balance_check: float = 0.0
+
+        if production:
+            self._init_real_executors()
+
         mode = "REAL" if production else "PAPEL"
-        logger.info("[cross_arb] Iniciado en modo {} | min_spread={}%", mode, _MIN_SPREAD_PCT)
+        logger.info(
+            "[cross_arb] Iniciado en modo {} | min_spread={}% | max_size=${}",
+            mode, _MIN_SPREAD_PCT, _POSITION_SIZE,
+        )
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -203,27 +219,300 @@ class CrossExchangeArb:
 
         asyncio.create_task(self._alert(trade))
 
+    # ── Real executors init ───────────────────────────────────────────────────
+
+    def _init_real_executors(self) -> None:
+        """Initialize real exchange connections."""
+        # OKX
+        try:
+            from okx_executor import OKXExecutor
+            self._okx_exec = OKXExecutor()
+            if not self._okx_exec.enabled:
+                logger.warning("[cross_arb] OKX executor not enabled — missing credentials")
+                self._okx_exec = None
+        except Exception as exc:
+            logger.warning("[cross_arb] OKX executor init failed: {}", exc)
+            self._okx_exec = None
+
+        # Bybit (using pybit)
+        try:
+            from pybit.unified_trading import HTTP as BybitHTTP
+            if config.BYBIT_API_KEY and config.BYBIT_API_SECRET:
+                self._bybit_session = BybitHTTP(
+                    testnet=False,
+                    api_key=config.BYBIT_API_KEY,
+                    api_secret=config.BYBIT_API_SECRET,
+                )
+                logger.info("[cross_arb] Bybit real session initialized")
+            else:
+                logger.warning("[cross_arb] Bybit real keys missing")
+        except Exception as exc:
+            logger.warning("[cross_arb] Bybit session init failed: {}", exc)
+
+    def _can_execute_real(self) -> bool:
+        """Check if both exchanges are ready for real execution."""
+        return (
+            self._production
+            and self._okx_exec is not None
+            and self._bybit_session is not None
+            and self._balance_ok
+        )
+
+    # ── Balance check ────────────────────────────────────────────────────────
+
+    async def _check_balances(self) -> bool:
+        """Verify OKX has enough balance. Cache for 60s."""
+        now = time.time()
+        if now - self._last_balance_check < 60:
+            return self._balance_ok
+        self._last_balance_check = now
+
+        if not self._okx_exec:
+            self._balance_ok = False
+            return False
+
+        okx_bal = await self._okx_exec.get_balance()
+        if okx_bal < _MIN_BALANCE_USD:
+            if self._balance_ok:  # only log on state change
+                logger.warning(
+                    "[cross_arb] OKX balance ${:.2f} < min ${:.0f} — PAUSING arb",
+                    okx_bal, _MIN_BALANCE_USD,
+                )
+            self._balance_ok = False
+        else:
+            if not self._balance_ok:
+                logger.info("[cross_arb] OKX balance OK ${:.2f} — RESUMING arb", okx_bal)
+            self._balance_ok = True
+
+        return self._balance_ok
+
     # ── Real execution (dinero real) ──────────────────────────────────────────
 
     async def _execute_real(self, trade: CrossArbTrade) -> None:
         """
-        Para activar con dinero real:
-          1. Configurar BYBIT_API_KEY + OKX_API_KEY reales en .env
-          2. Ejecutar ambas patas simultaneamente con asyncio.gather()
-          3. Verificar que ambas ordenes se ejecutaron antes de registrar P&L
+        Execute cross-exchange arb with real orders on both Bybit and OKX.
 
-        El riesgo de ejecucion parcial (leg risk) se mitiga con ordenes MARKET.
+        1. Check balances
+        2. Place simultaneous market orders on both exchanges
+        3. Schedule auto-close after _CLOSE_AFTER_SECS
+        4. Persist to Supabase
         """
-        logger.warning(
-            "[cross_arb] REAL execution pendiente — "
-            "necesita BYBIT_API_KEY + OKX_API_KEY reales."
+        if not self._can_execute_real():
+            logger.warning("[cross_arb] REAL execution skipped — executors not ready")
+            self._trades.append(trade)  # still record as paper
+            return
+
+        # Balance check
+        if not await self._check_balances():
+            logger.warning("[cross_arb] REAL execution skipped — balance too low")
+            self._trades.append(trade)
+            return
+
+        buy_price  = trade.buy_price
+        sell_price = trade.sell_price
+        pair       = trade.pair
+        size_usd   = min(trade.size_usd, config.CROSS_ARB_MAX_SIZE_USD)
+
+        logger.info(
+            "[cross_arb] REAL EXECUTION {} buy@{} sell@{} size=${:.0f}",
+            pair, trade.buy_exchange, trade.sell_exchange, size_usd,
         )
-        # Una vez configurado, descomentar:
-        # await asyncio.gather(
-        #     bybit_executor.market_order(trade.pair, "Buy", trade.size_usd),
-        #     okx_executor.market_order(trade.pair, "Sell", trade.size_usd),
-        # )
-        self._trades.append(trade)
+
+        # Execute both legs simultaneously
+        buy_result  = None
+        sell_result = None
+
+        try:
+            if trade.buy_exchange == "bybit":
+                buy_result, sell_result = await asyncio.gather(
+                    self._bybit_market_order(pair, "Buy", size_usd, buy_price),
+                    self._okx_market_order(pair, "sell", size_usd, sell_price),
+                    return_exceptions=True,
+                )
+            else:
+                buy_result, sell_result = await asyncio.gather(
+                    self._okx_market_order(pair, "buy", size_usd, buy_price),
+                    self._bybit_market_order(pair, "Sell", size_usd, sell_price),
+                    return_exceptions=True,
+                )
+        except Exception as exc:
+            logger.error("[cross_arb] REAL execution error: {}", exc)
+
+        # Check results
+        buy_ok  = isinstance(buy_result, dict) and buy_result is not None
+        sell_ok = isinstance(sell_result, dict) and sell_result is not None
+
+        if buy_ok and sell_ok:
+            logger.info(
+                "[cross_arb] BOTH LEGS FILLED {} spread={:.4f}% net=+${:.4f}",
+                pair, trade.spread_pct, trade.net_pnl,
+            )
+            trade.production = True
+            self._trades.append(trade)
+
+            # Persist to Supabase
+            asyncio.create_task(self._save_to_supabase(trade, buy_result, sell_result))
+
+            # Schedule auto-close
+            asyncio.create_task(self._auto_close(trade, _CLOSE_AFTER_SECS))
+
+        elif buy_ok and not sell_ok:
+            logger.error(
+                "[cross_arb] LEG RISK — buy filled but sell FAILED on {} — closing buy",
+                pair,
+            )
+            # Emergency: close the buy leg
+            asyncio.create_task(self._emergency_close(trade.buy_exchange, pair, "Sell", buy_price))
+            trade.net_pnl = 0.0
+            self._trades.append(trade)
+
+        elif not buy_ok and sell_ok:
+            logger.error(
+                "[cross_arb] LEG RISK — sell filled but buy FAILED on {} — closing sell",
+                pair,
+            )
+            asyncio.create_task(self._emergency_close(trade.sell_exchange, pair, "Buy", sell_price))
+            trade.net_pnl = 0.0
+            self._trades.append(trade)
+
+        else:
+            logger.warning("[cross_arb] BOTH LEGS FAILED {} — no action needed", pair)
+
+    # ── Exchange order helpers ────────────────────────────────────────────────
+
+    async def _bybit_market_order(
+        self, pair: str, side: str, size_usd: float, price: float
+    ) -> Optional[Dict]:
+        """Place a market order on Bybit real (linear perp) via pybit."""
+        if not self._bybit_session:
+            return None
+
+        # Calculate qty in base asset
+        qty = size_usd / price if price > 0 else 0
+        # Round to appropriate precision
+        if pair == "BTCUSDT":
+            qty = round(qty, 3)     # min 0.001 BTC
+        elif pair == "ETHUSDT":
+            qty = round(qty, 2)     # min 0.01 ETH
+        elif pair == "SOLUSDT":
+            qty = round(qty, 1)     # min 0.1 SOL
+        else:
+            qty = round(qty, 3)
+
+        if qty <= 0:
+            logger.warning("[cross_arb] Bybit qty too small for {} (${:.0f})", pair, size_usd)
+            return None
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: self._bybit_session.place_order(
+                    category="linear",
+                    symbol=pair,
+                    side=side,
+                    orderType="Market",
+                    qty=str(qty),
+                ),
+            )
+
+            ret_code = result.get("retCode", -1)
+            if ret_code != 0:
+                logger.error(
+                    "[cross_arb] Bybit order FAILED {}: {}",
+                    pair, result.get("retMsg", "unknown"),
+                )
+                return None
+
+            order_id = result.get("result", {}).get("orderId", "")
+            logger.info("[cross_arb] Bybit {} {} {} qty={} orderId={}", side, pair, "OK", qty, order_id)
+            return {
+                "exchange": "bybit",
+                "order_id": order_id,
+                "pair": pair,
+                "side": side,
+                "qty": qty,
+                "price_hint": price,
+            }
+
+        except Exception as exc:
+            logger.error("[cross_arb] Bybit order exception: {}", exc)
+            return None
+
+    async def _okx_market_order(
+        self, pair: str, side: str, size_usd: float, price: float
+    ) -> Optional[Dict]:
+        """Place a market order on OKX real (USDT perp) via okx_executor."""
+        if not self._okx_exec:
+            return None
+        return await self._okx_exec.market_order(pair, side, size_usd, price)
+
+    # ── Auto-close ───────────────────────────────────────────────────────────
+
+    async def _auto_close(self, trade: CrossArbTrade, delay_secs: int) -> None:
+        """Close both arb legs after a delay (spread should have converged)."""
+        await asyncio.sleep(delay_secs)
+        logger.info("[cross_arb] Auto-closing arb {} after {}s", trade.pair, delay_secs)
+        await self._close_both_legs(trade)
+
+    async def _close_both_legs(self, trade: CrossArbTrade) -> None:
+        """Close positions on both exchanges."""
+        pair = trade.pair
+
+        # Close Bybit leg (opposite side)
+        buy_close_side  = "Sell" if trade.buy_exchange == "bybit" else "Buy"
+        sell_close_side = "Buy"  if trade.sell_exchange == "bybit" else "Sell"
+
+        tasks = []
+        if trade.buy_exchange == "bybit":
+            tasks.append(self._bybit_market_order(pair, "Sell", trade.size_usd, trade.buy_price))
+            if self._okx_exec:
+                tasks.append(self._okx_exec.close_position(pair))
+        else:
+            tasks.append(self._bybit_market_order(pair, "Buy", trade.size_usd, trade.sell_price))
+            if self._okx_exec:
+                tasks.append(self._okx_exec.close_position(pair))
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("[cross_arb] Both legs closed for {}", pair)
+        except Exception as exc:
+            logger.error("[cross_arb] Error closing legs: {}", exc)
+
+    async def _emergency_close(
+        self, exchange: str, pair: str, side: str, price: float
+    ) -> None:
+        """Emergency close a single leg after partial fill (leg risk)."""
+        logger.warning("[cross_arb] EMERGENCY close {} on {} side={}", pair, exchange, side)
+        try:
+            if exchange == "bybit":
+                await self._bybit_market_order(pair, side, _POSITION_SIZE, price)
+            elif exchange == "okx" and self._okx_exec:
+                await self._okx_exec.close_position(pair)
+        except Exception as exc:
+            logger.error("[cross_arb] Emergency close FAILED: {}", exc)
+
+    # ── Supabase persistence ─────────────────────────────────────────────────
+
+    async def _save_to_supabase(self, trade: CrossArbTrade, buy_result: Dict, sell_result: Dict) -> None:
+        """Persist real arb trade to Supabase."""
+        try:
+            from db_writer import save_cross_arb_trade
+            await save_cross_arb_trade(
+                trade_id=trade.trade_id,
+                pair=trade.pair,
+                buy_exchange=trade.buy_exchange,
+                sell_exchange=trade.sell_exchange,
+                buy_price=trade.buy_price,
+                sell_price=trade.sell_price,
+                spread_pct=trade.spread_pct,
+                size_usd=trade.size_usd,
+                gross_pnl=trade.gross_pnl,
+                net_pnl=trade.net_pnl,
+                production=True,
+            )
+        except Exception as exc:
+            logger.warning("[cross_arb] Supabase save error: {}", exc)
 
     # ── Alert ─────────────────────────────────────────────────────────────────
 
