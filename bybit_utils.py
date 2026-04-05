@@ -477,8 +477,8 @@ async def place_spot_order(
 
 async def get_bybit_coin_balance(coin: str, caller: str = "bybit") -> float:
     """
-    Obtiene balance disponible de una criptomoneda específica (ETH, BTC, SOL...)
-    en Bybit via aiohttp. Prueba UNIFIED→SPOT.
+    Obtiene balance de una criptomoneda específica en Bybit via aiohttp.
+    Prueba UNIFIED → SPOT. Lee walletBalance primero (cuenta Trading Unificado).
     """
     if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
         return 0.0
@@ -495,17 +495,29 @@ async def get_bybit_coin_balance(coin: str, caller: str = "bybit") -> float:
                     if r.status != 200:
                         continue
                     data = await r.json()
-                    if data.get("retCode") != 0:
+                    ret_code = data.get("retCode", -1)
+                    if ret_code != 0:
+                        logger.debug(
+                            "[{}] get_bybit_coin_balance {} retCode={} — continuando",
+                            caller, acct_type, ret_code,
+                        )
                         continue
                     coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
                     for c in coins:
                         if c.get("coin") == coin:
-                            bal = float(
-                                c.get("availableToWithdraw", c.get("walletBalance", 0)) or 0
+                            # Prioridad: walletBalance > equity > availableToWithdraw
+                            # availableToWithdraw puede ser "0" en UNIFIED aunque haya saldo
+                            wallet  = float(c.get("walletBalance",       0) or 0)
+                            equity  = float(c.get("equity",              0) or 0)
+                            avail   = float(c.get("availableToWithdraw", 0) or 0)
+                            bal     = wallet or equity or avail
+                            logger.debug(
+                                "[{}] {} {} — walletBal={:.4f} equity={:.4f} avail={:.4f} → using={:.4f}",
+                                caller, acct_type, coin, wallet, equity, avail, bal,
                             )
                             if bal > 0:
-                                logger.debug(
-                                    "[{}] {} balance Bybit {}={:.6f} ✅",
+                                logger.info(
+                                    "[{}] Balance Bybit {}/{}={:.6f} ✅",
                                     caller, acct_type, coin, bal,
                                 )
                                 return bal
