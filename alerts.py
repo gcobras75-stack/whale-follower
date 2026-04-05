@@ -27,7 +27,10 @@ _stats: Dict[str, Any] = {
     "grid_pnl":        0.0,    # P&L acumulado de grid
     # Arbitraje triangular
     "arb_opportunities": 0,    # oportunidades detectadas
-    "arb_executed":      0,    # arb reales ejecutados
+    "arb_executed":      0,    # arb reales ejecutados (total)
+    "arb_btc_exec":      0,    # ejecutados BTCUSDT
+    "arb_eth_exec":      0,    # ejecutados ETHUSDT
+    "arb_sol_exec":      0,    # ejecutados SOLUSDT
     "arb_pnl":           0.0,  # P&L acumulado arb
     # Capital (se actualiza por llamada externa)
     "capital_bybit":   0.0,
@@ -65,6 +68,87 @@ def record_arb_executed(pnl: float = 0.0) -> None:
     """Llamar desde triangular_arb._execute_real() cuando ejecuta en real."""
     _stats["arb_executed"] += 1
     _stats["arb_pnl"]      += pnl
+
+def record_arb_executed_pair(pair: str, pnl: float = 0.0) -> None:
+    """Registrar ejecucion real por par especifico."""
+    _stats["arb_executed"] += 1
+    _stats["arb_pnl"]      += pnl
+    key_map = {"BTCUSDT": "arb_btc_exec", "ETHUSDT": "arb_eth_exec", "SOLUSDT": "arb_sol_exec"}
+    k = key_map.get(pair)
+    if k:
+        _stats[k] = _stats.get(k, 0) + 1
+
+async def send_trade_alert(trade_type: str, data: dict) -> None:
+    """
+    Envia notificacion Telegram cuando se ejecuta un trade real.
+    trade_type: "cross_arb" | "grid" | "wyckoff"
+    """
+    token   = config.TELEGRAM_BOT_TOKEN
+    chat_id = config.TELEGRAM_CHAT_ID
+    if not token or not chat_id:
+        return
+
+    now_str = time.strftime("%H:%M", time.localtime())
+    pnl_today = _stats["arb_pnl"] + _stats["grid_pnl"]
+
+    try:
+        if trade_type == "cross_arb":
+            pair      = data.get("pair", "BTCUSDT")
+            pair_disp = pair.replace("USDT", "/USDT")
+            buy_ex    = data.get("buy_ex", "Bybit")
+            sell_ex   = data.get("sell_ex", "OKX")
+            msg = (
+                f"\U0001f7e2 TRADE REAL EJECUTADO\n"
+                f"──────────────────────\n"
+                f"Par:        {pair_disp}\n"
+                f"Estrategia: Cross-Arb {buy_ex}↔{sell_ex}\n"
+                f"Lado:       COMPRA {buy_ex} + VENTA {sell_ex}\n"
+                f"Precio:     ${data.get('buy_price', 0):,.2f} / ${data.get('sell_price', 0):,.2f}\n"
+                f"Net:        +${data.get('net_pnl', 0):.4f}\n"
+                f"──────────────────────\n"
+                f"PnL hoy:    +${pnl_today:.4f}\n"
+                f"Hora:       {now_str} CST"
+            )
+        elif trade_type == "grid":
+            pair      = data.get("pair", "BTCUSDT")
+            pair_disp = pair.replace("USDT", "/USDT")
+            msg = (
+                f"\U0001f7e2 GRID CICLO COMPLETADO\n"
+                f"──────────────────────\n"
+                f"Par:        {pair_disp}\n"
+                f"Compra:     ${data.get('buy_price', 0):,.2f}\n"
+                f"Venta:      ${data.get('sell_price', 0):,.2f}\n"
+                f"PnL ciclo:  +${data.get('pnl', 0):.4f}\n"
+                f"──────────────────────\n"
+                f"PnL hoy:    +${pnl_today:.4f}\n"
+                f"Hora:       {now_str} CST"
+            )
+        elif trade_type == "wyckoff":
+            pair      = data.get("pair", "BTCUSDT")
+            pair_disp = pair.replace("USDT", "/USDT")
+            msg = (
+                f"\U0001f433 WHALE SPRING DETECTADO\n"
+                f"──────────────────────\n"
+                f"Par:        {pair_disp}\n"
+                f"Score:      {data.get('score', 0)}/130\n"
+                f"Entrada:    ${data.get('entry', 0):,.2f}\n"
+                f"Stop Loss:  ${data.get('sl', 0):,.2f}\n"
+                f"Target:     ${data.get('tp', 0):,.2f}\n"
+                f"Tamaño:     ${data.get('size_usd', 0):.2f}\n"
+                f"──────────────────────\n"
+                f"Hora:       {now_str} CST"
+            )
+        else:
+            return
+
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+    except Exception as exc:
+        logger.warning("[alerts] send_trade_alert error: {}", exc)
 
 def update_thermometers(**kwargs: Any) -> None:
     """Llamar desde btc_dominance, liquidations_global y dxy_monitor al actualizar."""
@@ -466,7 +550,9 @@ async def _cmd_stats() -> None:
         f"Señales Wyckoff:      {_stats['signals_total']}\n"
         f"Señales Grid:         {_stats['grid_cycles']} ciclos\n"
         f"Oportunidades Arb:    {_stats['arb_opportunities']}\n"
-        f"Arb ejecutados:       {_stats['arb_executed']}\n"
+        f"Arb BTC ejecutados:   {_stats['arb_btc_exec']}\n"
+        f"Arb ETH ejecutados:   {_stats['arb_eth_exec']}\n"
+        f"Arb SOL ejecutados:   {_stats['arb_sol_exec']}\n"
         f"Oportunidades Bitso:  {b_opps}\n"
         f"Prima Bitso:          {bitso_prima}\n"
         f"PnL Grid:             ${_stats['grid_pnl']:+.4f}\n"

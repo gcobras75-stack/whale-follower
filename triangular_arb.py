@@ -42,29 +42,54 @@ from loguru import logger
 import config
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_MIN_SPREAD_PCT    = 0.05    # spread minimo para detectar oportunidad (0.05%)
-_MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo
-_POSITION_SIZE_USD = 300.0   # USD por ciclo en papel
-_REAL_POSITION_USD = 30.0    # USD por ciclo en REAL (max $30)
-_MIN_NET_PNL       = 0.01    # minimo P&L neto para EJECUTAR ($0.01)
+_MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo (compartido)
 _TAKER_FEE_PCT     = 0.10    # fee por pata en spot (Bybit/OKX taker 0.10%)
 _COOLDOWN_SECS     = 10      # cooldown minimo entre ejecuciones
 _PRICE_STALE_MS    = 2000    # datos stale si > 2s
 _LOG_INTERVAL_SECS = 30      # frecuencia del log periodico de spread
 
+# Configuracion por par — threshold, tamano y fees especificos
+_PAIR_CONFIG: Dict[str, dict] = {
+    "BTCUSDT": {
+        "min_spread":  0.03,    # 0.03%
+        "paper_size":  300.0,   # USD en modo papel
+        "max_size":     30.0,   # USD maximo en real
+        "min_net":       0.01,  # P&L neto minimo para ejecutar
+        "okx_symbol": "BTC-USDT",
+    },
+    "ETHUSDT": {
+        "min_spread":  0.04,
+        "paper_size":  250.0,
+        "max_size":     25.0,
+        "min_net":       0.01,
+        "okx_symbol": "ETH-USDT",
+    },
+    "SOLUSDT": {
+        "min_spread":  0.05,
+        "paper_size":  200.0,
+        "max_size":     20.0,
+        "min_net":       0.01,
+        "okx_symbol": "SOL-USDT",
+    },
+}
+
 
 @dataclass
 class TriPrice:
-    btc_usdt:     float = 0.0   # BTC/USDT en Bybit
-    eth_usdt:     float = 0.0   # reservado
+    btc_usdt:     float = 0.0   # BTC/USDT Bybit
+    eth_usdt:     float = 0.0   # ETH/USDT Bybit
+    sol_usdt:     float = 0.0   # SOL/USDT Bybit
     eth_btc:      float = 0.0   # reservado
-    btc_usdt_okx: float = 0.0   # BTC/USDT en OKX
+    btc_usdt_okx: float = 0.0   # BTC/USDT OKX
+    eth_usdt_okx: float = 0.0   # ETH/USDT OKX
+    sol_usdt_okx: float = 0.0   # SOL/USDT OKX
     ts_ms:        float = field(default_factory=lambda: time.time() * 1000)
 
 
 @dataclass
 class TriArbTrade:
     trade_id:       str
+    pair:           str       # "BTCUSDT" | "ETHUSDT" | "SOLUSDT"
     route:          str       # "A" (buy Bybit/sell OKX) | "B" (buy OKX/sell Bybit)
     btc_usdt:       float     # precio Bybit
     eth_usdt:       float     # precio OKX (campo reutilizado)
@@ -100,38 +125,57 @@ class TriangularArb:
     """
 
     def __init__(self, production: bool = False) -> None:
-        self._production = production
-        self._prices: TriPrice = TriPrice()
-        self._trades: List[TriArbTrade] = []
-        self._opportunities: Deque[float] = deque(maxlen=500)
-        self._last_check: float = 0.0
-        self._last_log:   float = 0.0
+        self._production  = production
+        self._prices:    TriPrice           = TriPrice()
+        self._trades:    List[TriArbTrade]  = []
+        self._opportunities: Deque[float]   = deque(maxlen=500)
+        self._last_check: Dict[str, float]  = {p: 0.0 for p in _PAIR_CONFIG}
+        self._last_log:   Dict[str, float]  = {p: 0.0 for p in _PAIR_CONFIG}
+        self._exec_by_pair: Dict[str, int]  = {p: 0 for p in _PAIR_CONFIG}
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[cross_arb] Iniciado en modo {} | deteccion={}% | min_net=${}",
-                    mode, _MIN_SPREAD_PCT, _MIN_NET_PNL)
+        logger.info(
+            "[cross_arb] Iniciado en modo {} | pares={} | min_net=${}",
+            mode, list(_PAIR_CONFIG.keys()),
+            _PAIR_CONFIG["BTCUSDT"]["min_net"],
+        )
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def update_btc_usdt(self, price: float) -> None:
         self._prices.btc_usdt = price
         self._prices.ts_ms    = time.time() * 1000
-        self._check_arb()
+        self._check_pair("BTCUSDT")
+
+    def update_btc_usdt_okx(self, price: float) -> None:
+        self._prices.btc_usdt_okx = price
+        self._prices.ts_ms        = time.time() * 1000
+        self._check_pair("BTCUSDT")
 
     def update_eth_usdt(self, price: float) -> None:
         self._prices.eth_usdt = price
         self._prices.ts_ms    = time.time() * 1000
+        self._check_pair("ETHUSDT")
+
+    def update_eth_usdt_okx(self, price: float) -> None:
+        self._prices.eth_usdt_okx = price
+        self._prices.ts_ms        = time.time() * 1000
+        self._check_pair("ETHUSDT")
+
+    def update_sol_usdt(self, price: float) -> None:
+        self._prices.sol_usdt = price
+        self._prices.ts_ms    = time.time() * 1000
+        self._check_pair("SOLUSDT")
+
+    def update_sol_usdt_okx(self, price: float) -> None:
+        self._prices.sol_usdt_okx = price
+        self._prices.ts_ms        = time.time() * 1000
+        self._check_pair("SOLUSDT")
 
     def update_eth_btc(self, price: float) -> None:
         """Reservado por compatibilidad — no usado en estrategia cross-exchange."""
         self._prices.eth_btc = price
         self._prices.ts_ms   = time.time() * 1000
-
-    def update_btc_usdt_okx(self, price: float) -> None:
-        """Precio BTC/USDT en OKX — dispara la deteccion de arbitraje."""
-        self._prices.btc_usdt_okx = price
-        self._prices.ts_ms        = time.time() * 1000
-        self._check_arb()
 
     def snapshot(self) -> TriArbSnapshot:
         now    = time.time()
@@ -149,10 +193,15 @@ class TriangularArb:
             stale            = stale,
         )
 
+    def exec_by_pair(self) -> Dict[str, int]:
+        """Retorna conteo de ejecuciones reales por par."""
+        return dict(self._exec_by_pair)
+
     def active_summary(self) -> List[dict]:
         return [
             {
                 "id":          t.trade_id[:8],
+                "pair":        getattr(t, "pair", "BTCUSDT"),
                 "route":       t.route,
                 "spread_pct":  t.spread_pct,
                 "net_pnl":     round(t.net_pnl, 4),
@@ -170,71 +219,87 @@ class TriangularArb:
         ref = min(bybit, okx)
         return abs(bybit - okx) / ref * 100
 
-    def _check_arb(self) -> None:
+    def _get_pair_prices(self, pair: str) -> tuple:
+        """Devuelve (bybit_price, okx_price) para el par solicitado."""
+        p = self._prices
+        if pair == "BTCUSDT":
+            return p.btc_usdt, p.btc_usdt_okx
+        if pair == "ETHUSDT":
+            return p.eth_usdt, p.eth_usdt_okx
+        if pair == "SOLUSDT":
+            return p.sol_usdt, p.sol_usdt_okx
+        return 0.0, 0.0
+
+    def _check_pair(self, pair: str) -> None:
+        """Detecta y ejecuta arbitraje cross-exchange para cualquier par."""
         now = time.time()
-        p   = self._prices
-
-        if not p.btc_usdt or not p.btc_usdt_okx:
+        cfg = _PAIR_CONFIG.get(pair)
+        if cfg is None:
             return
 
-        if (time.time() * 1000 - p.ts_ms) > _PRICE_STALE_MS:
+        bybit_price, okx_price = self._get_pair_prices(pair)
+        if not bybit_price or not okx_price:
+            return
+        if (now * 1000 - self._prices.ts_ms) > _PRICE_STALE_MS:
             return
 
-        spread = self._cross_spread(p.btc_usdt, p.btc_usdt_okx)
+        spread     = self._cross_spread(bybit_price, okx_price)
+        short_name = pair.replace("USDT", "")
 
-        # ─ Log periodico de estado (cada 30s) ────────────────────────────────────
-        if now - self._last_log >= _LOG_INTERVAL_SECS:
-            self._last_log = now
-            if spread >= _MIN_SPREAD_PCT:
-                sign = "+" if p.btc_usdt_okx >= p.btc_usdt else "-"
+        # ─ Log periodico de estado (cada 30s) ────────────────────────────
+        last_log = self._last_log.get(pair, 0.0)
+        if now - last_log >= _LOG_INTERVAL_SECS:
+            self._last_log[pair] = now
+            if spread >= cfg["min_spread"]:
+                sign = "+" if okx_price >= bybit_price else "-"
                 logger.info(
-                    "[cross_arb] 📊 Bybit={:.2f} OKX={:.2f} spread={}{:.4f}%",
-                    p.btc_usdt, p.btc_usdt_okx, sign, spread,
+                    "[cross_arb] 📊 {} Bybit={:.2f} OKX={:.2f} spread={}{:.4f}%",
+                    short_name, bybit_price, okx_price, sign, spread,
                 )
             else:
                 logger.info(
-                    "[cross_arb] ❌ spread insuficiente {:.4f}% < {}%",
-                    spread, _MIN_SPREAD_PCT,
+                    "[cross_arb] ❌ {} spread insuficiente {:.4f}% < {:.2f}%",
+                    short_name, spread, cfg["min_spread"],
                 )
 
-        # ─ Deteccion: spread minimo 0.05% ──────────────────────────────────
-        if spread < _MIN_SPREAD_PCT or spread > _MAX_SPREAD_PCT:
+        # ─ Deteccion ─────────────────────────────────────────────────────
+        if spread < cfg["min_spread"] or spread > _MAX_SPREAD_PCT:
             return
 
-        # ─ Cooldown entre ejecuciones ─────────────────────────────────────
-        if now - self._last_check < _COOLDOWN_SECS:
+        # ─ Cooldown ──────────────────────────────────────────────────────
+        if now - self._last_check.get(pair, 0.0) < _COOLDOWN_SECS:
             return
 
-        # ─ Calcular P&L neto ────────────────────────────────────────────
-        if p.btc_usdt <= p.btc_usdt_okx:
+        # ─ Calcular P&L neto ─────────────────────────────────────────────
+        if bybit_price <= okx_price:
             route      = "A"   # Compra Bybit, Venta OKX
-            buy_price  = p.btc_usdt
-            sell_price = p.btc_usdt_okx
+            buy_price  = bybit_price
+            sell_price = okx_price
         else:
             route      = "B"   # Compra OKX, Venta Bybit
-            buy_price  = p.btc_usdt_okx
-            sell_price = p.btc_usdt
+            buy_price  = okx_price
+            sell_price = bybit_price
 
-        size_real  = _REAL_POSITION_USD if self._production else _POSITION_SIZE_USD
-        gross_pnl  = size_real * spread / 100
-        fees       = size_real * _TAKER_FEE_PCT / 100 * 2
-        net_pnl    = gross_pnl - fees
+        size_real = cfg["max_size"] if self._production else cfg["paper_size"]
+        gross_pnl = size_real * spread / 100
+        fees      = size_real * _TAKER_FEE_PCT / 100 * 2
+        net_pnl   = gross_pnl - fees
 
-        if net_pnl < _MIN_NET_PNL:
+        if net_pnl < cfg["min_net"]:
             logger.debug(
-                "[cross_arb] spread={:.4f}% net=${:.4f} < ${} — no ejecutar",
-                spread, net_pnl, _MIN_NET_PNL,
+                "[cross_arb] {} spread={:.4f}% net=${:.4f} < ${} — no ejecutar",
+                short_name, spread, net_pnl, cfg["min_net"],
             )
             return
 
-        self._last_check = now
+        self._last_check[pair] = now
         self._opportunities.append(now)
 
         buy_ex  = "Bybit" if route == "A" else "OKX"
         sell_ex = "OKX"   if route == "A" else "Bybit"
         logger.info(
-            "[cross_arb] 📊 Bybit={:.2f} OKX={:.2f} spread=+{:.4f}% → Compra {} + Venta {}",
-            p.btc_usdt, p.btc_usdt_okx, spread, buy_ex, sell_ex,
+            "[cross_arb] 📊 {} Bybit={:.2f} OKX={:.2f} spread=+{:.4f}% → Compra {} + Venta {}",
+            short_name, bybit_price, okx_price, spread, buy_ex, sell_ex,
         )
 
         try:
@@ -245,9 +310,10 @@ class TriangularArb:
 
         trade = TriArbTrade(
             trade_id      = str(uuid.uuid4()),
+            pair          = pair,
             route         = route,
-            btc_usdt      = p.btc_usdt,
-            eth_usdt      = p.btc_usdt_okx,
+            btc_usdt      = bybit_price,
+            eth_usdt      = okx_price,
             eth_btc_real  = buy_price,
             eth_btc_impl  = sell_price,
             spread_pct    = round(spread, 4),
@@ -288,51 +354,66 @@ class TriangularArb:
             self._trades.append(trade)
             return
 
-        size_usd  = min(trade.size_usd, _REAL_POSITION_USD)
-        btc_price = trade.eth_btc_real
-        btc_qty   = round(size_usd / btc_price, 6) if btc_price > 0 else 0
+        pair      = getattr(trade, "pair", "BTCUSDT")
+        cfg       = _PAIR_CONFIG.get(pair, _PAIR_CONFIG["BTCUSDT"])
+        size_usd  = min(trade.size_usd, cfg["max_size"])
+        buy_price = trade.eth_btc_real
+        asset_qty = round(size_usd / buy_price, 6) if buy_price > 0 else 0
 
-        if btc_qty <= 0:
-            logger.warning("[cross_arb] btc_qty <= 0, saltando")
+        if asset_qty <= 0:
+            logger.warning("[cross_arb] {} asset_qty <= 0, saltando", pair)
             self._trades.append(trade)
             return
 
-        buy_ex  = "Bybit" if trade.route == "A" else "OKX"
-        sell_ex = "OKX"   if trade.route == "A" else "Bybit"
+        buy_ex     = "Bybit" if trade.route == "A" else "OKX"
+        sell_ex    = "OKX"   if trade.route == "A" else "Bybit"
+        okx_symbol = cfg["okx_symbol"]
         logger.info(
-            "[cross_arb] Ejecutando: Compra {} ${:.0f} @ {:.2f} + Venta {} @ {:.2f}",
-            buy_ex, size_usd, trade.eth_btc_real, sell_ex, trade.eth_btc_impl,
+            "[cross_arb] Ejecutando: {} Compra {} ${:.0f} @ {:.2f} + Venta {} @ {:.2f}",
+            pair, buy_ex, size_usd, trade.eth_btc_real, sell_ex, trade.eth_btc_impl,
         )
 
         session = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET)
         loop    = asyncio.get_event_loop()
-        _qty    = btc_qty
+        _qty    = asset_qty
 
         if trade.route == "A":
-            bybit_fn = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Buy",  orderType="Market", qty=str(_qty))
+            bybit_fn = lambda: session.place_order(category="spot", symbol=pair, side="Buy",  orderType="Market", qty=str(_qty))
             okx_side = "sell"
         else:
-            bybit_fn = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Sell", orderType="Market", qty=str(_qty))
+            bybit_fn = lambda: session.place_order(category="spot", symbol=pair, side="Sell", orderType="Market", qty=str(_qty))
             okx_side = "buy"
 
         try:
             bybit_result, okx_result = await asyncio.gather(
                 loop.run_in_executor(None, bybit_fn),
-                self._okx_spot_order("BTC-USDT", okx_side, _qty),
+                self._okx_spot_order(okx_symbol, okx_side, _qty),
                 return_exceptions=True,
             )
 
             bybit_ok = isinstance(bybit_result, dict) and bybit_result.get("retCode") == 0
 
             if bybit_ok and okx_result is True:
+                short_name = pair.replace("USDT", "")
                 logger.info(
-                    "[cross_arb] ✅ EJECUTADO Compra {} + Venta {} net=+${:.4f} spread={:.4f}%",
-                    buy_ex, sell_ex, trade.net_pnl, trade.spread_pct,
+                    "[cross_arb] ✅ {} EJECUTADO Compra {} + Venta {} net=+${:.4f} spread={:.4f}%",
+                    short_name, buy_ex, sell_ex, trade.net_pnl, trade.spread_pct,
                 )
                 trade.production = True
+                self._exec_by_pair[pair] = self._exec_by_pair.get(pair, 0) + 1
                 try:
                     import alerts as _alerts
                     _alerts.record_arb_executed(trade.net_pnl)
+                    asyncio.create_task(_alerts.send_trade_alert("cross_arb", {
+                        "pair":       pair,
+                        "route":      trade.route,
+                        "buy_ex":     buy_ex,
+                        "sell_ex":    sell_ex,
+                        "buy_price":  trade.eth_btc_real,
+                        "sell_price": trade.eth_btc_impl,
+                        "net_pnl":    trade.net_pnl,
+                        "size_usd":   size_usd,
+                    }))
                 except Exception:
                     pass
             else:
@@ -393,13 +474,15 @@ class TriangularArb:
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        mode = "REAL" if trade.production else "PAPEL"
+        pair      = getattr(trade, "pair", "BTCUSDT")
+        mode      = "REAL" if trade.production else "PAPEL"
+        buy_name  = pair.replace("USDT", "")
         if trade.route == "A":
-            route_desc = f"BUY BTC Bybit @ {trade.btc_usdt:.2f} → SELL BTC OKX @ {trade.eth_usdt:.2f}"
+            route_desc = f"BUY {buy_name} Bybit @ {trade.btc_usdt:.2f} → SELL OKX @ {trade.eth_usdt:.2f}"
         else:
-            route_desc = f"BUY BTC OKX @ {trade.eth_usdt:.2f} → SELL BTC Bybit @ {trade.btc_usdt:.2f}"
+            route_desc = f"BUY {buy_name} OKX @ {trade.eth_usdt:.2f} → SELL Bybit @ {trade.btc_usdt:.2f}"
         msg = (
-            f"[CROSS ARB] Oportunidad ({mode})\n"
+            f"[CROSS ARB] {pair} Oportunidad ({mode})\n"
             f"Ruta: {trade.route} — {route_desc}\n"
             f"Spread: {trade.spread_pct:.4f}%\n"
             f"P&L neto: +${trade.net_pnl:.4f}"

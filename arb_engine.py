@@ -119,19 +119,27 @@ class ArbEngine:
         if pair in ("ETHUSDT", "SOLUSDT", "BNBUSDT"):
             self._lead_lag.update_price(pair, price)
 
-        # Triangular (cross-exchange): BTC/USDT de Bybit y OKX por separado
+        # Triangular cross-exchange: rutear por exchange para los 3 pares
+        is_bybit = exchange in ("bybit", "bybit_spot", "")
+        is_okx   = exchange in ("okx", "okx_spot")
+
         if pair == "BTCUSDT":
-            if exchange in ("bybit", "bybit_spot", ""):
+            if is_bybit or (not is_okx):
                 self._triangular.update_btc_usdt(price)
                 self._bitso.update_bybit(price)
-            elif exchange in ("okx", "okx_spot"):
+            else:
                 self._triangular.update_btc_usdt_okx(price)
                 self._bitso.update_okx(price)
-            else:
-                self._triangular.update_btc_usdt(price)
-                self._bitso.update_bybit(price)
         elif pair == "ETHUSDT":
-            self._triangular.update_eth_usdt(price)
+            if is_okx:
+                self._triangular.update_eth_usdt_okx(price)
+            else:
+                self._triangular.update_eth_usdt(price)
+        elif pair == "SOLUSDT":
+            if is_okx:
+                self._triangular.update_sol_usdt_okx(price)
+            else:
+                self._triangular.update_sol_usdt(price)
 
     def on_eth_btc_price(self, price: float) -> None:
         """

@@ -330,6 +330,14 @@ class GridTradingEngine:
         try:
             import alerts as _alerts
             _alerts.record_grid_cycle(pnl)
+            if self._production:
+                asyncio.create_task(_alerts.send_trade_alert("grid", {
+                    "pair":       grid.pair,
+                    "buy_price":  level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
+                    "sell_price": price,
+                    "pnl":        pnl,
+                    "pnl_total":  grid.pnl_total,
+                }))
         except Exception:
             pass
         asyncio.create_task(self._alert_cycle(grid, price, pnl))
