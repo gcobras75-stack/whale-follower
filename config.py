@@ -53,7 +53,7 @@ PAPER_CAPITAL:        float = float(os.getenv("PAPER_CAPITAL", "10000"))
 
 # ── Bybit Real (producción) ───────────────────────────────────────────────────
 BYBIT_API_KEY:    str  = os.getenv("BYBIT_API_KEY",    "")
-BYBIT_API_SECRET: str  = os.getenv("BYBIT_API_SECRET", "")
+BYBIT_API_SECRET: str  = os.getenv("BYBIT_API_SECRET", "") or os.getenv("BYBIT_SECRET", "")
 PRODUCTION:       bool = os.getenv("PRODUCTION", "false").lower() == "true"
 REAL_CAPITAL:     float = float(os.getenv("REAL_CAPITAL", "75"))
 RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "0.01"))   # 1% por trade

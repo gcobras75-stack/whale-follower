@@ -16,13 +16,46 @@ from supabase import create_client, Client
 import config
 from scoring_engine import ScoreBreakdown
 
-# ── Estado global de stats ─────────────────────────────────────────────────────
+# ── Estado global de stats ───────────────────────────────────────────────
 _stats: Dict[str, Any] = {
     "signals_total":   0,
-    "signals_high":    0,    # score >= 80
-    "last_signal":     None, # dict con datos de la última señal
+    "signals_high":    0,      # score >= 80
+    "last_signal":     None,   # dict con datos de la última señal
     "start_time":      time.time(),
+    # Grid
+    "grid_cycles":     0,      # ciclos buy+sell completados
+    "grid_pnl":        0.0,    # P&L acumulado de grid
+    # Arbitraje triangular
+    "arb_opportunities": 0,    # oportunidades detectadas
+    "arb_executed":      0,    # arb reales ejecutados
+    "arb_pnl":           0.0,  # P&L acumulado arb
+    # Capital (se actualiza por llamada externa)
+    "capital_bybit":   0.0,
+    "capital_okx":     0.0,
 }
+
+# ── Stats public API ──────────────────────────────────────────────────
+
+def record_grid_cycle(pnl: float = 0.0) -> None:
+    """Llamar desde grid_trading._fill_sell() en cada ciclo completado."""
+    _stats["grid_cycles"] += 1
+    _stats["grid_pnl"]    += pnl
+
+def record_arb_opportunity() -> None:
+    """Llamar desde triangular_arb._check_arb() cuando detecta oportunidad."""
+    _stats["arb_opportunities"] += 1
+
+def record_arb_executed(pnl: float = 0.0) -> None:
+    """Llamar desde triangular_arb._execute_real() cuando ejecuta en real."""
+    _stats["arb_executed"] += 1
+    _stats["arb_pnl"]      += pnl
+
+def set_capital(bybit: float = 0.0, okx: float = 0.0) -> None:
+    """Actualizar capital conocido (llamar desde healthcheck o executor)."""
+    if bybit > 0:
+        _stats["capital_bybit"] = bybit
+    if okx > 0:
+        _stats["capital_okx"] = okx
 
 # ── Supabase cliente (lazy) ────────────────────────────────────────────────────
 _supabase: Optional[Client] = None
@@ -375,17 +408,28 @@ async def _cmd_status() -> None:
 
 
 async def _cmd_stats() -> None:
-    total  = _stats["signals_total"]
-    high   = _stats["signals_high"]
     uptime = int(time.time() - _stats["start_time"])
     h, m   = divmod(uptime // 60, 60)
+
+    total_pnl = _stats["grid_pnl"] + _stats["arb_pnl"]
+
+    # Capital: usar valor guardado o fallback a config
+    cap_bybit = _stats["capital_bybit"] or config.REAL_CAPITAL
+    cap_okx   = _stats["capital_okx"]   or 51.0    # ultimo valor verificado
+
     await _reply(
         f"Estadisticas\n"
         f"------------\n"
-        f"Señales totales:      {total}\n"
-        f"Alta confianza (80+): {high}\n"
+        f"Señales Wyckoff:      {_stats['signals_total']}\n"
+        f"Señales Grid:         {_stats['grid_cycles']} ciclos\n"
+        f"Oportunidades Arb:    {_stats['arb_opportunities']}\n"
+        f"Arb ejecutados:       {_stats['arb_executed']}\n"
+        f"PnL Grid:             ${_stats['grid_pnl']:+.4f}\n"
+        f"PnL Arb real:         ${_stats['arb_pnl']:+.4f}\n"
+        f"PnL Total sesion:     ${total_pnl:+.4f}\n"
+        f"Capital Bybit:        ~${cap_bybit:.0f}\n"
+        f"Capital OKX:          ~${cap_okx:.0f}\n"
         f"Uptime:               {h}h {m}m\n"
-        f"Capital simulado:     ${config.PAPER_CAPITAL:,.0f}\n"
     )
 
 

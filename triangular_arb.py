@@ -35,10 +35,14 @@ from typing import Deque, Dict, List, Optional, Tuple
 import aiohttp
 from loguru import logger
 
+import config
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _MIN_SPREAD_PCT    = 0.06    # > fees (0.02% x 3 patas = 0.06%)
 _MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo
 _POSITION_SIZE_USD = 300.0   # USD por ciclo triangular en papel
+_REAL_POSITION_USD = 30.0    # USD por ciclo en REAL (capped para $90 Bybit)
+_MIN_NET_PNL       = 0.01    # minimo P&L neto para ejecutar ($0.01)
 _TAKER_FEE_PCT     = 0.02    # fee por pata (Bybit taker)
 _COOLDOWN_SECS     = 10      # cooldown entre arbs del mismo triangulo
 _PRICE_STALE_MS    = 2000    # datos stale si > 2s
@@ -192,13 +196,18 @@ class TriangularArb:
         fees      = _POSITION_SIZE_USD * _TAKER_FEE_PCT / 100 * 3   # 3 patas
         net_pnl   = gross_pnl - fees
 
-        if net_pnl <= 0:
+        if net_pnl < _MIN_NET_PNL:
             return
 
         logger.info(
             "[tri_arb] OPORTUNIDAD ruta={} spread={:.4f}% impl={:.8f} real={:.8f} net=+${:.4f}",
             route, spread, impl, p.eth_btc, net_pnl,
         )
+        try:
+            import alerts as _alerts
+            _alerts.record_arb_opportunity()
+        except Exception:
+            pass
 
         trade = TriArbTrade(
             trade_id      = str(uuid.uuid4()),
@@ -225,28 +234,96 @@ class TriangularArb:
 
     async def _execute_real(self, trade: TriArbTrade) -> None:
         """
-        Para activar con dinero real:
+        Ejecuta arbitraje triangular real en Bybit Spot:
           Ruta A: Buy ETHUSDT → Sell ETHBTC → Sell BTCUSDT
           Ruta B: Buy BTCUSDT → Buy ETHBTC  → Sell ETHUSDT
-          Ejecutar las tres patas con asyncio.gather() para minimizar slippage.
-
-        Requiere:
-          - BYBIT_API_KEY real configurada en .env
-          - El par ETHBTC disponible en Bybit spot
-
-        Por ahora registra sin ejecutar.
         """
-        logger.warning(
-            "[tri_arb] REAL execution pendiente — "
-            "requiere BYBIT_API_KEY real + par ETHBTC activo en Bybit spot."
+        try:
+            from pybit.unified_trading import HTTP as BybitHTTP
+        except ImportError:
+            logger.error("[tri_arb] pybit no disponible")
+            self._trades.append(trade)
+            return
+
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            logger.warning("[tri_arb] Faltan BYBIT_API_KEY/BYBIT_API_SECRET reales")
+            self._trades.append(trade)
+            return
+
+        size_usd  = min(trade.size_usd, _REAL_POSITION_USD)
+        eth_price = trade.eth_usdt
+        eth_qty   = round(size_usd / eth_price, 4) if eth_price > 0 else 0
+        btc_qty   = round(eth_qty * trade.eth_btc_real, 6)
+
+        if eth_qty <= 0 or btc_qty <= 0:
+            logger.warning("[tri_arb] qty <= 0, saltando")
+            self._trades.append(trade)
+            return
+
+        logger.info(
+            "[tri_arb] REAL INICIO ruta={} size=${:.0f} eth_qty={} btc_qty={}",
+            trade.route, size_usd, eth_qty, btc_qty,
         )
-        # Cuando este configurado:
-        # if trade.route == "A":
-        #     await asyncio.gather(
-        #         bybit_executor.market_order("ETHUSDT", "Buy",  trade.size_usd),
-        #         bybit_executor.market_order("ETHBTC",  "Sell", trade.size_usd),
-        #         bybit_executor.market_order("BTCUSDT", "Sell", trade.size_usd),
-        #     )
+
+        try:
+            session = BybitHTTP(
+                testnet=False,
+                api_key=config.BYBIT_API_KEY,
+                api_secret=config.BYBIT_API_SECRET,
+            )
+            loop = asyncio.get_event_loop()
+
+            if trade.route == "A":
+                # Buy ETHUSDT → Sell ETHBTC → Sell BTCUSDT
+                _eth_qty  = eth_qty
+                _btc_qty  = btc_qty
+                leg1 = lambda: session.place_order(category="spot", symbol="ETHUSDT", side="Buy",  orderType="Market", qty=str(_eth_qty))
+                leg2 = lambda: session.place_order(category="spot", symbol="ETHBTC",  side="Sell", orderType="Market", qty=str(_eth_qty))
+                leg3 = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Sell", orderType="Market", qty=str(_btc_qty))
+            else:
+                # Buy BTCUSDT → Buy ETHBTC → Sell ETHUSDT
+                _eth_qty  = eth_qty
+                _btc_qty  = btc_qty
+                leg1 = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Buy",  orderType="Market", qty=str(_btc_qty))
+                leg2 = lambda: session.place_order(category="spot", symbol="ETHBTC",  side="Buy",  orderType="Market", qty=str(_eth_qty))
+                leg3 = lambda: session.place_order(category="spot", symbol="ETHUSDT", side="Sell", orderType="Market", qty=str(_eth_qty))
+
+            results = await asyncio.gather(
+                loop.run_in_executor(None, leg1),
+                loop.run_in_executor(None, leg2),
+                loop.run_in_executor(None, leg3),
+                return_exceptions=True,
+            )
+
+            all_ok = all(
+                isinstance(r, dict) and r.get("retCode") == 0
+                for r in results
+            )
+
+            if all_ok:
+                logger.info(
+                    "[tri_arb] ✅ REAL EJECUTADO ruta={} net=+${:.4f} spread={:.4f}%",
+                    trade.route, trade.net_pnl, trade.spread_pct,
+                )
+                trade.production = True
+                try:
+                    import alerts as _alerts
+                    _alerts.record_arb_executed(trade.net_pnl)
+                except Exception:
+                    pass
+            else:
+                for i, r in enumerate(results):
+                    if isinstance(r, Exception):
+                        logger.error("[tri_arb] Pata {} exception: {}", i + 1, r)
+                    elif isinstance(r, dict) and r.get("retCode") != 0:
+                        logger.error(
+                            "[tri_arb] Pata {} error retCode={} msg={}",
+                            i + 1, r.get("retCode"), r.get("retMsg"),
+                        )
+
+        except Exception as exc:
+            logger.error("[tri_arb] _execute_real exception: {}", exc)
+
         self._trades.append(trade)
 
     # ── Telegram alert ────────────────────────────────────────────────────────

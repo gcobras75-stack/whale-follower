@@ -41,8 +41,8 @@ _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
         "levels":        12,        # niveles de grid (6 arriba, 6 abajo)
         "capital_usd":   600.0,     # capital total asignado
-        "min_spacing":   0.003,     # spacing minimo 0.3%
-        "max_spacing":   0.010,     # spacing maximo 1.0%
+        "min_spacing":   0.008,     # spacing minimo 0.8% (antes 0.3%)
+        "max_spacing":   0.015,     # spacing maximo 1.5%
         "atr_mult":      1.5,       # spacing = ATR * multiplicador
         "bb_period":     20,        # periodo Bollinger Bands
         "bb_std":        2.0,       # desviaciones estandar
@@ -50,8 +50,8 @@ _GRID_CONFIG: Dict[str, dict] = {
     "ETHUSDT": {
         "levels":        10,
         "capital_usd":   400.0,
-        "min_spacing":   0.004,
-        "max_spacing":   0.015,
+        "min_spacing":   0.010,     # spacing minimo 1.0% (antes 0.4%)
+        "max_spacing":   0.020,
         "atr_mult":      2.0,
         "bb_period":     20,
         "bb_std":        2.0,
@@ -59,19 +59,20 @@ _GRID_CONFIG: Dict[str, dict] = {
     "SOLUSDT": {
         "levels":        8,
         "capital_usd":   200.0,
-        "min_spacing":   0.006,
-        "max_spacing":   0.020,
+        "min_spacing":   0.012,     # spacing minimo 1.2% (antes 0.6%)
+        "max_spacing":   0.025,
         "atr_mult":      2.5,
         "bb_period":     20,
         "bb_std":        2.0,
     },
 }
 
-_FEES_PCT        = 0.0002    # 0.02% por lado (maker/taker Bybit)
-_PAUSE_SIGMA     = 1.5       # pausar si precio > 1.5 sigma fuera de BB
-_CIRCUIT_BREAKER = 0.03      # suspender si pierde >3% del capital asignado
-_REBALANCE_HOURS = 4         # rebalancear grid cada 4 horas
-_PRICE_HISTORY   = 200       # precios para calcular ATR y BB
+_FEES_PCT             = 0.0002    # 0.02% por lado (maker/taker Bybit)
+_PAUSE_SIGMA          = 1.5       # pausar si precio > 1.5 sigma fuera de BB
+_CIRCUIT_BREAKER      = 0.03      # suspender si pierde >3% del capital asignado
+_REBALANCE_HOURS      = 4         # rebalancear grid cada 4 horas
+_PRICE_HISTORY        = 200       # precios para calcular ATR y BB
+_REBALANCE_DELAY_SECS = 300       # esperar 5 min fuera de rango antes de pausar
 
 
 @dataclass
@@ -124,7 +125,8 @@ class GridTradingEngine:
         self._prices:  Dict[str, Deque[float]]        = {
             p: deque(maxlen=_PRICE_HISTORY) for p in _GRID_CONFIG
         }
-        self._initialized: Dict[str, bool] = {p: False for p in _GRID_CONFIG}
+        self._initialized:       Dict[str, bool]  = {p: False for p in _GRID_CONFIG}
+        self._out_of_range_since: Dict[str, float] = {}   # pair -> ts when price first left BB
 
         mode = "REAL" if production else "PAPEL"
         logger.info("[grid] Iniciado en modo {} | pares={}", mode, list(_GRID_CONFIG.keys()))
@@ -165,14 +167,30 @@ class GridTradingEngine:
             self._rebalance_grid(grid, pair, price)
             return
 
-        # Comprobar si el precio salio del rango BB → pausar
+        # Comprobar si el precio salio del rango BB
         bb_upper, bb_lower, _ = self._bollinger(pair)
         sigma = (bb_upper - bb_lower) / (2 * cfg["bb_std"])
-        if price > bb_upper + sigma * _PAUSE_SIGMA or price < bb_lower - sigma * _PAUSE_SIGMA:
-            grid.paused = True
-            grid.pause_reason = f"precio fuera de rango BB x{_PAUSE_SIGMA}σ"
-            logger.warning("[grid] {} PAUSADO: {}", pair, grid.pause_reason)
+        out_of_range = (
+            price > bb_upper + sigma * _PAUSE_SIGMA
+            or price < bb_lower - sigma * _PAUSE_SIGMA
+        )
+
+        if out_of_range:
+            if pair not in self._out_of_range_since:
+                self._out_of_range_since[pair] = time.time()
+                logger.debug(
+                    "[grid] {} precio fuera de rango BB, esperando {}s antes de pausar",
+                    pair, _REBALANCE_DELAY_SECS,
+                )
+            elif time.time() - self._out_of_range_since[pair] >= _REBALANCE_DELAY_SECS:
+                grid.paused = True
+                grid.pause_reason = f"precio fuera de rango BB x{_PAUSE_SIGMA}σ (>{_REBALANCE_DELAY_SECS}s)"
+                self._out_of_range_since.pop(pair, None)
+                logger.warning("[grid] {} PAUSADO: {}", pair, grid.pause_reason)
             return
+
+        # Precio volvio al rango — limpiar timer de out-of-range
+        self._out_of_range_since.pop(pair, None)
 
         # Evaluar niveles del grid
         self._evaluate_levels(grid, pair, price)
@@ -284,8 +302,14 @@ class GridTradingEngine:
         )
         grid.levels.append(sell_level)
 
-        logger.info("[grid] {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
-                    pair, price, level.size_usd, sell_price)
+        if self._production:
+            logger.info(
+                "[grid] 🟢 REAL ORDER {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
+                pair, price, level.size_usd, sell_price,
+            )
+        else:
+            logger.info("[grid] {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
+                        pair, price, level.size_usd, sell_price)
 
     def _fill_sell(self, grid: GridState, level: GridLevel, price: float) -> None:
         level.filled = False   # resetear para poder usarse de nuevo
@@ -295,8 +319,19 @@ class GridTradingEngine:
         grid.pnl_total  += pnl
         grid.cycles_done += 1
 
-        logger.info("[grid] {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
-                    grid.pair, price, pnl, grid.pnl_total)
+        if self._production:
+            logger.info(
+                "[grid] ✅ REAL ORDER {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
+                grid.pair, price, pnl, grid.pnl_total,
+            )
+        else:
+            logger.info("[grid] {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
+                        grid.pair, price, pnl, grid.pnl_total)
+        try:
+            import alerts as _alerts
+            _alerts.record_grid_cycle(pnl)
+        except Exception:
+            pass
         asyncio.create_task(self._alert_cycle(grid, price, pnl))
         asyncio.create_task(db_writer.save_grid_cycle(
             pair=grid.pair,
