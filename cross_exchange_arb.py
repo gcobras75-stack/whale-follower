@@ -48,6 +48,7 @@ _CB_PAUSE_SECS    = 300  # 5 min de pausa al activar CB
 MIN_ORDER_USD     = 10   # valor mínimo de orden en USD
 FORCE_OKX_ONLY    = True # True = usar solo OKX cuando Bybit sin saldo
 CROSS_ARB_ENABLED = False  # False = cross-arb deshabilitado (Railway bloqueado por Bybit)
+LEAD_LAG_ENABLED  = False  # False = lead-lag arb deshabilitado (requiere Bybit)
 
 
 @dataclass
@@ -295,44 +296,8 @@ class CrossExchangeArb:
     # ── Balance check ────────────────────────────────────────────────────────
 
     async def _check_balances(self) -> bool:
-        """balance_ok = True si OKX >= $50 O Bybit >= $10. Cache 60s."""
-        now = time.time()
-        if now - self._last_balance_check < 60:
-            return self._balance_ok
-        self._last_balance_check = now
-
-        # Obtener balance OKX
-        okx_bal = 0.0
-        if self._okx_exec:
-            okx_bal = await self._okx_exec.get_balance()
-
-        # Obtener balance Bybit
-        bybit_usdt = 0.0
-        if self._bybit_ready:
-            try:
-                from bybit_utils import get_bybit_coin_balance
-                bybit_usdt = await get_bybit_coin_balance("USDT", caller="cross_arb")
-            except Exception as exc:
-                logger.warning("[cross_arb] No se pudo verificar balance Bybit: {}", exc)
-
-        logger.info("[cross_arb] Balance check — OKX=${:.2f} Bybit=${:.2f}",
-                    okx_bal, bybit_usdt)
-
-        # Nueva lógica: operar si OKX >= $50 O Bybit >= $10
-        if okx_bal >= 50.0 or bybit_usdt >= 10.0:
-            if not self._balance_ok:
-                logger.info(
-                    "[cross_arb] ✅ RESUMING arb — OKX=${:.2f} Bybit=${:.2f}",
-                    okx_bal, bybit_usdt,
-                )
-            self._balance_ok = True
-            return True
-
-        if self._balance_ok:
-            logger.warning(
-                "[cross_arb] ⚠️ PAUSING arb — OKX=${:.2f} (<$50) y Bybit=${:.2f} (<$10)",
-                okx_bal, bybit_usdt,
-            )
+        """DESHABILITADO — Railway bloqueado por Bybit. Retorna False siempre."""
+        logger.debug("[cross_arb] _check_balances: CROSS_ARB_ENABLED=False — skip")
         self._balance_ok = False
         return False
 

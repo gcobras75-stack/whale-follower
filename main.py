@@ -75,15 +75,15 @@ async def health_handler(request: web.Request) -> web.Response:
     }
     if _executor_ref is not None:
         payload["leverage"] = _executor_ref.leverage_status()
-    if _arb_ref is not None:
-        s = _arb_ref.summary()
-        payload["arb"] = {
-            "total_pnl_usd":    s.total_pnl_usd,
-            "funding_pnl":      s.funding_pnl_usd,
-            "cross_opps_1h":    s.cross_opps_1h,
-            "lead_triggers_1h": s.lead_triggers_1h,
-            "tri_spread_pct":   s.tri_spread_pct,
-        }
+    # if _arb_ref is not None:  # DESHABILITADO — arb desactivado
+    #     s = _arb_ref.summary()
+    #     payload["arb"] = {
+    #         "total_pnl_usd":    s.total_pnl_usd,
+    #         "funding_pnl":      s.funding_pnl_usd,
+    #         "cross_opps_1h":    s.cross_opps_1h,
+    #         "lead_triggers_1h": s.lead_triggers_1h,
+    #         "tri_spread_pct":   s.tri_spread_pct,
+    #     }
     return web.json_response(payload)
 
 

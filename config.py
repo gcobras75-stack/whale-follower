@@ -81,6 +81,7 @@ OKX_API_KEY:       str  = os.getenv("OKX_API_KEY",       "")
 OKX_SECRET:        str  = os.getenv("OKX_SECRET",        "")
 OKX_PASSPHRASE:    str  = os.getenv("OKX_PASSPHRASE",    "")
 ENABLE_CROSS_ARB_REAL: bool = False  # deshabilitado — Railway bloqueado por Bybit
+ENABLE_LEAD_LAG_ARB:  bool = False  # deshabilitado — requiere Bybit
 CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    "50"))
 CROSS_ARB_MAX_SIZE:        float = float(os.getenv("CROSS_ARB_MAX_SIZE",        "25"))
 BYBIT_ORDER_ENDPOINT:      str   = os.getenv("BYBIT_ORDER_ENDPOINT", "")
