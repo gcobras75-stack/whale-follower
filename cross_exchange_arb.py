@@ -38,6 +38,9 @@ _PAIRS           = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 _PRICE_STALE_MS  = 2000    # precio stale si > 2 segundos
 _CLOSE_AFTER_SECS = 60     # cerrar ambas patas despues de N segundos
 _MIN_BALANCE_USD  = config.CROSS_ARB_MIN_BALANCE_USD  # default $10
+_ETH_MIN_USD      = 15.0   # inventario mínimo ETH en USD por exchange — replenish si cae aquí
+_ETH_REPLENISH_USD = 20.0  # cuánto ETH comprar al replenish
+_INVENTORY_CHECK_SECS = 300  # verificar inventario cada 5 min
 
 
 @dataclass
@@ -96,6 +99,10 @@ class CrossExchangeArb:
         self._balance_ok  = True       # flip to False if balance < threshold
         self._last_balance_check: float = 0.0
 
+        # Inventario ETH
+        self._replenishing: set  = set()   # exchanges con replenish en curso
+        self._inventory_started: bool = False  # arranca loop en primer _check_arb
+
         if production:
             self._init_real_executors()
 
@@ -151,6 +158,11 @@ class CrossExchangeArb:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _get_price(self, pair: str, exchange: str) -> float:
+        """Precio actual de un par en un exchange. 0.0 si no disponible."""
+        pp = self._prices.get(pair, {}).get(exchange)
+        return pp.price if pp else 0.0
+
     def _current_spread_pct(self, pair: str) -> Optional[float]:
         """Retorna spread actual entre Bybit y OKX, o None si datos stale."""
         now_ms = time.time() * 1000
@@ -164,6 +176,12 @@ class CrossExchangeArb:
         return spread
 
     def _check_arb(self, pair: str) -> None:
+        # Arrancar loop de inventario en el primer _check_arb en producción
+        if self._production and not self._inventory_started:
+            self._inventory_started = True
+            asyncio.create_task(self._startup_inventory_check())
+            asyncio.create_task(self._inventory_loop())
+
         spread = self._current_spread_pct(pair)
         if spread is None:
             return
@@ -326,52 +344,40 @@ class CrossExchangeArb:
         pair       = trade.pair
         coin       = pair.replace("USDT", "")   # ETHUSDT → ETH
 
-        # ── Calcular size dinámico según balance del sell-side ────────────────
-        size_usd = min(trade.size_usd, config.CROSS_ARB_MAX_SIZE)
-
+        # ── Verificar inventario ETH en el lado vendedor ──────────────────────
         if trade.sell_exchange == "okx" and self._okx_exec:
-            okx_coin_bal  = await self._okx_exec.get_coin_balance(coin)
-            available_usd = okx_coin_bal * sell_price
-            size_usd      = self._calc_size(coin, available_usd)
-            if size_usd < 10.0:
-                logger.warning(
-                    "[cross_arb] OKX {} balance insuficiente (${:.2f}) — mínimo $10 — saltando",
-                    coin, available_usd,
-                )
-                self._trades.append(trade)
-                return
-            qty_needed = size_usd / sell_price
-            if okx_coin_bal < qty_needed:
-                logger.warning(
-                    "[cross_arb] OKX {} tiene={:.4f} necesita={:.4f} — saltando",
-                    coin, okx_coin_bal, qty_needed,
-                )
-                self._trades.append(trade)
-                return
-
+            eth_bal = await self._okx_exec.get_coin_balance(coin)
         elif trade.sell_exchange == "bybit" and self._bybit_ready:
-            bybit_coin_bal = await self._bybit_coin_balance(coin)
-            available_usd  = bybit_coin_bal * sell_price
-            size_usd       = self._calc_size(coin, available_usd)
-            if size_usd < 10.0:
-                logger.warning(
-                    "[cross_arb] Bybit {} balance insuficiente (${:.2f}) — mínimo $10 — saltando",
-                    coin, available_usd,
-                )
-                self._trades.append(trade)
-                return
-            qty_needed = size_usd / sell_price
-            if bybit_coin_bal < qty_needed:
-                logger.warning(
-                    "[cross_arb] Bybit {} tiene={:.4f} necesita={:.4f} — saltando",
-                    coin, bybit_coin_bal, qty_needed,
-                )
-                self._trades.append(trade)
-                return
+            eth_bal = await self._bybit_coin_balance(coin)
+        else:
+            eth_bal = 0.0
+
+        eth_usd  = eth_bal * sell_price
+        size_usd = self._calc_size(coin, eth_usd)
+
+        if size_usd < 10.0:
+            logger.warning(
+                "[cross_arb] ⚠️ Inventario {} insuficiente en {} "
+                "(${:.2f} = {:.6f} {}) — activando reabastecimiento",
+                coin, trade.sell_exchange, eth_usd, eth_bal, coin,
+            )
+            # Replenish asíncrono: compra ETH para el próximo arb
+            if trade.sell_exchange not in self._replenishing:
+                asyncio.create_task(self._replenish_eth(trade.sell_exchange, coin))
+            self._trades.append(trade)
+            return
+
+        # Si inventario está por debajo del mínimo saludable, replenish en bg
+        if eth_usd < _ETH_MIN_USD and trade.sell_exchange not in self._replenishing:
+            asyncio.create_task(self._replenish_eth(trade.sell_exchange, coin))
+
+        trade.size_usd = size_usd
 
         logger.info(
-            "[cross_arb] REAL EXECUTION {} buy@{} sell@{} size=${:.2f}",
+            "[cross_arb] REAL EXECUTION {} buy@{} sell@{} size=${:.2f} "
+            "(inventario {}={:.4f} ≈ ${:.2f})",
             pair, trade.buy_exchange, trade.sell_exchange, size_usd,
+            coin, eth_bal, eth_usd,
         )
 
         # Execute both legs simultaneously
@@ -448,6 +454,108 @@ class CrossExchangeArb:
             coin, available_balance_usd, size,
         )
         return size
+
+    # ── Inventario ETH ────────────────────────────────────────────────────────
+
+    async def _startup_inventory_check(self) -> None:
+        """Verifica inventario ETH en arranque y alerta si está bajo."""
+        await asyncio.sleep(10)   # esperar a que los precios lleguen vía WS
+        logger.info("[cross_arb] 🔍 Verificando inventario ETH inicial...")
+        for coin in ["ETH"]:
+            pair  = f"{coin}USDT"
+            for exchange in ["bybit", "okx"]:
+                if exchange == "bybit" and not self._bybit_ready:
+                    continue
+                if exchange == "okx" and not self._okx_exec:
+                    continue
+                try:
+                    if exchange == "bybit":
+                        bal = await self._bybit_coin_balance(coin)
+                    else:
+                        bal = await self._okx_exec.get_coin_balance(coin)
+                    price   = self._get_price(pair, exchange)
+                    eth_usd = bal * price
+                    if eth_usd < _ETH_MIN_USD:
+                        logger.warning(
+                            "[cross_arb] ⚠️ Inventario bajo en {} — {}={:.4f} (${:.2f}) "
+                            "mínimo=${:.0f} — comprando ${:.0f} ETH",
+                            exchange, coin, bal, eth_usd, _ETH_MIN_USD, _ETH_REPLENISH_USD,
+                        )
+                        asyncio.create_task(self._replenish_eth(exchange, coin))
+                    else:
+                        logger.info(
+                            "[cross_arb] ✅ Inventario {} {} {:.4f} ≈ ${:.2f}",
+                            exchange, coin, bal, eth_usd,
+                        )
+                except Exception as exc:
+                    logger.warning("[cross_arb] inventory check {}/{} error: {}", exchange, coin, exc)
+
+    async def _inventory_loop(self) -> None:
+        """Loop de fondo: verifica inventario ETH cada 5 minutos."""
+        while True:
+            await asyncio.sleep(_INVENTORY_CHECK_SECS)
+            await self._check_and_replenish_inventory()
+
+    async def _check_and_replenish_inventory(self) -> None:
+        """Revisa inventario ETH en ambos exchanges y replenish si < mínimo."""
+        for coin in ["ETH"]:
+            pair = f"{coin}USDT"
+            for exchange in ["bybit", "okx"]:
+                if exchange == "bybit" and not self._bybit_ready:
+                    continue
+                if exchange == "okx" and not self._okx_exec:
+                    continue
+                if exchange in self._replenishing:
+                    continue
+                try:
+                    if exchange == "bybit":
+                        bal = await self._bybit_coin_balance(coin)
+                    else:
+                        bal = await self._okx_exec.get_coin_balance(coin)
+                    price   = self._get_price(pair, exchange)
+                    eth_usd = bal * price
+                    if eth_usd < _ETH_MIN_USD:
+                        logger.info(
+                            "[cross_arb] 📦 Inventario {} {} ${:.2f} < ${:.0f} mínimo — reabasteciendo",
+                            exchange, coin, eth_usd, _ETH_MIN_USD,
+                        )
+                        asyncio.create_task(self._replenish_eth(exchange, coin))
+                except Exception as exc:
+                    logger.warning("[cross_arb] _check_inventory {}/{}: {}", exchange, coin, exc)
+
+    async def _replenish_eth(self, exchange: str, coin: str) -> None:
+        """Compra ETH en el exchange indicado usando USDT para reponer inventario."""
+        if exchange in self._replenishing:
+            return
+        self._replenishing.add(exchange)
+        try:
+            pair  = f"{coin}USDT"
+            price = self._get_price(pair, exchange)
+            if price <= 0:
+                logger.warning(
+                    "[cross_arb] _replenish_eth: sin precio para {} en {} — abortando",
+                    pair, exchange,
+                )
+                return
+            logger.info(
+                "[cross_arb] 🛒 Comprando ${:.0f} {} en {} para inventario (precio=${:.2f})",
+                _ETH_REPLENISH_USD, coin, exchange, price,
+            )
+            if exchange == "bybit":
+                result = await self._bybit_market_order(pair, "Buy", _ETH_REPLENISH_USD, price)
+            elif exchange == "okx" and self._okx_exec:
+                result = await self._okx_market_order(pair, "buy", _ETH_REPLENISH_USD, price)
+            else:
+                result = None
+
+            if result:
+                logger.info("[cross_arb] ✅ Inventario {} replenish OK — compraron ${:.0f} {}", exchange, _ETH_REPLENISH_USD, coin)
+            else:
+                logger.error("[cross_arb] ❌ Inventario {} replenish FALLÓ", exchange)
+        except Exception as exc:
+            logger.error("[cross_arb] _replenish_eth {} error: {}", exchange, exc)
+        finally:
+            self._replenishing.discard(exchange)
 
     # ── Exchange order helpers ────────────────────────────────────────────────
 
