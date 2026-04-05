@@ -47,6 +47,7 @@ _CB_MAX_ERRORS    = 3    # errores seguidos antes de circuit breaker
 _CB_PAUSE_SECS    = 300  # 5 min de pausa al activar CB
 MIN_ORDER_USD     = 10   # valor mínimo de orden en USD
 FORCE_OKX_ONLY    = True # True = usar solo OKX cuando Bybit sin saldo
+CROSS_ARB_ENABLED = False  # False = cross-arb deshabilitado (Railway bloqueado por Bybit)
 
 
 @dataclass

@@ -131,12 +131,14 @@ async def trading_loop() -> None:
         logger.error(f"[main] Import error: {exc}")
         return
 
-    # ── Arbitraje (tolerante a fallos) ───────────────────────────────────────
-    arb_mod = _try_import("arb_engine")
-    prod = config.PRODUCTION   # True = dinero real, False = papel
-    cross_arb_real = getattr(config, "ENABLE_CROSS_ARB_REAL", False)
-    arb_engine = arb_mod.ArbEngine(production=prod, cross_arb_real=cross_arb_real) if arb_mod else None
-    _arb_ref = arb_engine
+    # ── Arbitraje (DESHABILITADO — Railway bloqueado por Bybit) ────────────────
+    # arb_mod = _try_import("arb_engine")
+    # prod = config.PRODUCTION   # True = dinero real, False = papel
+    # cross_arb_real = getattr(config, "ENABLE_CROSS_ARB_REAL", False)
+    # arb_engine = arb_mod.ArbEngine(production=prod, cross_arb_real=cross_arb_real) if arb_mod else None
+    # _arb_ref = arb_engine
+    arb_engine = None
+    _arb_ref = None
 
     # ── Estrategias avanzadas (tolerantes a fallos) ───────────────────────────
     mr_mod  = _try_import("mean_reversion")
@@ -235,8 +237,8 @@ async def trading_loop() -> None:
         asyncio.create_task(session_vol.run(), name="session_volume")
     if dashboard:
         asyncio.create_task(dashboard.run(), name="dashboard")
-    if arb_engine:
-        asyncio.create_task(arb_engine.run(), name="arb_engine")
+    # if arb_engine:
+    #     asyncio.create_task(arb_engine.run(), name="arb_engine")
     if grid_eng:
         asyncio.create_task(grid_eng.run(), name="grid_retry_loop")
     if dn_eng:
@@ -381,11 +383,11 @@ async def trading_loop() -> None:
             correlation.update(trade)
         if session_vol:
             session_vol.record_volume(trade.quantity, trade.timestamp)
-        if arb_engine:
-            arb_engine.on_trade(trade.exchange, trade.pair, trade.price, trade.timestamp * 1000)
-            # ETHBTC spot → triangular arb con precio real (no implicito)
-            if trade.pair == "ETHBTC":
-                arb_engine.on_eth_btc_price(trade.price)
+        # if arb_engine:
+        #     arb_engine.on_trade(trade.exchange, trade.pair, trade.price, trade.timestamp * 1000)
+        #     # ETHBTC spot → triangular arb con precio real (no implicito)
+        #     if trade.pair == "ETHBTC":
+        #         arb_engine.on_eth_btc_price(trade.price)
 
         # Estrategias avanzadas — datos en tiempo real
         if grid_eng:
@@ -613,8 +615,8 @@ async def trading_loop() -> None:
         )
 
         # Activar lead-lag arb en BTC spring
-        if signal.pair == "BTCUSDT" and arb_engine:
-            arb_engine.on_btc_spring(signal.entry_price)
+        # if signal.pair == "BTCUSDT" and arb_engine:
+        #     arb_engine.on_btc_spring(signal.entry_price)
 
         # Mean Reversion: pasar datos de cascade al motor
         if mean_rev:
