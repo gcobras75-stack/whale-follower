@@ -242,6 +242,7 @@ class CrossExchangeArb:
                     testnet=False,
                     api_key=config.BYBIT_API_KEY,
                     api_secret=config.BYBIT_API_SECRET,
+                    base_url="https://api.bytick.com",
                 )
                 logger.info("[cross_arb] Bybit real session initialized")
             else:
@@ -317,6 +318,31 @@ class CrossExchangeArb:
             "[cross_arb] REAL EXECUTION {} buy@{} sell@{} size=${:.0f}",
             pair, trade.buy_exchange, trade.sell_exchange, size_usd,
         )
+
+        # Verificar que el exchange vendedor tiene el asset (no solo USDT)
+        coin = pair.replace("USDT", "")   # ETHUSDT → ETH
+        qty_needed = size_usd / sell_price if sell_price > 0 else 0
+
+        if trade.sell_exchange == "okx" and self._okx_exec:
+            okx_coin_bal = await self._okx_exec.get_coin_balance(coin)
+            if okx_coin_bal < qty_needed:
+                logger.warning(
+                    "[cross_arb] OKX no tiene {} suficiente para vender "
+                    "(tiene={:.4f} necesita={:.4f}) — saltando arb",
+                    coin, okx_coin_bal, qty_needed,
+                )
+                self._trades.append(trade)
+                return
+        elif trade.sell_exchange == "bybit" and self._bybit_session:
+            bybit_coin_bal = await self._bybit_coin_balance(coin)
+            if bybit_coin_bal < qty_needed:
+                logger.warning(
+                    "[cross_arb] Bybit no tiene {} suficiente para vender "
+                    "(tiene={:.4f} necesita={:.4f}) — saltando arb",
+                    coin, bybit_coin_bal, qty_needed,
+                )
+                self._trades.append(trade)
+                return
 
         # Execute both legs simultaneously
         buy_result  = None
@@ -438,6 +464,27 @@ class CrossExchangeArb:
         except Exception as exc:
             logger.error("[cross_arb] Bybit order exception: {}", exc)
             return None
+
+    async def _bybit_coin_balance(self, coin: str) -> float:
+        """Fetch available balance of a specific coin on Bybit UNIFIED account."""
+        if not self._bybit_session:
+            return 0.0
+        try:
+            loop   = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: self._bybit_session.get_wallet_balance(
+                    accountType="UNIFIED", coin=coin
+                ),
+            )
+            if result.get("retCode") == 0:
+                coins = result.get("result", {}).get("list", [{}])[0].get("coin", [])
+                for c in coins:
+                    if c.get("coin") == coin:
+                        return float(c.get("availableToWithdraw", c.get("walletBalance", 0)))
+        except Exception as exc:
+            logger.warning("[cross_arb] _bybit_coin_balance({}) error: {}", coin, exc)
+        return 0.0
 
     async def _okx_market_order(
         self, pair: str, side: str, size_usd: float, price: float

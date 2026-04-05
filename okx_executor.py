@@ -135,6 +135,29 @@ class OKXExecutor:
             logger.warning("[okx_exec] get_balance error: {}", exc)
             return self._last_balance  # return cached if API fails
 
+    async def get_coin_balance(self, coin: str) -> float:
+        """Get available balance of a specific coin (ETH, BTC, SOL) in OKX trading account."""
+        if not self._enabled:
+            return 0.0
+        path = f"/api/v5/account/balance?ccy={coin}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    _BASE_URL + path,
+                    headers=_auth_headers("GET", path),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                data = await resp.json()
+            if data.get("code") != "0":
+                return 0.0
+            for detail in data.get("data", [{}])[0].get("details", []):
+                if detail.get("ccy") == coin:
+                    return float(detail.get("availBal", 0))
+            return 0.0
+        except Exception as exc:
+            logger.warning("[okx_exec] get_coin_balance({}) error: {}", coin, exc)
+            return 0.0
+
     # ── Market orders ───────────────────────────────────────────────────────
 
     async def market_order(

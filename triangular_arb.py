@@ -216,6 +216,7 @@ class TriangularArb:
                 testnet=False,
                 api_key=config.BYBIT_API_KEY,
                 api_secret=config.BYBIT_API_SECRET,
+                base_url="https://api.bytick.com",
             )
             loop   = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -471,7 +472,7 @@ class TriangularArb:
             pair, buy_ex, size_usd, trade.eth_btc_real, sell_ex, trade.eth_btc_impl,
         )
 
-        session = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET)
+        session = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET, base_url="https://api.bytick.com")
         loop    = asyncio.get_event_loop()
         _qty    = asset_qty
 
