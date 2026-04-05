@@ -1,0 +1,12 @@
+# Normalizar line endings y declarar encoding UTF-8
+* text=auto eol=lf
+
+# Python
+*.py text eol=lf encoding=utf-8
+
+# Config / documentacion
+*.md text eol=lf encoding=utf-8
+*.txt text eol=lf encoding=utf-8
+*.json text eol=lf encoding=utf-8
+*.env text eol=lf encoding=utf-8
+.windsurfrules text eol=lf encoding=utf-8
