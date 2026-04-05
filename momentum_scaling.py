@@ -39,9 +39,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import base64
+import hashlib
+import hmac
+
 import aiohttp
 from loguru import logger
 
+import config
 import db_writer
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -63,6 +68,15 @@ _CVD_EXIT_THRESHOLD = -5.0   # salir si CVD_3s < -5 (reversal rapido)
 _COOLDOWN_SECS     = 90      # no abrir otro en 90s
 _MAX_OPEN          = 3       # maximo 3 posiciones simultaneas
 _MAX_HOLD_SECS     = 300     # cierre forzado a 5 minutos
+
+# Capital gate y apalancamiento maximo segun capital real
+# (capital_minimo, max_lev) — ordenado de menor a mayor capital
+_LEV_TABLE = [
+    (500.0, 3.0),   # capital >= $500 → max 3x
+    (300.0, 2.0),   # capital >= $300 → max 2x
+    (0.0,   1.5),   # capital <  $300 → max 1.5x
+]
+_MIN_CAPITAL_USD = 0.0       # sin gate duro; solo limita apalancamiento
 
 
 @dataclass
@@ -111,10 +125,111 @@ class MomentumScalingEngine:
         self._trades: List[MomentumTrade] = []
         self._last_open: float = 0.0
         self._prices: Dict[str, float] = {}
+        self._real_capital_usd: float = 0.0
+        self._paper_mode: bool = True
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[momentum] Iniciado en modo {} | base_size=${:.0f}",
-                    mode, _BASE_SIZE_USD)
+        logger.info("[momentum] Iniciado modo {} | base_size=${:.0f} lev_table={}",
+                    mode, _BASE_SIZE_USD,
+                    [(f"${t[0]:.0f}", f"{t[1]}x") for t in reversed(_LEV_TABLE)])
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Tarea de fondo: verificar capital real cada hora."""
+        await self._check_capital()
+        while True:
+            await asyncio.sleep(3600)
+            await self._check_capital()
+
+    async def _check_capital(self) -> None:
+        if not self._production:
+            self._paper_mode = True
+            self._real_capital_usd = config.PAPER_CAPITAL
+            lev = self._max_leverage()
+            logger.info("[momentum] Capital=${:.0f} \u2192 max_lev={:.1f}x (PRODUCTION=false)",
+                        config.PAPER_CAPITAL, lev)
+            return
+        try:
+            total = await self._fetch_real_capital()
+            self._real_capital_usd = total
+            lev = self._max_leverage()
+            prev = self._paper_mode
+            self._paper_mode = False   # momentum nunca tiene gate duro
+            eff  = self._effective_base_size()
+            logger.info("[momentum] Capital=${:.2f} \u2192 max_lev={:.1f}x eff_size=${:.0f}",
+                        total, lev, eff)
+            if prev and total >= 500:
+                asyncio.create_task(self._alert_capital_level(total, lev))
+        except Exception as exc:
+            logger.warning("[momentum] _check_capital error: {} \u2014 continuar", exc)
+
+    def _max_leverage(self) -> float:
+        cap = self._real_capital_usd
+        for threshold, lev in _LEV_TABLE:
+            if cap >= threshold:
+                return lev
+        return 1.5
+
+    def _effective_base_size(self) -> float:
+        """Base de capital escalada por apalancamiento permitido."""
+        lev = self._max_leverage()
+        return min(_BASE_SIZE_USD, self._real_capital_usd * lev)
+
+    async def _fetch_real_capital(self) -> float:
+        b = await self._fetch_bybit_balance()
+        o = await self._fetch_okx_balance()
+        return b + o
+
+    async def _fetch_bybit_balance(self) -> float:
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        try:
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = hmac.new(config.BYBIT_API_SECRET.encode(), msg.encode(),
+                           hashlib.sha256).hexdigest()
+            headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
+                       "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
+                       "X-BAPI-RECV-WINDOW": "5000"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    headers=headers, timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        for c in data["result"]["list"][0].get("coin", []):
+                            if c.get("coin") == "USDT":
+                                return float(c.get("walletBalance", 0))
+        except Exception as exc:
+            logger.warning("[momentum] Bybit balance error: {}", exc)
+        return 0.0
+
+    async def _fetch_okx_balance(self) -> float:
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            return 0.0
+        try:
+            from datetime import datetime, timezone as _tz
+            ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path = "/api/v5/asset/balances?ccy=USDT"
+            sig  = base64.b64encode(
+                hmac.new(config.OKX_SECRET.encode(),
+                         (ts + "GET" + path).encode(), hashlib.sha256).digest()
+            ).decode()
+            headers = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+                       "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://www.okx.com{path}", headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                return float(item.get("availBal", 0))
+        except Exception as exc:
+            logger.warning("[momentum] OKX balance error: {}", exc)
+        return 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -211,8 +326,9 @@ class MomentumScalingEngine:
 
         self._last_open = now
 
-        size1 = _BASE_SIZE_USD * _PYRAMID_PCTS[0]
-        sl    = price * (1 - _SL_INITIAL_PCT)
+        eff_base = self._effective_base_size()
+        size1    = eff_base * _PYRAMID_PCTS[0]
+        sl       = price * (1 - _SL_INITIAL_PCT)
 
         trade = MomentumTrade(
             trade_id    = str(uuid.uuid4()),
@@ -228,10 +344,11 @@ class MomentumScalingEngine:
         )
         self._trades.append(trade)
 
+        lev = self._max_leverage()
         logger.info(
             "[momentum] ENTRADA etapa1 {} ${:.0f} @ {:.4f} | "
-            "vel3={:.1f} vel10={:.1f} vel30={:.1f} ob={:.2f}",
-            pair, size1, price, vel3, vel10, vel30, ob_ratio,
+            "max_lev={:.1f}x capital=${:.0f} vel3={:.1f} ob={:.2f}",
+            pair, size1, price, lev, self._real_capital_usd, vel3, ob_ratio,
         )
         asyncio.create_task(self._alert_open(trade))
         asyncio.create_task(db_writer.save_momentum_open(trade))
@@ -244,14 +361,15 @@ class MomentumScalingEngine:
 
             gain = (price - trade.entry_price) / trade.entry_price
 
+            eff_base = self._effective_base_size()
             # Etapa 2
             if trade.stage == 1 and gain >= _ENTRY_2_TRIGGER and vel3 >= _CVD_VEL_3S_MIN:
-                size2 = _BASE_SIZE_USD * _PYRAMID_PCTS[1]
+                size2 = eff_base * _PYRAMID_PCTS[1]
                 self._add_stage(trade, price, size2, 2)
 
             # Etapa 3
             elif trade.stage == 2 and gain >= _ENTRY_3_TRIGGER and accel > 0:
-                size3 = _BASE_SIZE_USD * _PYRAMID_PCTS[2]
+                size3 = eff_base * _PYRAMID_PCTS[2]
                 self._add_stage(trade, price, size3, 3)
 
     def _add_stage(self, trade: MomentumTrade, price: float, size: float, stage: int) -> None:
@@ -325,17 +443,36 @@ class MomentumScalingEngine:
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 
-    async def _alert_open(self, trade: MomentumTrade) -> None:
+    async def _alert_capital_level(self, capital: float, lev: float) -> None:
         token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
         msg = (
-            f"🚀 [MOMENTUM] Entrada {trade.pair}\n"
+            f"\u2705 [MOMENTUM] nivel completo\n"
+            f"Capital: ${capital:.2f} \u2192 max_lev={lev:.1f}x \u2705 completo\n"
+            f"Tama\u00f1o efectivo: ${self._effective_base_size():.0f}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": msg},
+                             timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
+
+    async def _alert_open(self, trade: MomentumTrade) -> None:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        lev = self._max_leverage()
+        msg = (
+            f"\U0001f680 [MOMENTUM] Entrada {trade.pair}\n"
             f"Etapa: 1/3 (piramide progresiva)\n"
             f"Precio: ${trade.entry_price:,.4f}\n"
             f"SL: ${trade.stop_loss:,.4f} (-{_SL_INITIAL_PCT*100:.2f}%)\n"
-            f"Tamaño inicial: ${trade.size_usd:.0f} (max ${_BASE_SIZE_USD:.0f})\n"
+            f"Tama\u00f1o inicial: ${trade.size_usd:.0f} | max_lev={lev:.1f}x | capital=${self._real_capital_usd:.0f}\n"
             f"Timeout: {_MAX_HOLD_SECS}s"
         )
         try:

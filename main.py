@@ -209,6 +209,12 @@ async def trading_loop() -> None:
         asyncio.create_task(grid_eng.run(), name="grid_retry_loop")
     if dn_eng:
         asyncio.create_task(dn_eng.run(), name="delta_neutral")
+    if mean_rev:
+        asyncio.create_task(mean_rev.run(), name="mean_reversion")
+    if ofi_eng:
+        asyncio.create_task(ofi_eng.run(), name="ofi_strategy")
+    if mom_eng:
+        asyncio.create_task(mom_eng.run(), name="momentum_scaling")
     if macro_agent:
         asyncio.create_task(macro_agent.run(), name="macro_agent")
     if deribit_eng:

@@ -42,9 +42,14 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+import base64
+import hashlib
+import hmac
+
 import aiohttp
 from loguru import logger
 
+import config
 import db_writer
 
 # ── Session filter ────────────────────────────────────────────────────────────
@@ -63,14 +68,16 @@ def _in_overlap_session() -> bool:
 # ── Config ────────────────────────────────────────────────────────────────────
 _OFI_THRESHOLD    = 0.80    # subido de 0.65 → solo señales de alta calidad
 _OFI_EXIT         = 0.20    # cerrar si OFI revierte a este nivel
-_TP_PCT           = 0.0040  # 0.40% TP — cubre fees 0.11% RT con EV positivo
-_SL_PCT           = 0.0018  # 0.18% SL → RR = 2.22:1
-_MAX_HOLD_SECS    = 90      # extendido de 45s → 90s para alcanzar TP 0.40%
+_TP_PCT           = 0.0045  # 0.45% TP — cubre fees 0.06% RT con margen positivo
+_SL_PCT           = 0.0018  # 0.18% SL → RR = 2.50:1
+_MAX_HOLD_SECS    = 90      # 90s para alcanzar TP 0.45%
 _VOLUME_MULT      = 1.5     # volumen debe ser >1.5x media
 _CVD_CONFIRM_SECS = 10      # CVD en los ultimos 10s debe coincidir
 _COOLDOWN_SECS    = 20      # cooldown entre senales
-_SIZE_USD         = 300.0   # USD por posicion
+_SIZE_USD         = 300.0   # USD por posicion (papel)
 _MAX_OPEN         = 2       # max posiciones simultáneas
+_MIN_CAPITAL_USD  = 500.0   # capital minimo para operar en real
+_REAL_SIZE_PCT    = 0.15    # 15% del capital real por posicion
 
 # Pesos por nivel del order book (nivel 1 mas cercano al precio)
 _LEVEL_WEIGHTS = [1.0, 0.7, 0.5, 0.3, 0.2]
@@ -162,12 +169,102 @@ class OFIEngine:
         self._last_open: float              = 0.0
         self._cvd_vel_10s: float            = 0.0
         self._prices: Dict[str, float]      = {}
+        self._real_capital_usd: float       = 0.0
+        self._paper_mode: bool              = True
 
         mode = "REAL" if production else "PAPEL"
         logger.info(
-            "[ofi] Iniciado en modo {} | threshold={} tp={}% sl={}% sesion=13-17UTC pares={}",
-            mode, _OFI_THRESHOLD, _TP_PCT * 100, _SL_PCT * 100, _OFI_PAIRS,
+            "[ofi] Iniciado modo {} | TP={:.2f}% timeout={}s min_capital=${:.0f} pares={}",
+            mode, _TP_PCT * 100, _MAX_HOLD_SECS, _MIN_CAPITAL_USD, _OFI_PAIRS,
         )
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Tarea de fondo: verificar capital real cada hora."""
+        await self._check_capital()
+        while True:
+            await asyncio.sleep(3600)
+            await self._check_capital()
+
+    async def _check_capital(self) -> None:
+        if not self._production:
+            self._paper_mode = True
+            self._real_capital_usd = config.PAPER_CAPITAL
+            logger.info("[ofi] Capital=${:.0f} < ${:.0f} \u2192 papel (PRODUCTION=false)",
+                        config.PAPER_CAPITAL, _MIN_CAPITAL_USD)
+            return
+        try:
+            total = await self._fetch_real_capital()
+            self._real_capital_usd = total
+            if total < _MIN_CAPITAL_USD:
+                self._paper_mode = True
+                logger.warning("[ofi] Capital ${:.2f} < ${:.0f} \u2192 papel \U0001f512",
+                               total, _MIN_CAPITAL_USD)
+            else:
+                prev = self._paper_mode
+                self._paper_mode = False
+                logger.info("[ofi] Capital ${:.2f} >= ${:.0f} \u2192 REAL activado \u2705",
+                            total, _MIN_CAPITAL_USD)
+                if prev:
+                    asyncio.create_task(self._alert_capital_activated(total))
+        except Exception as exc:
+            logger.warning("[ofi] _check_capital error: {} \u2014 mantener papel", exc)
+
+    async def _fetch_real_capital(self) -> float:
+        b = await self._fetch_bybit_balance()
+        o = await self._fetch_okx_balance()
+        return b + o
+
+    async def _fetch_bybit_balance(self) -> float:
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        try:
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = hmac.new(config.BYBIT_API_SECRET.encode(), msg.encode(),
+                           hashlib.sha256).hexdigest()
+            headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
+                       "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
+                       "X-BAPI-RECV-WINDOW": "5000"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    headers=headers, timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        for c in data["result"]["list"][0].get("coin", []):
+                            if c.get("coin") == "USDT":
+                                return float(c.get("walletBalance", 0))
+        except Exception as exc:
+            logger.warning("[ofi] Bybit balance error: {}", exc)
+        return 0.0
+
+    async def _fetch_okx_balance(self) -> float:
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            return 0.0
+        try:
+            from datetime import datetime, timezone as _tz
+            ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path = "/api/v5/asset/balances?ccy=USDT"
+            sig  = base64.b64encode(
+                hmac.new(config.OKX_SECRET.encode(),
+                         (ts + "GET" + path).encode(), hashlib.sha256).digest()
+            ).decode()
+            headers = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+                       "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://www.okx.com{path}", headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                return float(item.get("availBal", 0))
+        except Exception as exc:
+            logger.warning("[ofi] OKX balance error: {}", exc)
+        return 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -294,6 +391,9 @@ class OFIEngine:
             sl = price * (1 + _SL_PCT)
             tp = price * (1 - _TP_PCT)
 
+        is_real = self._production and not self._paper_mode
+        size    = (self._real_capital_usd * _REAL_SIZE_PCT if is_real else _SIZE_USD)
+
         trade = OFITrade(
             trade_id    = str(uuid.uuid4()),
             pair        = pair,
@@ -301,15 +401,16 @@ class OFIEngine:
             entry_price = price,
             stop_loss   = sl,
             take_profit = tp,
-            size_usd    = _SIZE_USD,
+            size_usd    = size,
             ofi_score   = ofi,
-            production  = self._production,
+            production  = is_real,
         )
         self._trades.append(trade)
 
+        label = "\u2705 REAL" if is_real else "PAPEL"
         logger.info(
-            "[ofi] {} {} ofi={:.3f} cvd_vel={:.2f} entry={:.4f} tp={:.4f} sl={:.4f}",
-            direction.upper(), pair, ofi, self._cvd_vel_10s, price, tp, sl,
+            "[ofi] {} {} {} ofi={:.3f} cvd_vel={:.2f} TP={:.2f}% size=${:.0f}",
+            label, direction.upper(), pair, ofi, self._cvd_vel_10s, _TP_PCT * 100, size,
         )
         asyncio.create_task(self._alert_open(trade))
         asyncio.create_task(db_writer.save_ofi_open(trade))
@@ -371,19 +472,39 @@ class OFIEngine:
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 
+    async def _alert_capital_activated(self, capital: float) -> None:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        msg = (
+            f"\u2705 [OFI] activada en REAL\n"
+            f"Capital: ${capital:.2f} >= ${_MIN_CAPITAL_USD:.0f} m\u00ednimo\n"
+            f"Tama\u00f1o por trade: ${capital * _REAL_SIZE_PCT:.2f}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": msg},
+                             timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
+
     async def _alert_open(self, trade: OFITrade) -> None:
         token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        arrow = "▲" if trade.direction == "long" else "▼"
+        arrow = "\u25b2" if trade.direction == "long" else "\u25bc"
+        icon  = "\u2705" if trade.production else "\U0001f4ca"
+        mode  = "REAL EJECUTADO" if trade.production else "Simulado"
         msg = (
-            f"{arrow} [OFI] {trade.direction.upper()} {trade.pair}\n"
+            f"{icon} [OFI] {mode} {arrow} {trade.direction.upper()} {trade.pair}\n"
             f"OFI Score: {trade.ofi_score:+.4f}\n"
             f"Entrada: ${trade.entry_price:,.4f}\n"
             f"TP: ${trade.take_profit:,.4f} (+{_TP_PCT*100:.2f}%)\n"
             f"SL: ${trade.stop_loss:,.4f} (-{_SL_PCT*100:.2f}%)\n"
-            f"Duración máx: {_MAX_HOLD_SECS}s"
+            f"Size: ${trade.size_usd:.0f} | TP={_TP_PCT*100:.2f}% | timeout={_MAX_HOLD_SECS}s"
         )
         try:
             async with aiohttp.ClientSession() as s:

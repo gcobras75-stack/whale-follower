@@ -26,18 +26,29 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import base64
+import hashlib
+import hmac
+
 import aiohttp
 from loguru import logger
 
+import config
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _LEAD_LAG_PAIRS: Dict[str, dict] = {
-    "ETHUSDT": {"prob": 0.73, "window_secs": 60,  "lead_ratio": 0.85, "size_usd": 300.0},
-    "SOLUSDT": {"prob": 0.61, "window_secs": 90,  "lead_ratio": 0.70, "size_usd": 150.0},
-    "BNBUSDT": {"prob": 0.58, "window_secs": 90,  "lead_ratio": 0.60, "size_usd": 150.0},
+    "ETHUSDT": {"prob": 0.73, "window_secs": 60,  "lead_ratio": 0.85, "size_pct": 0.40},
+    "SOLUSDT": {"prob": 0.61, "window_secs": 90,  "lead_ratio": 0.70, "size_pct": 0.30},
+    "BNBUSDT": {"prob": 0.58, "window_secs": 90,  "lead_ratio": 0.60, "size_pct": 0.30},
 }
 _STOP_LOSS_PCT   = 0.003    # 0.3% stop loss
 _MIN_BTC_MOVE    = 0.002    # BTC debe moverse >= 0.2% para que haya trailing TP
 _COOLDOWN_SECS   = 120      # no abrir otro lote por 2 min
+_MIN_CAPITAL_USD = 200.0    # capital minimo para operar en real
+_REAL_SIZE_PCT   = 0.10     # 10% del capital real, repartido entre pares
+# size_pct de _LEAD_LAG_PAIRS = fraccion del 10% real asignado a ese par
+# Papel: tamanios fijos equivalentes
+_PAPER_SIZES: Dict[str, float] = {"ETHUSDT": 300.0, "SOLUSDT": 150.0, "BNBUSDT": 150.0}
 
 
 @dataclass
@@ -84,10 +95,102 @@ class LeadLagArb:
         self._last_trigger: float = 0.0
         self._current_prices: Dict[str, float] = {}
         self._triggers: List[float] = []
+        self._real_capital_usd: float = 0.0
+        self._paper_mode: bool = True
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[lead_lag] Iniciado en modo {} | pares={}", mode,
+        logger.info("[lead_lag] Iniciado modo {} | min_capital=${:.0f} size={}% pares={}",
+                    mode, _MIN_CAPITAL_USD, int(_REAL_SIZE_PCT * 100),
                     list(_LEAD_LAG_PAIRS.keys()))
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Tarea de fondo: verificar capital real cada hora."""
+        await self._check_capital()
+        while True:
+            await asyncio.sleep(3600)
+            await self._check_capital()
+
+    async def _check_capital(self) -> None:
+        if not self._production:
+            self._paper_mode = True
+            self._real_capital_usd = config.PAPER_CAPITAL
+            logger.info("[lead_lag] Capital=${:.0f} < ${:.0f} \u2192 papel (PRODUCTION=false)",
+                        config.PAPER_CAPITAL, _MIN_CAPITAL_USD)
+            return
+        try:
+            total = await self._fetch_real_capital()
+            self._real_capital_usd = total
+            if total < _MIN_CAPITAL_USD:
+                self._paper_mode = True
+                logger.warning("[lead_lag] Capital=${:.2f} < ${:.0f} \u2192 papel \U0001f512",
+                               total, _MIN_CAPITAL_USD)
+            else:
+                prev = self._paper_mode
+                self._paper_mode = False
+                size = total * _REAL_SIZE_PCT
+                logger.info("[lead_lag] Capital=${:.2f} >= ${:.0f} \u2192 REAL activado \u2705 size=${:.2f}",
+                            total, _MIN_CAPITAL_USD, size)
+                if prev:
+                    asyncio.create_task(self._alert_capital_activated(total))
+        except Exception as exc:
+            logger.warning("[lead_lag] _check_capital error: {} \u2014 mantener papel", exc)
+
+    async def _fetch_real_capital(self) -> float:
+        b = await self._fetch_bybit_balance()
+        o = await self._fetch_okx_balance()
+        return b + o
+
+    async def _fetch_bybit_balance(self) -> float:
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        try:
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = hmac.new(config.BYBIT_API_SECRET.encode(), msg.encode(),
+                           hashlib.sha256).hexdigest()
+            headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
+                       "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
+                       "X-BAPI-RECV-WINDOW": "5000"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    headers=headers, timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        for c in data["result"]["list"][0].get("coin", []):
+                            if c.get("coin") == "USDT":
+                                return float(c.get("walletBalance", 0))
+        except Exception as exc:
+            logger.warning("[lead_lag] Bybit balance error: {}", exc)
+        return 0.0
+
+    async def _fetch_okx_balance(self) -> float:
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            return 0.0
+        try:
+            from datetime import datetime, timezone as _tz
+            ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path = "/api/v5/asset/balances?ccy=USDT"
+            sig  = base64.b64encode(
+                hmac.new(config.OKX_SECRET.encode(),
+                         (ts + "GET" + path).encode(), hashlib.sha256).digest()
+            ).decode()
+            headers = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+                       "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://www.okx.com{path}", headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                return float(item.get("availBal", 0))
+        except Exception as exc:
+            logger.warning("[lead_lag] OKX balance error: {}", exc)
+        return 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -101,14 +204,20 @@ class LeadLagArb:
         self._triggers.append(now)
         logger.info("[lead_lag] BTC spring @ {:.2f} — abriendo altcoins", btc_price)
 
+        is_real   = self._production and not self._paper_mode
+        total_size = (self._real_capital_usd * _REAL_SIZE_PCT if is_real
+                      else sum(_PAPER_SIZES.values()))
+
         for pair, cfg in _LEAD_LAG_PAIRS.items():
             entry = self._current_prices.get(pair)
             if not entry:
                 logger.debug("[lead_lag] Sin precio para {}, skip", pair)
                 continue
 
-            sl  = entry * (1 - _STOP_LOSS_PCT)
-            tp  = entry * (1 + cfg["lead_ratio"] * _MIN_BTC_MOVE * 3)
+            sl      = entry * (1 - _STOP_LOSS_PCT)
+            tp      = entry * (1 + cfg["lead_ratio"] * _MIN_BTC_MOVE * 3)
+            size    = (total_size * cfg["size_pct"] if is_real
+                       else _PAPER_SIZES[pair])
 
             trade = LeadLagTrade(
                 trade_id    = str(uuid.uuid4()),
@@ -116,17 +225,18 @@ class LeadLagArb:
                 entry_price = entry,
                 stop_loss   = sl,
                 take_profit = tp,
-                size_usd    = cfg["size_usd"],
+                size_usd    = size,
                 btc_entry   = btc_price,
-                production  = self._production,
+                production  = is_real,
             )
 
-            if self._production:
+            if is_real:
                 asyncio.create_task(self._execute_real(trade))
             else:
+                label = "PAPEL" if not self._production else f"PAPEL (capital ${self._real_capital_usd:.0f} < ${_MIN_CAPITAL_USD:.0f})"
                 logger.info(
-                    "[lead_lag] PAPEL: {} LONG ${:.0f} entry={:.4f} sl={:.4f} tp={:.4f}",
-                    pair, cfg["size_usd"], entry, sl, tp,
+                    "[lead_lag] {} {} LONG ${:.0f} entry={:.4f} sl={:.4f} tp={:.4f}",
+                    label, pair, size, entry, sl, tp,
                 )
                 self._trades.append(trade)
 
@@ -215,19 +325,37 @@ class LeadLagArb:
             "[lead_lag] REAL execution pendiente — "
             "necesita BYBIT_API_KEY real y bybit_executor.market_order()."
         )
-        # Cuando este configurado:
-        # await bybit_executor.market_order(trade.pair, "Buy", trade.size_usd)
         self._trades.append(trade)
 
     # ── Telegram alert ────────────────────────────────────────────────────────
+
+    async def _alert_capital_activated(self, capital: float) -> None:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        size = capital * _REAL_SIZE_PCT
+        msg = (
+            f"\u2705 [LEAD-LAG ARB] activada en REAL\n"
+            f"Capital: ${capital:.2f} >= ${_MIN_CAPITAL_USD:.0f} m\u00ednimo\n"
+            f"Tama\u00f1o total: ${size:.2f} (10% capital)"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": msg},
+                             timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
 
     async def _alert_close(self, trade: LeadLagTrade, reason: str) -> None:
         token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        mode  = "REAL" if trade.production else "PAPEL"
-        emoji = "✅" if trade.pnl_usd >= 0 else "❌"
+        icon  = "\u2705" if trade.production else "\U0001f4ca"
+        mode  = "REAL EJECUTADO" if trade.production else "Simulado"
+        emoji = "\u2705" if trade.pnl_usd >= 0 else "\u274c"
         msg = (
             f"{emoji} [LEAD-LAG ARB] Cierre ({mode})\n"
             f"Par: {trade.pair}\n"

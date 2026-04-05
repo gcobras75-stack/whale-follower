@@ -102,6 +102,7 @@ class ArbEngine:
         asyncio.create_task(self._triangular.startup_check(), name="cross_arb_startup")
         await asyncio.gather(
             self._funding.run(),
+            self._lead_lag.run(),
             self._bitso.run(),
             self._periodic_summary(),
         )

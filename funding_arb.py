@@ -22,13 +22,21 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import base64
+import hashlib
+import hmac
+
 import aiohttp
 from loguru import logger
+
+import config
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _MIN_FUNDING_PCT    = 0.03    # % minimo para abrir arb (cubre fees ~0.02%)
 _POSITION_SIZE_USD  = 500.0   # tamano de cada pata en USD (papel)
 _FUNDING_INTERVAL   = 8 * 3600  # cada 8 horas
+_MIN_CAPITAL_USD    = 300.0   # capital minimo para operar en real
+_REAL_SIZE_PCT      = 0.15    # 15% del capital real por pata
 _BYBIT_FUNDING_URL  = (
     "https://api.bybit.com/v5/market/funding/history"
     "?category=linear&symbol=BTCUSDT&limit=1"
@@ -74,18 +82,107 @@ class FundingArbEngine:
         self._last_rate:   float = 0.0
         self._last_update: float = 0.0
         self._next_settlement: float = 0.0
+        self._real_capital_usd: float = 0.0
+        self._paper_mode: bool = True
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[funding_arb] Iniciado en modo {} | min_funding={}%", mode, _MIN_FUNDING_PCT)
+        logger.info("[funding_arb] Iniciado modo {} | min_funding={}% min_capital=${:.0f}",
+                    mode, _MIN_FUNDING_PCT, _MIN_CAPITAL_USD)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Tarea de fondo: monitorea funding cada 5 minutos."""
+        """Tarea de fondo: monitorea funding cada 5 minutos y capital cada hora."""
+        await self._check_capital()
+        _cap_counter = 0
         while True:
             await self._check_funding()
             await self._settle_payments()
             await asyncio.sleep(300)   # revisar cada 5 min
+            _cap_counter += 1
+            if _cap_counter >= 12:     # cada 12 ciclos = 1 hora
+                await self._check_capital()
+                _cap_counter = 0
+
+    async def _check_capital(self) -> None:
+        if not self._production:
+            self._paper_mode = True
+            self._real_capital_usd = config.PAPER_CAPITAL
+            logger.info("[funding_arb] Capital=${:.0f} < ${:.0f} \u2192 papel (PRODUCTION=false)",
+                        config.PAPER_CAPITAL, _MIN_CAPITAL_USD)
+            return
+        try:
+            total = await self._fetch_real_capital()
+            self._real_capital_usd = total
+            if total < _MIN_CAPITAL_USD:
+                self._paper_mode = True
+                logger.warning("[funding_arb] Capital=${:.2f} < ${:.0f} \u2192 papel \U0001f512",
+                               total, _MIN_CAPITAL_USD)
+            else:
+                prev = self._paper_mode
+                self._paper_mode = False
+                size = total * _REAL_SIZE_PCT
+                logger.info("[funding_arb] Capital=${:.2f} >= ${:.0f} \u2192 REAL activado \u2705 tama\u00f1o=${:.2f}",
+                            total, _MIN_CAPITAL_USD, size)
+                if prev:
+                    asyncio.create_task(self._alert_capital_activated(total))
+        except Exception as exc:
+            logger.warning("[funding_arb] _check_capital error: {} \u2014 mantener papel", exc)
+
+    async def _fetch_real_capital(self) -> float:
+        b = await self._fetch_bybit_balance()
+        o = await self._fetch_okx_balance()
+        return b + o
+
+    async def _fetch_bybit_balance(self) -> float:
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        try:
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = hmac.new(config.BYBIT_API_SECRET.encode(), msg.encode(),
+                           hashlib.sha256).hexdigest()
+            headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
+                       "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
+                       "X-BAPI-RECV-WINDOW": "5000"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    headers=headers, timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        for c in data["result"]["list"][0].get("coin", []):
+                            if c.get("coin") == "USDT":
+                                return float(c.get("walletBalance", 0))
+        except Exception as exc:
+            logger.warning("[funding_arb] Bybit balance error: {}", exc)
+        return 0.0
+
+    async def _fetch_okx_balance(self) -> float:
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            return 0.0
+        try:
+            from datetime import datetime, timezone as _tz
+            ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path = "/api/v5/asset/balances?ccy=USDT"
+            sig  = base64.b64encode(
+                hmac.new(config.OKX_SECRET.encode(),
+                         (ts + "GET" + path).encode(), hashlib.sha256).digest()
+            ).decode()
+            headers = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+                       "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://www.okx.com{path}", headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                return float(item.get("availBal", 0))
+        except Exception as exc:
+            logger.warning("[funding_arb] OKX balance error: {}", exc)
+        return 0.0
 
     def snapshot(self) -> FundingArbSnapshot:
         open_trades = [t for t in self._trades if t.status == "open"]
@@ -161,23 +258,27 @@ class FundingArbEngine:
             return
 
         direction = "long_perp" if signal == "long_arb" else "short_perp"
+        is_real   = self._production and not self._paper_mode
+        size      = (self._real_capital_usd * _REAL_SIZE_PCT if is_real
+                     else _POSITION_SIZE_USD)
 
         trade = FundingArbTrade(
             trade_id     = str(uuid.uuid4()),
             symbol       = symbol,
             direction    = direction,
             funding_rate = rate_pct,
-            size_usd     = _POSITION_SIZE_USD,
-            production   = self._production,
+            size_usd     = size,
+            production   = is_real,
         )
 
-        if self._production:
+        if is_real:
             success = await self._execute_real(trade)
             if not success:
                 return
         else:
-            logger.info("[funding_arb] PAPEL: abriendo {} {} ${:.0f} funding={:.4f}%",
-                        direction, symbol, _POSITION_SIZE_USD, rate_pct)
+            label = "PAPEL" if not self._production else f"PAPEL (capital ${self._real_capital_usd:.0f} < ${_MIN_CAPITAL_USD:.0f})"
+            logger.info("[funding_arb] {}: abriendo {} {} ${:.0f} funding={:.4f}%",
+                        label, direction, symbol, size, rate_pct)
 
         self._trades.append(trade)
         await self._alert_opened(trade)
@@ -225,18 +326,38 @@ class FundingArbEngine:
 
     # ── Telegram alerts ───────────────────────────────────────────────────────
 
+    async def _alert_capital_activated(self, capital: float) -> None:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        size = capital * _REAL_SIZE_PCT
+        msg = (
+            f"\u2705 [FUNDING ARB] activada en REAL\n"
+            f"Capital: ${capital:.2f} >= ${_MIN_CAPITAL_USD:.0f} m\u00ednimo\n"
+            f"Tama\u00f1o por pata: ${size:.2f}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": msg},
+                             timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
+
     async def _alert_opened(self, trade: FundingArbTrade) -> None:
         token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        mode = "REAL" if trade.production else "PAPEL"
+        icon = "\u2705" if trade.production else "\U0001f4ca"
+        mode = "REAL EJECUTADO" if trade.production else "Simulado"
         msg = (
-            f"[FUNDING ARB] Nueva posicion ({mode})\n"
+            f"{icon} [FUNDING ARB] {mode}\n"
             f"Par: {trade.symbol}\n"
             f"Tipo: {trade.direction}\n"
             f"Funding: {trade.funding_rate:+.4f}% cada 8h\n"
-            f"Tamano: ${trade.size_usd:,.0f}\n"
+            f"Tama\u00f1o: ${trade.size_usd:,.0f}\n"
             f"Ganancia esperada: ${trade.size_usd * abs(trade.funding_rate) / 100:.4f} / 8h\n"
             f"Ganancia mensual est.: ${trade.size_usd * abs(trade.funding_rate) / 100 * 90:.2f}"
         )

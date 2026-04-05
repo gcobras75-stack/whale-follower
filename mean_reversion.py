@@ -31,9 +31,14 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+import base64
+import hashlib
+import hmac
+
 import aiohttp
 from loguru import logger
 
+import config
 import db_writer
 
 # ── Configuracion ─────────────────────────────────────────────────────────────
@@ -54,7 +59,10 @@ _TP_TABLE = [                    # (intensidad_min, tp_pct)
 ]
 
 _TRAMO_SIZES = [0.40, 0.35, 0.25]   # fraccion del size_usd por tramo
-_BASE_SIZE_USD = 400.0               # USD total por operacion completa
+_BASE_SIZE_USD = 400.0               # USD total por operacion completa (papel)
+_MIN_ENTRY_DEV_PCT = 0.004           # desviacion minima 0.4% para cubrir fees
+_MIN_CAPITAL_USD   = 300.0           # capital minimo para operar en real
+_REAL_SIZE_PCT     = 0.15            # 15% del capital real por operacion
 
 
 @dataclass
@@ -106,14 +114,107 @@ class MeanReversionEngine:
         self._trades: List[MRTrade] = []
         self._last_open: float = 0.0
         self._current_prices: Dict[str, float] = {}
+        self._real_capital_usd: float = 0.0
+        self._paper_mode: bool = True
+        self._capital_ts: float = 0.0
 
         # Rastreo de velocidad de cascade para detectar exhaustion
         self._peak_cascade_velocity: Dict[str, float] = {}
         self._cascade_active_since: Dict[str, float]  = {}
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[mean_rev] Iniciado en modo {} | SL={:.2f}% base_size=${:.0f}",
-                    mode, _STOP_LOSS_PCT * 100, _BASE_SIZE_USD)
+        logger.info(
+            "[mean_rev] Iniciado modo {} | SL={:.2f}% umbral={:.1f}% min_capital=${:.0f}",
+            mode, _STOP_LOSS_PCT * 100, _MIN_ENTRY_DEV_PCT * 100, _MIN_CAPITAL_USD,
+        )
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Tarea de fondo: verificar capital real cada hora."""
+        await self._check_capital()
+        while True:
+            await asyncio.sleep(3600)
+            await self._check_capital()
+
+    async def _check_capital(self) -> None:
+        if not self._production:
+            self._paper_mode = True
+            self._real_capital_usd = config.PAPER_CAPITAL
+            logger.info("[mean_rev] Capital=${:.0f} < ${:.0f} \u2192 papel (PRODUCTION=false)",
+                        config.PAPER_CAPITAL, _MIN_CAPITAL_USD)
+            return
+        try:
+            total = await self._fetch_real_capital()
+            self._real_capital_usd = total
+            if total < _MIN_CAPITAL_USD:
+                self._paper_mode = True
+                logger.warning("[mean_rev] Capital ${:.2f} < ${:.0f} \u2192 papel \U0001f512",
+                               total, _MIN_CAPITAL_USD)
+            else:
+                prev = self._paper_mode
+                self._paper_mode = False
+                logger.info("[mean_rev] Capital ${:.2f} >= ${:.0f} \u2192 REAL activado \u2705",
+                            total, _MIN_CAPITAL_USD)
+                if prev:
+                    asyncio.create_task(self._alert_capital_activated(total))
+        except Exception as exc:
+            logger.warning("[mean_rev] _check_capital error: {} \u2014 mantener papel", exc)
+
+    async def _fetch_real_capital(self) -> float:
+        b = await self._fetch_bybit_balance()
+        o = await self._fetch_okx_balance()
+        return b + o
+
+    async def _fetch_bybit_balance(self) -> float:
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        try:
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = hmac.new(config.BYBIT_API_SECRET.encode(), msg.encode(),
+                           hashlib.sha256).hexdigest()
+            headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
+                       "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
+                       "X-BAPI-RECV-WINDOW": "5000"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    headers=headers, timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        for c in data["result"]["list"][0].get("coin", []):
+                            if c.get("coin") == "USDT":
+                                return float(c.get("walletBalance", 0))
+        except Exception as exc:
+            logger.warning("[mean_rev] Bybit balance error: {}", exc)
+        return 0.0
+
+    async def _fetch_okx_balance(self) -> float:
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            return 0.0
+        try:
+            from datetime import datetime, timezone as _tz
+            ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path = "/api/v5/asset/balances?ccy=USDT"
+            sig  = base64.b64encode(
+                hmac.new(config.OKX_SECRET.encode(),
+                         (ts + "GET" + path).encode(), hashlib.sha256).digest()
+            ).decode()
+            headers = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+                       "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://www.okx.com{path}", headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                return float(item.get("availBal", 0))
+        except Exception as exc:
+            logger.warning("[mean_rev] OKX balance error: {}", exc)
+        return 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -237,7 +338,6 @@ class MeanReversionEngine:
             return
 
         self._last_open = now
-        # Reset tracking para este par
         self._peak_cascade_velocity.pop(pair, None)
         self._cascade_active_since.pop(pair, None)
 
@@ -248,9 +348,19 @@ class MeanReversionEngine:
                 tp_pct = pct
                 break
 
-        sl  = price * (1 - _STOP_LOSS_PCT)
-        tp  = price * (1 + tp_pct)
-        size_tramo1 = _BASE_SIZE_USD * _TRAMO_SIZES[0]
+        # Verificar umbral minimo 0.4%
+        if tp_pct < _MIN_ENTRY_DEV_PCT:
+            logger.debug("[mean_rev] {} tp={:.3f}% < {:.3f}% minimo — skip",
+                         pair, tp_pct * 100, _MIN_ENTRY_DEV_PCT * 100)
+            return
+
+        is_real = self._production and not self._paper_mode
+        base    = (self._real_capital_usd * _REAL_SIZE_PCT
+                   if is_real else _BASE_SIZE_USD)
+        size_tramo1 = base * _TRAMO_SIZES[0]
+
+        sl = price * (1 - _STOP_LOSS_PCT)
+        tp = price * (1 + tp_pct)
 
         trade = MRTrade(
             trade_id          = str(uuid.uuid4()),
@@ -263,15 +373,16 @@ class MeanReversionEngine:
             avg_entry         = price,
             total_size        = size_tramo1,
             peak_price        = price,
-            production        = self._production,
+            production        = is_real,
         )
         self._trades.append(trade)
 
+        label = "\u2705 REAL" if is_real else "PAPEL"
         logger.info(
-            "[mean_rev] ENTRADA {} tramo1 ${:.0f} @ {:.4f} | intensity={} "
-            "tp={:.3f}% sl={:.3f}% ob={:.2f}",
-            pair, size_tramo1, price, intensity,
-            tp_pct * 100, _STOP_LOSS_PCT * 100, ob_ratio,
+            "[mean_rev] {} {} se\u00f1al desviacion={:.3f}% > {:.3f}% | "
+            "size=${:.0f} @ {:.4f} intensity={} ob={:.2f}",
+            label, pair, tp_pct * 100, _MIN_ENTRY_DEV_PCT * 100,
+            size_tramo1, price, intensity, ob_ratio,
         )
         asyncio.create_task(self._alert_open(trade))
         asyncio.create_task(db_writer.save_mr_open(trade))
@@ -342,14 +453,17 @@ class MeanReversionEngine:
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        mode = "REAL" if trade.production else "PAPEL"
+        if trade.production:
+            icon, mode = "\u2705", "REAL EJECUTADO"
+        else:
+            icon, mode = "\U0001f4ca", "Simulado"
         msg = (
-            f"🔄 [MEAN REV] Entrada ({mode})\n"
+            f"{icon} [MEAN REV] {mode}\n"
             f"Par: {trade.pair} | Intensidad cascada: {trade.cascade_intensity}/100\n"
             f"Entrada: ${trade.entry_price:,.4f}\n"
             f"SL: ${trade.stop_loss:,.4f} (-{_STOP_LOSS_PCT*100:.2f}%)\n"
             f"TP: ${trade.take_profit:,.4f} (+{(trade.take_profit/trade.entry_price-1)*100:.2f}%)\n"
-            f"Tamaño tramo 1: ${trade.size_usd:.0f}"
+            f"Tama\u00f1o tramo 1: ${trade.size_usd:.0f} | Umbral: {_MIN_ENTRY_DEV_PCT*100:.1f}% | fees: 0.06%"
         )
         try:
             async with aiohttp.ClientSession() as s:
@@ -358,6 +472,24 @@ class MeanReversionEngine:
                     json={"chat_id": chat_id, "text": msg},
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
+        except Exception:
+            pass
+
+    async def _alert_capital_activated(self, capital: float) -> None:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        msg = (
+            f"\u2705 [MEAN REV] activada en REAL\n"
+            f"Capital: ${capital:.2f} >= ${_MIN_CAPITAL_USD:.0f} m\u00ednimo\n"
+            f"Tama\u00f1o por trade: ${capital * _REAL_SIZE_PCT:.2f}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": msg},
+                             timeout=aiohttp.ClientTimeout(total=10))
         except Exception:
             pass
 
