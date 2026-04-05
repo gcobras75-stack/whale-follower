@@ -20,7 +20,7 @@ from loguru import logger
 import config
 
 _BYBIT_BASE   = "https://api.bytick.com"
-_RECV_WINDOW  = "5000"
+_RECV_WINDOW  = "20000"
 _BYBIT_HEADERS_EXTRA = {
     "User-Agent": "Mozilla/5.0",
     "Referer":    "https://www.bybit.com",
@@ -240,6 +240,10 @@ async def _place_order_via_ws(
 
                     # 2. Probar 3 formatos de orden (IOC→GTC→sin-tif)
                     for fmt_idx, omsg in enumerate(_order_formats()):
+                        # Refrescar timestamp justo antes de enviar (evita 10002)
+                        omsg_ts = str(int(time.time() * 1000))
+                        if "header" in omsg:
+                            omsg["header"]["X-BAPI-TIMESTAMP"] = omsg_ts
                         active_req = omsg["reqId"]
                         await ws.send_str(json.dumps(omsg))
                         logger.info("[{}] WS fmt{} reqId={}", caller, fmt_idx + 1, active_req)

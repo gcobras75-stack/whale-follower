@@ -46,6 +46,7 @@ _INVENTORY_CHECK_SECS = 300  # verificar inventario cada 5 min
 _CB_MAX_ERRORS    = 3    # errores seguidos antes de circuit breaker
 _CB_PAUSE_SECS    = 300  # 5 min de pausa al activar CB
 MIN_ORDER_USD     = 10   # valor mínimo de orden en USD
+FORCE_OKX_ONLY    = True # True = usar solo OKX cuando Bybit sin saldo
 
 
 @dataclass
@@ -416,21 +417,37 @@ class CrossExchangeArb:
         buy_result  = None
         sell_result = None
 
-        try:
-            if trade.buy_exchange == "bybit":
-                buy_result, sell_result = await asyncio.gather(
-                    self._bybit_market_order(pair, "Buy", size_usd, buy_price),
-                    self._okx_market_order(pair, "sell", size_usd, sell_price),
-                    return_exceptions=True,
-                )
-            else:
-                buy_result, sell_result = await asyncio.gather(
-                    self._okx_market_order(pair, "buy", size_usd, buy_price),
-                    self._bybit_market_order(pair, "Sell", size_usd, sell_price),
-                    return_exceptions=True,
-                )
-        except Exception as exc:
-            logger.error("[cross_arb] REAL execution error: {}", exc)
+        # FORCE_OKX_ONLY: ejecutar solo la pata OKX cuando Bybit sin saldo
+        if FORCE_OKX_ONLY and self._okx_exec:
+            logger.info(
+                "[cross_arb] FORCE_OKX_ONLY=True — ejecutando solo pata OKX ({}) {}",
+                "buy" if trade.buy_exchange == "okx" else "sell", pair,
+            )
+            try:
+                if trade.buy_exchange == "okx":
+                    buy_result = await self._okx_market_order(pair, "buy", size_usd, buy_price)
+                    sell_result = buy_result  # una pata OKX, registrar como completo
+                else:
+                    sell_result = await self._okx_market_order(pair, "sell", size_usd, sell_price)
+                    buy_result = sell_result
+            except Exception as exc:
+                logger.error("[cross_arb] FORCE_OKX_ONLY execution error: {}", exc)
+        else:
+            try:
+                if trade.buy_exchange == "bybit":
+                    buy_result, sell_result = await asyncio.gather(
+                        self._bybit_market_order(pair, "Buy", size_usd, buy_price),
+                        self._okx_market_order(pair, "sell", size_usd, sell_price),
+                        return_exceptions=True,
+                    )
+                else:
+                    buy_result, sell_result = await asyncio.gather(
+                        self._okx_market_order(pair, "buy", size_usd, buy_price),
+                        self._bybit_market_order(pair, "Sell", size_usd, sell_price),
+                        return_exceptions=True,
+                    )
+            except Exception as exc:
+                logger.error("[cross_arb] REAL execution error: {}", exc)
 
         # Check results
         buy_ok  = isinstance(buy_result, dict) and buy_result is not None
@@ -575,6 +592,20 @@ class CrossExchangeArb:
         """Compra ETH en el exchange indicado usando USDT para reponer inventario."""
         if exchange in self._replenishing:
             return
+
+        # Redirigir a OKX si Bybit no tiene saldo suficiente
+        if exchange == "bybit" and self._okx_exec:
+            try:
+                bybit_usdt = await self._bybit_coin_balance("USDT")
+                if bybit_usdt < 10.0:
+                    logger.warning(
+                        "[cross_arb] _replenish_eth: Bybit USDT=${:.2f} < $10 — redirigiendo compra a OKX",
+                        bybit_usdt,
+                    )
+                    exchange = "okx"
+            except Exception:
+                exchange = "okx"
+
         self._replenishing.add(exchange)
         try:
             pair  = f"{coin}USDT"
