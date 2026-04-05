@@ -703,8 +703,28 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+async def _log_server_ip() -> None:
+    """Log IP pública al arranque para confirmar región del servidor Railway."""
+    import aiohttp as _aiohttp
+    for url in ("https://api.ipify.org?format=json", "https://ifconfig.me/ip"):
+        try:
+            async with _aiohttp.ClientSession() as s:
+                async with s.get(url, timeout=_aiohttp.ClientTimeout(total=6)) as r:
+                    text = await r.text()
+                    ip   = text.strip().strip('"').replace('{"ip":"', '').replace('"}', '')
+                    logger.info(
+                        "[startup] 🌍 IP pública del servidor: {} | RAILWAY_REGION={}",
+                        ip, os.getenv("RAILWAY_REGION", "no-env"),
+                    )
+                    return
+        except Exception:
+            continue
+    logger.warning("[startup] No se pudo obtener IP pública del servidor")
+
+
 async def main() -> None:
     runner = await start_healthcheck()
+    asyncio.create_task(_log_server_ip())
     _restart_delay = 30
     while True:
         trading_task = asyncio.create_task(trading_loop())
