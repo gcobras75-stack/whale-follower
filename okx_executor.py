@@ -137,15 +137,17 @@ class OKXExecutor:
 
     async def get_coin_balance(self, coin: str) -> float:
         """
-        Get available balance of a specific coin (ETH, BTC, SOL).
-        Intenta /api/v5/account/balance (trading) primero;
-        si retorna 0 → intenta /api/v5/asset/balances (funding).
+        Búsqueda exhaustiva del balance de un coin en OKX.
+        Orden de intentos:
+          1. /api/v5/account/balance?ccy=ETH  (trading, filtrado)
+          2. /api/v5/asset/balances?ccy=ETH   (funding account)
+          3. /api/v5/account/balance           (trading completo, sin filtro → buscar ETH en todos los details)
         Sin caché — siempre consulta la API en tiempo real.
         """
         if not self._enabled:
             return 0.0
 
-        async def _try_endpoint(path: str) -> float:
+        async def _get_raw(path: str) -> dict:
             async with aiohttp.ClientSession() as session:
                 resp = await session.get(
                     _BASE_URL + path,
@@ -154,49 +156,65 @@ class OKXExecutor:
                 )
                 http_status = resp.status
                 data = await resp.json()
-
             logger.info(
-                "[okx] get_coin_balance({}) endpoint={} http={} respuesta={}",
-                coin, path, http_status, data,
+                "[okx] GET {} http={} → {}",
+                path, http_status, data,
             )
+            return data
 
-            code = data.get("code", "-1")
-            if code != "0":
-                logger.warning(
-                    "[okx] get_coin_balance({}) code={} msg='{}'",
-                    coin, code, data.get("msg", ""),
-                )
-                return 0.0
+        def _find_in_details(data: dict) -> float:
+            """Busca coin en data[0].details[] — estructura de /account/balance."""
+            for detail in data.get("data", [{}])[0].get("details", []):
+                if detail.get("ccy") == coin:
+                    bal = float(detail.get("availBal", 0) or 0)
+                    logger.info("[okx] {} encontrado en details availBal={:.6f}", coin, bal)
+                    return bal
+            return 0.0
 
-            # /api/v5/account/balance → data[0].details[].availBal
-            items = data.get("data", [])
-            if items:
-                for detail in items[0].get("details", []):
-                    if detail.get("ccy") == coin:
-                        bal = float(detail.get("availBal", 0) or 0)
-                        logger.info("[okx] {} balance (trading) = {:.6f}", coin, bal)
-                        return bal
-                # /api/v5/asset/balances → data[].availBal directamente
-                for item in items:
-                    if item.get("ccy") == coin:
-                        bal = float(item.get("availBal", 0) or 0)
-                        logger.info("[okx] {} balance (funding) = {:.6f}", coin, bal)
-                        return bal
-
-            logger.info("[okx] {} no encontrado en respuesta de {}", coin, path)
+        def _find_in_list(data: dict) -> float:
+            """Busca coin en data[] directamente — estructura de /asset/balances."""
+            for item in data.get("data", []):
+                if item.get("ccy") == coin:
+                    bal = float(item.get("availBal", 0) or 0)
+                    logger.info("[okx] {} encontrado en asset list availBal={:.6f}", coin, bal)
+                    return bal
             return 0.0
 
         try:
-            # 1. Trading account
-            trading_path = f"/api/v5/account/balance?ccy={coin}"
-            bal = await _try_endpoint(trading_path)
-            if bal > 0:
-                return bal
+            # 1. Trading account filtrado por coin
+            path1 = f"/api/v5/account/balance?ccy={coin}"
+            data1 = await _get_raw(path1)
+            if data1.get("code") == "0":
+                bal = _find_in_details(data1)
+                if bal > 0:
+                    return bal
+                logger.info("[okx] details[] vacío para {} en {} → probando funding", coin, path1)
+            else:
+                logger.warning("[okx] {} code={} msg='{}'", path1, data1.get("code"), data1.get("msg", ""))
 
-            # 2. Funding/asset account como fallback
-            logger.info("[okx] {} balance=0 en trading → probando funding account", coin)
-            funding_path = f"/api/v5/asset/balances?ccy={coin}"
-            return await _try_endpoint(funding_path)
+            # 2. Funding account
+            path2 = f"/api/v5/asset/balances?ccy={coin}"
+            data2 = await _get_raw(path2)
+            if data2.get("code") == "0":
+                bal = _find_in_list(data2)
+                if bal > 0:
+                    return bal
+                logger.info("[okx] {} no encontrado en funding → probando trading completo", coin)
+            else:
+                logger.warning("[okx] {} code={} msg='{}'", path2, data2.get("code"), data2.get("msg", ""))
+
+            # 3. Trading completo sin filtro ccy — buscar ETH entre todos los coins
+            path3 = "/api/v5/account/balance"
+            data3 = await _get_raw(path3)
+            if data3.get("code") == "0":
+                bal = _find_in_details(data3)
+                if bal > 0:
+                    return bal
+                logger.warning("[okx] {} no encontrado en ningún endpoint de OKX", coin)
+            else:
+                logger.warning("[okx] {} code={} msg='{}'", path3, data3.get("code"), data3.get("msg", ""))
+
+            return 0.0
 
         except Exception as exc:
             logger.warning("[okx_exec] get_coin_balance({}) excepción: {}", coin, exc)
