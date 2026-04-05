@@ -32,6 +32,7 @@ from funding_arb       import FundingArbEngine
 from cross_exchange_arb import CrossExchangeArb
 from lead_lag_arb      import LeadLagArb
 from triangular_arb    import TriangularArb
+from bitso_arb         import BitsoArb
 
 
 @dataclass
@@ -53,6 +54,11 @@ class ArbSummary:
     tri_spread_pct:       float = 0.0
     tri_opps_1h:          int   = 0
     tri_pnl_usd:          float = 0.0
+
+    bitso_btc_usd:        float = 0.0
+    bitso_usd_mxn:        float = 0.0
+    bitso_opps:           int   = 0
+    bitso_avg_spread:     float = 0.0
 
     total_pnl_usd:        float = 0.0
 
@@ -83,10 +89,11 @@ class ArbEngine:
         self._cross        = CrossExchangeArb(production=cross_prod)
         self._lead_lag     = LeadLagArb(production=production)
         self._triangular   = TriangularArb(production=production)
+        self._bitso        = BitsoArb()
 
         mode = "REAL" if production else "PAPEL"
         cross_mode = "REAL" if cross_prod else "PAPEL"
-        logger.info("[arb_engine] Iniciado en modo {} con 4 estrategias (cross_arb={})", mode, cross_mode)
+        logger.info("[arb_engine] Iniciado en modo {} con 5 estrategias (cross_arb={}, bitso=monitor)", mode, cross_mode)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -94,6 +101,7 @@ class ArbEngine:
         """Tarea de fondo: arranca todas las subtareas de arbitraje."""
         await asyncio.gather(
             self._funding.run(),
+            self._bitso.run(),
             self._periodic_summary(),
         )
 
@@ -115,10 +123,13 @@ class ArbEngine:
         if pair == "BTCUSDT":
             if exchange in ("bybit", "bybit_spot", ""):
                 self._triangular.update_btc_usdt(price)
+                self._bitso.update_bybit(price)
             elif exchange in ("okx", "okx_spot"):
                 self._triangular.update_btc_usdt_okx(price)
+                self._bitso.update_okx(price)
             else:
                 self._triangular.update_btc_usdt(price)
+                self._bitso.update_bybit(price)
         elif pair == "ETHUSDT":
             self._triangular.update_eth_usdt(price)
 
@@ -145,6 +156,7 @@ class ArbEngine:
         c  = self._cross.snapshot()
         ll = self._lead_lag.snapshot()
         t  = self._triangular.snapshot()
+        b  = self._bitso.snapshot()
 
         total_pnl = f.total_pnl_usd + c.pnl_total_usd + ll.pnl_total_usd + t.pnl_total_usd
 
@@ -166,6 +178,11 @@ class ArbEngine:
             tri_spread_pct      = t.spread_pct,
             tri_opps_1h         = t.opportunities_1h,
             tri_pnl_usd         = t.pnl_total_usd,
+
+            bitso_btc_usd       = b.btc_usd,
+            bitso_usd_mxn       = b.usd_mxn,
+            bitso_opps          = b.opportunities,
+            bitso_avg_spread    = b.avg_spread_pct,
 
             total_pnl_usd       = round(total_pnl, 4),
         )
@@ -200,6 +217,13 @@ class ArbEngine:
                 "pnl_usd":      s.tri_pnl_usd,
                 "recent":       self._triangular.active_summary(),
             },
+            "bitso": {
+                "btc_usd":      s.bitso_btc_usd,
+                "usd_mxn":      s.bitso_usd_mxn,
+                "opportunities": s.bitso_opps,
+                "avg_spread":   s.bitso_avg_spread,
+                "snapshot":     self._bitso.snapshot().__dict__,
+            },
             "total_pnl_usd": s.total_pnl_usd,
         }
 
@@ -231,6 +255,8 @@ class ArbEngine:
             f"P&L: ${s.lead_pnl_usd:.4f}\n"
             f"🔺 Triangular:  Spread: {s.tri_spread_pct:.4f}% | "
             f"P&L: ${s.tri_pnl_usd:.4f}\n"
+            f"🇲🇽 Bitso:       BTC=${s.bitso_btc_usd:,.0f} | "
+            f"Opps: {s.bitso_opps} | Spread prom: {s.bitso_avg_spread:.2f}%\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💵 Total P&L: ${s.total_pnl_usd:.4f}"
         )

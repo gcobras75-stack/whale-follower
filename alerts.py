@@ -32,6 +32,10 @@ _stats: Dict[str, Any] = {
     # Capital (se actualiza por llamada externa)
     "capital_bybit":   0.0,
     "capital_okx":     0.0,
+    # Bitso monitor
+    "bitso_opportunities": 0,
+    "bitso_spread_sum":    0.0,
+    "bitso_spread_count":  0,
 }
 
 # ── Stats public API ──────────────────────────────────────────────────
@@ -49,6 +53,12 @@ def record_arb_executed(pnl: float = 0.0) -> None:
     """Llamar desde triangular_arb._execute_real() cuando ejecuta en real."""
     _stats["arb_executed"] += 1
     _stats["arb_pnl"]      += pnl
+
+def record_bitso_opportunity(spread_pct: float = 0.0) -> None:
+    """Llamar desde bitso_arb._check_vs() cuando detecta spread >= umbral."""
+    _stats["bitso_opportunities"]  += 1
+    _stats["bitso_spread_sum"]     += spread_pct
+    _stats["bitso_spread_count"]   += 1
 
 def set_capital(bybit: float = 0.0, okx: float = 0.0) -> None:
     """Actualizar capital conocido (llamar desde healthcheck o executor)."""
@@ -415,7 +425,12 @@ async def _cmd_stats() -> None:
 
     # Capital: usar valor guardado o fallback a config
     cap_bybit = _stats["capital_bybit"] or config.REAL_CAPITAL
-    cap_okx   = _stats["capital_okx"]   or 51.0    # ultimo valor verificado
+    cap_okx   = _stats["capital_okx"]   or 51.0
+
+    # Bitso stats
+    b_opps  = _stats["bitso_opportunities"]
+    b_count = _stats["bitso_spread_count"]
+    b_avg   = (_stats["bitso_spread_sum"] / b_count) if b_count > 0 else 0.0
 
     await _reply(
         f"Estadisticas\n"
@@ -424,6 +439,8 @@ async def _cmd_stats() -> None:
         f"Señales Grid:         {_stats['grid_cycles']} ciclos\n"
         f"Oportunidades Arb:    {_stats['arb_opportunities']}\n"
         f"Arb ejecutados:       {_stats['arb_executed']}\n"
+        f"Oportunidades Bitso:  {b_opps}\n"
+        f"Spread prom Bitso:    {b_avg:.2f}%\n"
         f"PnL Grid:             ${_stats['grid_pnl']:+.4f}\n"
         f"PnL Arb real:         ${_stats['arb_pnl']:+.4f}\n"
         f"PnL Total sesion:     ${total_pnl:+.4f}\n"

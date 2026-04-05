@@ -85,6 +85,10 @@ CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    
 CROSS_ARB_MIN_SPREAD_PCT:  float = float(os.getenv("CROSS_ARB_MIN_SPREAD_PCT",  "0.08"))
 CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", "10"))
 
+# ── Bitso (BTC/MXN monitoring) ───────────────────────────────────────────────
+BITSO_API_KEY: str = os.getenv("BITSO_API_KEY", "")   # vacio = solo lectura
+BITSO_SECRET:  str = os.getenv("BITSO_SECRET",  "")   # vacio = solo lectura
+
 # ── Sprint 4 — Extended layers ────────────────────────────────────────────────
 NEWS_API_KEY:       str   = os.getenv("NEWS_API_KEY",        "")
 WHALE_ALERT_KEY:    str   = os.getenv("WHALE_ALERT_KEY",     "")
