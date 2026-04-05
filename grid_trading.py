@@ -84,7 +84,14 @@ _MIN_BALANCE: Dict[str, float] = {
 _MIN_QTY: Dict[str, float] = {
     "BTCUSDT": 0.000048,
     "ETHUSDT": 0.005,
-    "SOLUSDT": 0.1,
+    "SOLUSDT": 0.5,    # Bybit spot SOLUSDT minimo real = 0.5 SOL ~ $67
+}
+
+# Minimo en USD por orden (derivado de _MIN_QTY * precio referencia)
+_MIN_ORDER_USD: Dict[str, float] = {
+    "BTCUSDT": 5.0,    # 0.000048 BTC * $84k ~ $4  → redondeamos a $5
+    "ETHUSDT": 5.0,    # 0.005 ETH    * $1k  ~ $5
+    "SOLUSDT": 67.0,   # 0.5 SOL      * $134 ~ $67
 }
 
 _FEES_PCT             = 0.0002    # 0.02% por lado (maker/taker Bybit)
@@ -119,6 +126,7 @@ class GridState:
     cycles_done:    int   = 0
     paused:         bool  = False
     pause_reason:   str   = ""
+    paper_mode:     bool  = False   # True si nivel < minimo Bybit spot
     created_at:     float = field(default_factory=time.time)
     last_rebalance: float = field(default_factory=time.time)
 
@@ -267,17 +275,37 @@ class GridTradingEngine:
             lvl_price = center * (1 + spacing * i)
             levels.append(GridLevel(price=lvl_price, side="sell", size_usd=cap_per_level))
 
+        # Verificar si el nivel supera el minimo de Bybit spot
+        min_usd   = _MIN_ORDER_USD.get(pair, 5.0)
+        meets_min = cap_per_level >= min_usd
+        paper     = (not self._production) or (not meets_min)
+
+        if self._production:
+            if meets_min:
+                logger.info(
+                    "[grid] {} minimo=${:.0f} nivel=${:.2f} \u2705 real",
+                    pair, min_usd, cap_per_level,
+                )
+            else:
+                logger.warning(
+                    "[grid] {} minimo=${:.0f} nivel=${:.2f} \u274c papel "
+                    "(nivel < minimo Bybit spot)",
+                    pair, min_usd, cap_per_level,
+                )
+
         self._grids[pair] = GridState(
             pair         = pair,
             center_price = center,
             spacing_pct  = spacing,
             levels       = levels,
+            paper_mode   = paper,
         )
         logger.info(
-            "[grid] {} inicializado: centro={:.2f} spacing={:.3f}% niveles={}",
+            "[grid] {} inicializado: centro={:.2f} spacing={:.3f}% niveles={} modo={}",
             pair, center, spacing * 100, n,
+            "PAPEL" if paper else "REAL",
         )
-        asyncio.create_task(self._alert_init(pair, center, spacing, n))
+        asyncio.create_task(self._alert_init(pair, center, spacing, n, paper))
 
     def _rebalance_grid(self, grid: GridState, pair: str, price: float) -> None:
         """Recentrar el grid en el precio actual con spacing recalculado."""
@@ -551,14 +579,27 @@ class GridTradingEngine:
 
     async def _handle_buy(self, grid: GridState, level: GridLevel,
                            price: float, pair: str) -> None:
-        """Ejecuta compra real en Bybit SPOT; actualiza estado solo si OK."""
+        """Ejecuta compra en Bybit SPOT (o papel si grid.paper_mode)."""
+        if grid.paper_mode:
+            level.filled     = True
+            level.pending    = False
+            level.fill_ts    = time.time()
+            level.fill_price = price
+            sell_price = price * (1 + grid.spacing_pct)
+            grid.levels.append(GridLevel(
+                price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+            ))
+            logger.info("[grid] {} COMPRA PAPEL @ {:.4f} size=${:.2f} -> venta @ {:.4f}",
+                        pair, price, level.size_usd, sell_price)
+            return
+
         # Gate de balance
         balance = await self._fetch_bybit_balance()
         min_bal = _MIN_BALANCE.get(pair, 20.0)
         if balance < min_bal:
             logger.warning("[grid] {} PAUSADO: balance=${:.2f} < ${:.0f} minimo",
                            pair, balance, min_bal)
-            level.pending = False
+            level.pending    = False
             grid.paused      = True
             grid.pause_reason = f"balance insuficiente ${balance:.2f} < ${min_bal:.0f}"
             return
@@ -574,13 +615,17 @@ class GridTradingEngine:
             grid.levels.append(GridLevel(
                 price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
             ))
-            logger.info("[grid] \U0001f7e2 REAL COMPRA {} @ {:.4f} \u2192 venta programada @ {:.4f}",
+            logger.info("[grid] \U0001f7e2 REAL COMPRA {} @ {:.4f} -> venta programada @ {:.4f}",
                         pair, price, sell_price)
         else:
             level.pending = False   # liberar para que pueda intentarse de nuevo
 
     async def _handle_sell(self, grid: GridState, level: GridLevel, price: float) -> None:
-        """Ejecuta venta real en Bybit SPOT; registra ciclo solo si OK."""
+        """Ejecuta venta en Bybit SPOT (o papel si grid.paper_mode)."""
+        if grid.paper_mode:
+            self._record_sell(grid, level, price)
+            return
+
         order_id = await self._bybit_spot_order(grid.pair, "Sell", level.size_usd, price)
         if order_id:
             level.order_id = order_id
@@ -613,17 +658,22 @@ class GridTradingEngine:
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 
-    async def _alert_init(self, pair: str, center: float, spacing: float, levels: int) -> None:
+    async def _alert_init(self, pair: str, center: float, spacing: float,
+                           levels: int, paper: bool = True) -> None:
         token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        cfg = _GRID_CONFIG[pair]
+        cfg      = _GRID_CONFIG[pair]
+        min_usd  = _MIN_ORDER_USD.get(pair, 5.0)
+        lvl_size = cfg["capital_usd"] / levels
+        mode_icon = "\u274c papel" if paper else "\u2705 real"
         msg = (
-            f"📊 [GRID] Iniciado {pair}\n"
+            f"\U0001f4ca [GRID] Iniciado {pair}\n"
             f"Centro: ${center:,.2f}\n"
             f"Spacing: {spacing*100:.3f}% (ATR adaptativo)\n"
             f"Niveles: {levels} | Capital: ${cfg['capital_usd']:,.0f}\n"
+            f"Minimo Bybit: ${min_usd:.0f} | Nivel: ${lvl_size:.2f} {mode_icon}\n"
             f"Ganancia est./ciclo: ${cfg['capital_usd']/levels*(spacing-0.0004):.3f}"
         )
         try:
