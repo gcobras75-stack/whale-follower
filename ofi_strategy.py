@@ -217,29 +217,8 @@ class OFIEngine:
         return b + o
 
     async def _fetch_bybit_balance(self) -> float:
-        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            return 0.0
-        try:
-            ts  = str(int(time.time() * 1000))
-            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
-            sig = hmac.new(config.BYBIT_API_SECRET.encode(), msg.encode(),
-                           hashlib.sha256).hexdigest()
-            headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
-                       "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
-                       "X-BAPI-RECV-WINDOW": "5000", "User-Agent": "Mozilla/5.0", "Referer": "https://www.bybit.com"}
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
-                    headers=headers, timeout=aiohttp.ClientTimeout(total=8),
-                ) as r:
-                    data = await r.json()
-                    if data.get("retCode") == 0:
-                        for c in data["result"]["list"][0].get("coin", []):
-                            if c.get("coin") == "USDT":
-                                return float(c.get("walletBalance", 0))
-        except Exception as exc:
-            logger.warning("[ofi] Bybit balance error: {}", exc)
-        return 0.0
+        from bybit_utils import fetch_usdt_balance
+        return await fetch_usdt_balance(caller="ofi")
 
     async def _fetch_okx_balance(self) -> float:
         if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:

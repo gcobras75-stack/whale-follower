@@ -203,39 +203,9 @@ class DeltaNeutralEngine:
             )
 
     async def _fetch_bybit_balance(self) -> float:
-        """Obtiene balance USDT de Bybit Unified account."""
-        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            return 0.0
-        try:
-            import hmac as _hmac, hashlib as _hashlib
-            ts  = str(int(time.time() * 1000))
-            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
-            sig = _hmac.new(
-                config.BYBIT_API_SECRET.encode(), msg.encode(), _hashlib.sha256
-            ).hexdigest()
-            headers = {
-                "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
-                "X-BAPI-TIMESTAMP":   ts,
-                "X-BAPI-SIGN":        sig,
-                "X-BAPI-RECV-WINDOW": "5000",
-                "User-Agent":         "Mozilla/5.0",
-                "Referer":            "https://www.bybit.com",
-            }
-            url = "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT"
-            async with aiohttp.ClientSession() as s:
-                async with s.get(url, headers=headers,
-                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
-                    data = await r.json()
-                    if data.get("retCode") == 0:
-                        coins = data["result"]["list"][0].get("coin", [])
-                        for c in coins:
-                            if c.get("coin") == "USDT":
-                                bal = float(c.get("walletBalance", 0))
-                                logger.info("[delta_neutral] Bybit balance: ${:.2f}", bal)
-                                return bal
-        except Exception as exc:
-            logger.warning("[delta_neutral] Bybit balance error: {}", exc)
-        return 0.0
+        """Obtiene balance USDT de Bybit (UNIFIED→SPOT→CONTRACT fallback)."""
+        from bybit_utils import fetch_usdt_balance
+        return await fetch_usdt_balance(caller="delta_neutral")
 
     async def _fetch_okx_balance(self) -> float:
         """Obtiene balance USDT disponible de OKX funding account."""
