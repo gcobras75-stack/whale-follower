@@ -42,14 +42,15 @@ from loguru import logger
 import config
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_MIN_SPREAD_PCT    = 0.20    # > fees spot (0.10% Bybit + 0.10% OKX = 0.20%)
+_MIN_SPREAD_PCT    = 0.05    # spread minimo para detectar oportunidad (0.05%)
 _MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo
 _POSITION_SIZE_USD = 300.0   # USD por ciclo en papel
-_REAL_POSITION_USD = 30.0    # USD por ciclo en REAL
-_MIN_NET_PNL       = 0.01    # minimo P&L neto para ejecutar ($0.01)
+_REAL_POSITION_USD = 30.0    # USD por ciclo en REAL (max $30)
+_MIN_NET_PNL       = 0.01    # minimo P&L neto para EJECUTAR ($0.01)
 _TAKER_FEE_PCT     = 0.10    # fee por pata en spot (Bybit/OKX taker 0.10%)
-_COOLDOWN_SECS     = 10      # cooldown entre arbs
+_COOLDOWN_SECS     = 10      # cooldown minimo entre ejecuciones
 _PRICE_STALE_MS    = 2000    # datos stale si > 2s
+_LOG_INTERVAL_SECS = 30      # frecuencia del log periodico de spread
 
 
 @dataclass
@@ -104,9 +105,11 @@ class TriangularArb:
         self._trades: List[TriArbTrade] = []
         self._opportunities: Deque[float] = deque(maxlen=500)
         self._last_check: float = 0.0
+        self._last_log:   float = 0.0
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[tri_arb] Iniciado en modo {} | min_spread={}%", mode, _MIN_SPREAD_PCT)
+        logger.info("[cross_arb] Iniciado en modo {} | deteccion={}% | min_net=${}",
+                    mode, _MIN_SPREAD_PCT, _MIN_NET_PNL)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -169,48 +172,71 @@ class TriangularArb:
 
     def _check_arb(self) -> None:
         now = time.time()
-        if now - self._last_check < _COOLDOWN_SECS:
-            return
+        p   = self._prices
 
-        p = self._prices
-        # Necesitamos precio BTC en ambos exchanges
         if not p.btc_usdt or not p.btc_usdt_okx:
             return
 
-        # Datos stale?
         if (time.time() * 1000 - p.ts_ms) > _PRICE_STALE_MS:
             return
 
         spread = self._cross_spread(p.btc_usdt, p.btc_usdt_okx)
 
+        # ─ Log periodico de estado (cada 30s) ────────────────────────────────────
+        if now - self._last_log >= _LOG_INTERVAL_SECS:
+            self._last_log = now
+            if spread >= _MIN_SPREAD_PCT:
+                sign = "+" if p.btc_usdt_okx >= p.btc_usdt else "-"
+                logger.info(
+                    "[cross_arb] 📊 Bybit={:.2f} OKX={:.2f} spread={}{:.4f}%",
+                    p.btc_usdt, p.btc_usdt_okx, sign, spread,
+                )
+            else:
+                logger.info(
+                    "[cross_arb] ❌ spread insuficiente {:.4f}% < {}%",
+                    spread, _MIN_SPREAD_PCT,
+                )
+
+        # ─ Deteccion: spread minimo 0.05% ──────────────────────────────────
         if spread < _MIN_SPREAD_PCT or spread > _MAX_SPREAD_PCT:
+            return
+
+        # ─ Cooldown entre ejecuciones ─────────────────────────────────────
+        if now - self._last_check < _COOLDOWN_SECS:
+            return
+
+        # ─ Calcular P&L neto ────────────────────────────────────────────
+        if p.btc_usdt <= p.btc_usdt_okx:
+            route      = "A"   # Compra Bybit, Venta OKX
+            buy_price  = p.btc_usdt
+            sell_price = p.btc_usdt_okx
+        else:
+            route      = "B"   # Compra OKX, Venta Bybit
+            buy_price  = p.btc_usdt_okx
+            sell_price = p.btc_usdt
+
+        size_real  = _REAL_POSITION_USD if self._production else _POSITION_SIZE_USD
+        gross_pnl  = size_real * spread / 100
+        fees       = size_real * _TAKER_FEE_PCT / 100 * 2
+        net_pnl    = gross_pnl - fees
+
+        if net_pnl < _MIN_NET_PNL:
+            logger.debug(
+                "[cross_arb] spread={:.4f}% net=${:.4f} < ${} — no ejecutar",
+                spread, net_pnl, _MIN_NET_PNL,
+            )
             return
 
         self._last_check = now
         self._opportunities.append(now)
 
-        # Ruta A: Bybit mas barato → comprar Bybit, vender OKX
-        # Ruta B: OKX mas barato  → comprar OKX,   vender Bybit
-        if p.btc_usdt <= p.btc_usdt_okx:
-            route      = "A"
-            buy_price  = p.btc_usdt
-            sell_price = p.btc_usdt_okx
-        else:
-            route      = "B"
-            buy_price  = p.btc_usdt_okx
-            sell_price = p.btc_usdt
-
-        gross_pnl = _POSITION_SIZE_USD * spread / 100
-        fees      = _POSITION_SIZE_USD * _TAKER_FEE_PCT / 100 * 2   # 2 patas
-        net_pnl   = gross_pnl - fees
-
-        if net_pnl < _MIN_NET_PNL:
-            return
-
+        buy_ex  = "Bybit" if route == "A" else "OKX"
+        sell_ex = "OKX"   if route == "A" else "Bybit"
         logger.info(
-            "[arb] OPORTUNIDAD ruta={} bybit={:.2f} okx={:.2f} spread={:.4f}% net=+${:.4f}",
-            route, p.btc_usdt, p.btc_usdt_okx, spread, net_pnl,
+            "[cross_arb] 📊 Bybit={:.2f} OKX={:.2f} spread=+{:.4f}% → Compra {} + Venta {}",
+            p.btc_usdt, p.btc_usdt_okx, spread, buy_ex, sell_ex,
         )
+
         try:
             import alerts as _alerts
             _alerts.record_arb_opportunity()
@@ -221,11 +247,11 @@ class TriangularArb:
             trade_id      = str(uuid.uuid4()),
             route         = route,
             btc_usdt      = p.btc_usdt,
-            eth_usdt      = p.btc_usdt_okx,   # OKX price (campo reutilizado)
+            eth_usdt      = p.btc_usdt_okx,
             eth_btc_real  = buy_price,
             eth_btc_impl  = sell_price,
             spread_pct    = round(spread, 4),
-            size_usd      = _POSITION_SIZE_USD,
+            size_usd      = size_real,
             gross_pnl     = round(gross_pnl, 4),
             net_pnl       = round(net_pnl, 4),
             production    = self._production,
@@ -247,47 +273,47 @@ class TriangularArb:
           Ruta B: Buy BTC en OKX Spot  + Sell BTC en Bybit Spot
         """
         if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            logger.warning("[arb] Faltan BYBIT_API_KEY/BYBIT_API_SECRET")
+            logger.warning("[cross_arb] Faltan BYBIT_API_KEY/BYBIT_API_SECRET")
             self._trades.append(trade)
             return
         if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
-            logger.warning("[arb] Faltan credenciales OKX")
+            logger.warning("[cross_arb] Faltan credenciales OKX")
             self._trades.append(trade)
             return
 
         try:
             from pybit.unified_trading import HTTP as BybitHTTP
         except ImportError:
-            logger.error("[arb] pybit no disponible")
+            logger.error("[cross_arb] pybit no disponible")
             self._trades.append(trade)
             return
 
         size_usd  = min(trade.size_usd, _REAL_POSITION_USD)
-        btc_price = trade.eth_btc_real   # precio en exchange de compra
+        btc_price = trade.eth_btc_real
         btc_qty   = round(size_usd / btc_price, 6) if btc_price > 0 else 0
 
         if btc_qty <= 0:
-            logger.warning("[arb] btc_qty <= 0, saltando")
+            logger.warning("[cross_arb] btc_qty <= 0, saltando")
             self._trades.append(trade)
             return
 
+        buy_ex  = "Bybit" if trade.route == "A" else "OKX"
+        sell_ex = "OKX"   if trade.route == "A" else "Bybit"
         logger.info(
-            "[arb] REAL INICIO ruta={} size=${:.0f} btc_qty={} bybit={:.2f} okx={:.2f}",
-            trade.route, size_usd, btc_qty, trade.btc_usdt, trade.eth_usdt,
+            "[cross_arb] Ejecutando: Compra {} ${:.0f} @ {:.2f} + Venta {} @ {:.2f}",
+            buy_ex, size_usd, trade.eth_btc_real, sell_ex, trade.eth_btc_impl,
         )
 
-        session  = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET)
-        loop     = asyncio.get_event_loop()
-        _qty     = btc_qty
+        session = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET)
+        loop    = asyncio.get_event_loop()
+        _qty    = btc_qty
 
         if trade.route == "A":
-            # Buy Bybit, Sell OKX
-            bybit_fn  = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Buy",  orderType="Market", qty=str(_qty))
-            okx_side  = "sell"
+            bybit_fn = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Buy",  orderType="Market", qty=str(_qty))
+            okx_side = "sell"
         else:
-            # Buy OKX, Sell Bybit
-            bybit_fn  = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Sell", orderType="Market", qty=str(_qty))
-            okx_side  = "buy"
+            bybit_fn = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Sell", orderType="Market", qty=str(_qty))
+            okx_side = "buy"
 
         try:
             bybit_result, okx_result = await asyncio.gather(
@@ -297,12 +323,11 @@ class TriangularArb:
             )
 
             bybit_ok = isinstance(bybit_result, dict) and bybit_result.get("retCode") == 0
-            okx_ok   = bybit_result is not None and okx_result is True
 
             if bybit_ok and okx_result is True:
                 logger.info(
-                    "[arb] ✅ REAL EJECUTADO ruta={} net=+${:.4f} spread={:.4f}%",
-                    trade.route, trade.net_pnl, trade.spread_pct,
+                    "[cross_arb] ✅ EJECUTADO Compra {} + Venta {} net=+${:.4f} spread={:.4f}%",
+                    buy_ex, sell_ex, trade.net_pnl, trade.spread_pct,
                 )
                 trade.production = True
                 try:
@@ -312,12 +337,12 @@ class TriangularArb:
                     pass
             else:
                 if not bybit_ok:
-                    logger.error("[arb] Bybit leg fallido: {}", bybit_result)
+                    logger.error("[cross_arb] Bybit leg fallido: {}", bybit_result)
                 if okx_result is not True:
-                    logger.error("[arb] OKX leg fallido: {}", okx_result)
+                    logger.error("[cross_arb] OKX leg fallido: {}", okx_result)
 
         except Exception as exc:
-            logger.error("[arb] _execute_real exception: {}", exc)
+            logger.error("[cross_arb] _execute_real exception: {}", exc)
 
         self._trades.append(trade)
 
@@ -355,10 +380,10 @@ class TriangularArb:
                     data = await resp.json()
                     if data.get("code") == "0":
                         return True
-                    logger.error("[arb] OKX orden error: {}", data)
+                    logger.error("[cross_arb] OKX orden error: {}", data)
                     return False
         except Exception as exc:
-            logger.error("[arb] OKX request exception: {}", exc)
+            logger.error("[cross_arb] OKX request exception: {}", exc)
             return False
 
     # ── Telegram alert ────────────────────────────────────────────────────────
