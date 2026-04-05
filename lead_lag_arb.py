@@ -308,7 +308,7 @@ class LeadLagArb:
             return
 
         qty = round(trade.size_usd / price, 6)
-        min_qty = {"ETHUSDT": 0.01, "SOLUSDT": 0.1, "BNBUSDT": 0.01}.get(pair, 0.01)
+        min_qty = {"ETHUSDT": 0.005, "SOLUSDT": 0.1, "BNBUSDT": 0.01}.get(pair, 0.01)
         if qty < min_qty:
             logger.warning("[lead_lag] {} qty={} < min={} (${:.2f}) — papel",
                            pair, qty, min_qty, trade.size_usd)
@@ -360,7 +360,7 @@ class LeadLagArb:
         pair  = trade.pair
         price = exit_price if exit_price > 0 else trade.entry_price
         qty   = round(trade.size_usd / trade.entry_price, 6)
-        min_qty = {"ETHUSDT": 0.01, "SOLUSDT": 0.1, "BNBUSDT": 0.01}.get(pair, 0.01)
+        min_qty = {"ETHUSDT": 0.005, "SOLUSDT": 0.1, "BNBUSDT": 0.01}.get(pair, 0.01)
         if qty < min_qty:
             logger.warning("[lead_lag] _close_real {} qty={} < min={} — skip", pair, qty, min_qty)
             return
