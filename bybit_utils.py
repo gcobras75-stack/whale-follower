@@ -192,11 +192,12 @@ async def _place_order_via_ws(
         },
         "op": "order.create",
         "args": [{
-            "category":  "spot",
-            "symbol":    symbol,
-            "side":      side,
-            "orderType": "Market",
-            "qty":       str(qty),
+            "category":    "spot",
+            "symbol":      symbol,
+            "side":        side,
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "IOC",
         }],
     }
 
