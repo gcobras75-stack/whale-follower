@@ -387,7 +387,7 @@ class TriangularArb:
         try:
             bybit_result, okx_result = await asyncio.gather(
                 loop.run_in_executor(None, bybit_fn),
-                self._okx_spot_order(okx_symbol, okx_side, _qty),
+                self._okx_spot_order(okx_symbol, okx_side, _qty, size_usd=size_usd),
                 return_exceptions=True,
             )
 
@@ -417,27 +417,63 @@ class TriangularArb:
                 except Exception:
                     pass
             else:
+                bybit_err = bybit_result if not bybit_ok else "OK"
+                okx_err   = okx_result   if okx_result is not True else "OK"
                 if not bybit_ok:
                     logger.error("[cross_arb] Bybit leg fallido: {}", bybit_result)
                 if okx_result is not True:
                     logger.error("[cross_arb] OKX leg fallido: {}", okx_result)
+                asyncio.create_task(self._alert_exec_error(pair, buy_ex, sell_ex, bybit_err, okx_err))
 
         except Exception as exc:
             logger.error("[cross_arb] _execute_real exception: {}", exc)
 
         self._trades.append(trade)
 
-    async def _okx_spot_order(self, inst_id: str, side: str, sz: float) -> bool:
+    async def _alert_exec_error(self, pair: str, buy_ex: str, sell_ex: str,
+                                  bybit_err: object, okx_err: object) -> None:
+        """Envia Telegram cuando un leg de ejecucion falla."""
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        msg = (
+            f"⚠️ CROSS ARB ERROR — {pair}\n"
+            f"Compra {buy_ex}: {bybit_err}\n"
+            f"Venta  {sell_ex}: {okx_err}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+        except Exception:
+            pass
+
+    async def _okx_spot_order(self, inst_id: str, side: str, sz: float,
+                               size_usd: float = 0.0) -> bool:
         """Coloca una orden de mercado en OKX Spot. Retorna True si exitosa."""
         from datetime import datetime, timezone
-        ts      = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-        payload = {
-            "instId":  inst_id,
-            "tdMode": "cash",
-            "side":    side,
-            "ordType": "market",
-            "sz":      str(round(sz, 6)),
-        }
+        ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        if side == "buy":
+            payload = {
+                "instId":  inst_id,
+                "tdMode":  "cash",
+                "side":    "buy",
+                "ordType": "market",
+                "sz":      str(round(size_usd, 4)),
+                "tgtCcy":  "quote_ccy",
+            }
+        else:
+            payload = {
+                "instId":  inst_id,
+                "tdMode":  "cash",
+                "side":    "sell",
+                "ordType": "market",
+                "sz":      str(round(sz, 6)),
+            }
         body    = json.dumps(payload)
         prehash = ts + "POST" + "/api/v5/trade/order" + body
         sig     = base64.b64encode(

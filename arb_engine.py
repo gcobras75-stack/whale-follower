@@ -88,7 +88,7 @@ class ArbEngine:
         self._funding      = FundingArbEngine(production=production)
         self._cross        = CrossExchangeArb(production=cross_prod)
         self._lead_lag     = LeadLagArb(production=production)
-        self._triangular   = TriangularArb(production=production)
+        self._triangular   = TriangularArb(production=cross_prod)
         self._bitso        = BitsoArb()
 
         mode = "REAL" if production else "PAPEL"
