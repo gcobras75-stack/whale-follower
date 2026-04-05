@@ -287,11 +287,21 @@ async def _place_order_via_ws(
     return {}  # todos los WS fallaron
 
 
+# Mínimo por par en Bybit SPOT (retCode=170140 si se viola)
+_MIN_ORDER_USD  = 10.0
+_MIN_ORDER_QTY: dict = {
+    "BTCUSDT": 0.000149,
+    "ETHUSDT": 0.005,
+    "SOLUSDT": 0.125,
+}
+
+
 async def place_spot_order(
     symbol: str,
     side: str,
     qty: float,
     caller: str = "bybit",
+    price: float = 0.0,   # hint para validar mínimo USD (retCode=170140)
 ) -> dict:
     """
     Coloca una orden de mercado spot en Bybit.
@@ -305,6 +315,24 @@ async def place_spot_order(
     if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
         logger.error("[{}] place_spot_order: keys vacías", caller)
         return {}
+
+    # ── Validar mínimo $10 USD (evita retCode=170140) ─────────────────────────
+    if price > 0:
+        qty_usd = qty * price
+        if qty_usd < _MIN_ORDER_USD:
+            qty = _MIN_ORDER_USD / price
+            logger.info(
+                "[{}] Ajustando {} {} al mínimo ${:.0f}: qty={:.6f} (era ${:.2f})",
+                caller, symbol, side, _MIN_ORDER_USD, qty, qty_usd,
+            )
+    else:
+        min_qty = _MIN_ORDER_QTY.get(symbol, 0.001)
+        if qty < min_qty:
+            logger.info(
+                "[{}] Ajustando {} qty al mínimo: {:.6f} → {:.6f}",
+                caller, symbol, qty, min_qty,
+            )
+            qty = min_qty
 
     # ── 1. Intentar vía WebSocket (evita bloqueo IP Railway en REST) ─────────
     ws_result = await _place_order_via_ws(symbol, side, qty, caller)

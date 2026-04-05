@@ -360,7 +360,7 @@ class CrossExchangeArb:
         eth_usd  = eth_bal * sell_price
         size_usd = self._calc_size(coin, eth_usd)
 
-        if size_usd < 10.0:
+        if size_usd < 12.0:
             logger.warning(
                 "[cross_arb] ⚠️ Inventario {} insuficiente en {} "
                 "(${:.2f} = {:.6f} {}) — activando reabastecimiento",
@@ -587,7 +587,7 @@ class CrossExchangeArb:
             return None
 
         from bybit_utils import place_spot_order
-        result   = await place_spot_order(pair, side, qty, caller="cross_arb")
+        result   = await place_spot_order(pair, side, qty, caller="cross_arb", price=price)
         ret_code = result.get("retCode", -1)
         if ret_code != 0:
             return None

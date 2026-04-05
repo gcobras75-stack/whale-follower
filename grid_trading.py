@@ -549,7 +549,7 @@ class GridTradingEngine:
                          pair, qty, min_qty, size_usd, price)
             return None
 
-        result = await _bybit_ws_order(pair, side, qty, caller="grid")
+        result = await _bybit_ws_order(pair, side, qty, caller="grid", price=price)
         if result and result.get("retCode") == 0:
             order_id = result.get("result", {}).get("orderId", "")
             logger.info("[grid] \U0001f7e2 ORDER OK {} {} ${:.0f} qty={} orderId={}",
