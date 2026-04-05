@@ -49,12 +49,14 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 from loguru import logger
 
+import config
 import db_writer
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _MIN_FUNDING_DIFF     = 0.005   # % diferencial minimo para abrir (cubre fees)
 _MIN_BASIS_SPREAD     = 0.008   # % basis spread minimo para abrir
-_POSITION_SIZE_USD    = 800.0   # USD por pata (total: 2x este valor)
+_MAX_SIZE_PCT_CAPITAL = 0.20    # maximo 20% del capital real por pata
+_POSITION_SIZE_USD    = 50.0    # USD por pata — referencia, se clampea en runtime
 _REBALANCE_SECS       = 3600    # rebalancear cada hora
 _DELTA_TOLERANCE      = 0.005   # 0.5% de desviacion maxima antes de rebalancear
 _CLOSE_FUNDING_DIFF   = 0.003   # cerrar si diferencial cae por debajo de esto
@@ -147,9 +149,14 @@ class DeltaNeutralEngine:
         self._perp_prices: Dict[str, float] = {}
         self._next_funding_ts: float = 0.0
 
-        mode = "REAL" if production else "PAPEL"
-        logger.info("[delta_neutral] Iniciado en modo {} | min_diff={}% min_basis={}%",
-                    mode, _MIN_FUNDING_DIFF, _MIN_BASIS_SPREAD)
+        real_cap = config.REAL_CAPITAL if production else config.PAPER_CAPITAL
+        self._max_size_usd = real_cap * _MAX_SIZE_PCT_CAPITAL
+        mode = "SIMULADO" if not production else "SIMULADO (sin API real)"
+        logger.warning(
+            "[delta_neutral] Iniciado modo {} | NOTA: no ejecuta ordenes reales en ningun exchange "
+            "| min_diff={}% min_basis={}% max_size=${:.0f}",
+            mode, _MIN_FUNDING_DIFF, _MIN_BASIS_SPREAD, self._max_size_usd,
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -273,7 +280,8 @@ class DeltaNeutralEngine:
                     self._close_trade(trade, "basis_reverted")
 
     async def _open_funding_diff(self) -> None:
-        f = self._funding
+        f        = self._funding
+        size_usd = min(_POSITION_SIZE_USD, self._max_size_usd)
         trade = DNTrade(
             trade_id       = str(uuid.uuid4()),
             strategy       = "funding_diff",
@@ -281,7 +289,7 @@ class DeltaNeutralEngine:
             short_exchange = f.short_on,
             long_price     = self._perp_prices.get(f.long_on, 0.0),
             short_price    = self._perp_prices.get(f.short_on, 0.0),
-            size_usd       = _POSITION_SIZE_USD,
+            size_usd       = size_usd,
             funding_diff   = f.diff_pct,
             basis_pct      = 0.0,
             production     = self._production,
@@ -298,6 +306,7 @@ class DeltaNeutralEngine:
         # Si basis > 0: perp > spot → short perp (bybit), long spot (okx)
         long_ex  = "okx"   if basis_pct > 0 else "bybit"
         short_ex = "bybit" if basis_pct > 0 else "okx"
+        size_usd = min(_POSITION_SIZE_USD, self._max_size_usd)
         trade = DNTrade(
             trade_id       = str(uuid.uuid4()),
             strategy       = "basis",
@@ -305,7 +314,7 @@ class DeltaNeutralEngine:
             short_exchange = short_ex,
             long_price     = self._perp_prices.get(long_ex, 0.0),
             short_price    = self._perp_prices.get(short_ex, 0.0),
-            size_usd       = _POSITION_SIZE_USD,
+            size_usd       = size_usd,
             funding_diff   = 0.0,
             basis_pct      = abs(basis_pct),
             production     = self._production,
@@ -393,10 +402,9 @@ class DeltaNeutralEngine:
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        mode = "REAL" if trade.production else "PAPEL"
         est_daily = trade.size_usd * (trade.funding_diff + trade.basis_pct) / 100 * 3
         msg = (
-            f"⚖️ [DELTA NEUTRAL] Abierto ({mode})\n"
+            f"⚖️ [DELTA NEUTRAL] Simulado (sin ejecucion real)\n"
             f"Estrategia: {trade.strategy}\n"
             f"LONG: {trade.long_exchange} | SHORT: {trade.short_exchange}\n"
             f"Funding diff: {trade.funding_diff:.4f}% | Basis: {trade.basis_pct:.4f}%\n"
