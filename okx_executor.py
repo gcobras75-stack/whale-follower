@@ -31,26 +31,14 @@ import config
 # ── OKX API ────────────────────────────────────────────────────────────────────
 _BASE_URL = "https://www.okx.com"
 
-# Contract values for USDT-margined perpetuals (ctVal)
-_CONTRACT_VALUES: Dict[str, float] = {
-    "BTC-USDT-SWAP": 0.01,    # 1 contract = 0.01 BTC
-    "ETH-USDT-SWAP": 0.1,     # 1 contract = 0.1  ETH
-    "SOL-USDT-SWAP": 1.0,     # 1 contract = 1    SOL
-}
-
-# Map from bot pair names to OKX instId (USDT-margined perps)
+# Map from bot pair names to OKX SPOT instId
 _PAIR_TO_INST: Dict[str, str] = {
-    "BTCUSDT": "BTC-USDT-SWAP",
-    "ETHUSDT": "ETH-USDT-SWAP",
-    "SOLUSDT": "SOL-USDT-SWAP",
+    "BTCUSDT": "BTC-USDT",
+    "ETHUSDT": "ETH-USDT",
+    "SOLUSDT": "SOL-USDT",
 }
 
-# Minimum contracts per pair on OKX
-_MIN_CONTRACTS: Dict[str, int] = {
-    "BTC-USDT-SWAP": 1,   # 1 ct = 0.01 BTC ≈ $840
-    "ETH-USDT-SWAP": 1,   # 1 ct = 0.1  ETH ≈ $180
-    "SOL-USDT-SWAP": 1,   # 1 ct = 1    SOL ≈ $120
-}
+_MIN_SPOT_USD = 1.0   # OKX spot minimum ~$1 USD
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -157,13 +145,13 @@ class OKXExecutor:
         price_hint: float,
     ) -> Optional[Dict[str, Any]]:
         """
-        Place a market order on OKX USDT-margined perpetual.
+        Place a market order on OKX SPOT.
 
         Args:
             pair:       Bot pair name e.g. "ETHUSDT"
             side:       "buy" or "sell"
             size_usd:   Approximate USD notional
-            price_hint: Current price for contract size calculation
+            price_hint: Current price (used for sell qty calculation)
 
         Returns:
             Order result dict with order_id, or None on failure.
@@ -177,42 +165,45 @@ class OKXExecutor:
             logger.warning("[okx_exec] unknown pair: {}", pair)
             return None
 
-        ct_val = _CONTRACT_VALUES.get(inst_id, 0.01)
-        if price_hint <= 0:
-            logger.warning("[okx_exec] need valid price_hint (got {})", price_hint)
-            return None
-
-        # Calculate number of contracts
-        contracts = int(size_usd / (price_hint * ct_val))
-        min_ct = _MIN_CONTRACTS.get(inst_id, 1)
-        if contracts < min_ct:
-            notional_min = min_ct * ct_val * price_hint
+        if size_usd < _MIN_SPOT_USD:
             logger.warning(
-                "[okx_exec] size_usd=${:.0f} too small for {} "
-                "(min {} contracts = ${:.0f} notional)",
-                size_usd, pair, min_ct, notional_min,
+                "[okx_exec] size_usd=${:.2f} below SPOT minimum ${:.0f} — skip",
+                size_usd, _MIN_SPOT_USD,
             )
             return None
 
-        # Cap to configured max
-        max_contracts = int(config.CROSS_ARB_MAX_SIZE_USD / (price_hint * ct_val))
-        contracts = min(contracts, max(max_contracts, min_ct))
-
-        actual_notional = contracts * ct_val * price_hint
-
         path = "/api/v5/trade/order"
-        body_dict = {
-            "instId":  inst_id,
-            "tdMode":  "cross",
-            "side":    side.lower(),
-            "ordType": "market",
-            "sz":      str(contracts),
-        }
+        _side = side.lower()
+
+        if _side == "buy":
+            # Buy: sz in quote currency (USDT)
+            body_dict = {
+                "instId":  inst_id,
+                "tdMode":  "cash",
+                "side":    "buy",
+                "ordType": "market",
+                "sz":      str(round(size_usd, 4)),
+                "tgtCcy":  "quote_ccy",
+            }
+        else:
+            # Sell: sz in base currency
+            if price_hint <= 0:
+                logger.warning("[okx_exec] need valid price_hint for sell (got {})", price_hint)
+                return None
+            base_qty = round(size_usd / price_hint, 6)
+            body_dict = {
+                "instId":  inst_id,
+                "tdMode":  "cash",
+                "side":    "sell",
+                "ordType": "market",
+                "sz":      str(base_qty),
+            }
+
         body = json.dumps(body_dict)
 
         logger.info(
-            "[okx_exec] placing {} {} {} contracts (≈${:.0f})",
-            side.upper(), pair, contracts, actual_notional,
+            "[okx_exec] SPOT {} {} ≈${:.0f}",
+            _side.upper(), pair, size_usd,
         )
 
         try:
@@ -231,7 +222,7 @@ class OKXExecutor:
                 if data.get("data"):
                     order_err = data["data"][0].get("sMsg", "")
                 logger.error(
-                    "[okx_exec] ORDER FAILED {}: {} | {}",
+                    "[okx_exec] SPOT ORDER FAILED {}: {} | {}",
                     pair, err_msg, order_err,
                 )
                 return None
@@ -240,19 +231,18 @@ class OKXExecutor:
             order_id = order_data.get("ordId", "")
 
             logger.info(
-                "[okx_exec] ORDER OK {} {} {} contracts ordId={}",
-                side.upper(), pair, contracts, order_id,
+                "[okx_exec] SPOT ORDER OK {} {} ≈${:.0f} ordId={}",
+                _side.upper(), pair, size_usd, order_id,
             )
 
             return {
-                "order_id":       order_id,
-                "pair":           pair,
-                "inst_id":        inst_id,
-                "side":           side.lower(),
-                "contracts":      contracts,
-                "notional_usd":   round(actual_notional, 2),
-                "price_hint":     price_hint,
-                "ts":             time.time(),
+                "order_id":     order_id,
+                "pair":         pair,
+                "inst_id":      inst_id,
+                "side":         _side,
+                "notional_usd": round(size_usd, 2),
+                "price_hint":   price_hint,
+                "ts":           time.time(),
             }
 
         except Exception as exc:
@@ -261,41 +251,19 @@ class OKXExecutor:
 
     # ── Close position ──────────────────────────────────────────────────────
 
-    async def close_position(self, pair: str) -> bool:
-        """Close all positions for a pair using OKX close-position API."""
+    async def close_position(self, pair: str, size_usd: float = 0.0, price_hint: float = 0.0) -> bool:
+        """
+        For SPOT trading, cross-arb is already a round-trip (buy+sell simultaneous).
+        No open position remains after execution. This is a no-op for SPOT.
+        If size_usd and price_hint are provided, places a sell market order to liquidate.
+        """
         if not self._enabled:
             return False
-
-        inst_id = _PAIR_TO_INST.get(pair)
-        if not inst_id:
-            return False
-
-        path = "/api/v5/trade/close-position"
-        body = json.dumps({
-            "instId": inst_id,
-            "mgnMode": "cross",
-        })
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    _BASE_URL + path,
-                    headers=_auth_headers("POST", path, body),
-                    data=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-                data = await resp.json()
-
-            if data.get("code") != "0":
-                logger.warning("[okx_exec] close_position {} error: {}", pair, data.get("msg"))
-                return False
-
-            logger.info("[okx_exec] position closed: {}", pair)
-            return True
-
-        except Exception as exc:
-            logger.error("[okx_exec] close_position exception: {}", exc)
-            return False
+        if size_usd > 0 and price_hint > 0:
+            result = await self.market_order(pair, "sell", size_usd, price_hint)
+            return result is not None
+        logger.debug("[okx_exec] close_position no-op for SPOT {} (no amount provided)", pair)
+        return True
 
     # ── Get fill price ──────────────────────────────────────────────────────
 

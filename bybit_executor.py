@@ -74,7 +74,7 @@ class BybitTestnetExecutor:
     """
 
     _TESTNET_URL    = "https://api-testnet.bybit.com"
-    _PRODUCTION_URL = "https://api.bybit.com"
+    _PRODUCTION_URL = "https://api.bytick.com"   # global endpoint, evita bloqueo por IP
 
     def __init__(self) -> None:
         self._production = config.PRODUCTION
@@ -198,8 +198,8 @@ class BybitTestnetExecutor:
         # Si la orden mínima del par es demasiado grande (>35% del capital),
         # sustituir por el par preferido (ETH, orden mín ~$20 vs BTC ~$67).
         if self._production:
-            # Tamaños mínimos de contrato por par (Bybit linear)
-            _MIN_QTY = {"BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 0.1, "BNBUSDT": 0.01}
+            # Tamaños mínimos spot por par (Bybit spot — mucho menores que futuros)
+            _MIN_QTY = {"BTCUSDT": 0.000048, "ETHUSDT": 0.00048, "SOLUSDT": 0.01, "BNBUSDT": 0.005}
             min_qty   = _MIN_QTY.get(pair, 0.001)
             min_order = min_qty * entry_price
             max_allowed = self._capital * config.MAX_ORDER_PCT_CAPITAL
@@ -461,15 +461,12 @@ class BybitTestnetExecutor:
 
         ts = int(time.time() * 1000)
         body = {
-            "category":    "linear",
-            "symbol":      trade.pair,          # usa el par real del trade
+            "category":    "spot",
+            "symbol":      trade.pair,
             "side":        trade.side,
             "orderType":   "Market",
             "qty":         str(trade.size_contracts),
-            "stopLoss":    str(round(trade.stop_loss, 2)),
-            "takeProfit":  str(round(trade.take_profit, 2)),
             "timeInForce": "GTC",
-            "positionIdx": 0,
         }
         body_str  = json.dumps(body, separators=(",", ":"))
         signature = self._sign(body_str, ts)

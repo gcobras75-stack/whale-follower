@@ -383,7 +383,7 @@ class CrossExchangeArb:
     async def _bybit_market_order(
         self, pair: str, side: str, size_usd: float, price: float
     ) -> Optional[Dict]:
-        """Place a market order on Bybit real (linear perp) via pybit."""
+        """Place a market order on Bybit SPOT via pybit."""
         if not self._bybit_session:
             return None
 
@@ -408,7 +408,7 @@ class CrossExchangeArb:
             result = await loop.run_in_executor(
                 None,
                 lambda: self._bybit_session.place_order(
-                    category="linear",
+                    category="spot",
                     symbol=pair,
                     side=side,
                     orderType="Market",
