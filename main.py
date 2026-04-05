@@ -241,6 +241,7 @@ async def trading_loop() -> None:
     if daily_rep:
         asyncio.create_task(daily_rep.run(),   name="daily_report")
     if rebalancer:
+        rebalancer.set_executor(executor)   # proteger coins con trades activos en dust cleanup
         asyncio.create_task(rebalancer.run(),  name="rebalancer")
 
     _ready = True
@@ -660,6 +661,13 @@ async def trading_loop() -> None:
             available_capital     = executor.available_capital(),
             mode                  = config.ALLOCATION_MODE,
             btc_correlation_active = selection.btc_correlation_active,
+        )
+        # Exchange selection: priorizar exchange con mayor USDT libre
+        _bybit_usdt, _okx_usdt = rebalancer.usdt_balances() if rebalancer else (executor.available_capital(), 0.0)
+        allocation.preferred_exchange = allocator.select_exchange(_bybit_usdt, _okx_usdt)
+        logger.debug(
+            "[main] Exchange preferido: {} (Bybit=${:.0f} OKX=${:.0f})",
+            allocation.preferred_exchange, _bybit_usdt, _okx_usdt,
         )
 
         # 9. Ejecutar trades (features guardadas para ML record_outcome al cierre)

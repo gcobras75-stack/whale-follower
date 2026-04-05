@@ -444,6 +444,23 @@ class BybitTestnetExecutor:
         except Exception as exc:
             logger.warning("[executor] learning_manager record_trade_close error: {}", exc)
 
+        # ── Cierre real en producción: vender 100% del balance actual ──────────
+        if self._production and trade.side == "Buy":
+            coin       = trade.pair.replace("USDT", "")
+            actual_qty = await self._fetch_coin_balance(coin)
+            if actual_qty > 0:
+                logger.info(
+                    "[executor] Cierre REAL {}: balance={:.6f} {} → ejecutando SELL 100%",
+                    trade.pair, actual_qty, coin,
+                )
+                await self._place_close_order(trade.pair, actual_qty)
+            else:
+                logger.warning(
+                    "[executor] Cierre {}: balance de {} no encontrado "
+                    "(posición ya cerrada o en otra subcuenta)",
+                    trade.pair, coin,
+                )
+
         await self._update_supabase_close(trade, duration)
 
     # ── Kelly Criterion ───────────────────────────────────────────────────────
@@ -485,6 +502,105 @@ class BybitTestnetExecutor:
         base = config.RISK_PER_TRADE
         result = max(base * 0.5, min(base * 2.5, half_kelly))
         return round(result, 4)
+
+    # ── Balance real de un coin ────────────────────────────────────────────────
+
+    async def _fetch_coin_balance(self, coin: str) -> float:
+        """
+        Obtiene el balance disponible de un coin específico en Bybit (ej. BTC, SOL).
+        Prueba UNIFIED y luego SPOT. Retorna 0.0 si no se encuentra.
+        """
+        if not self._api_key or not self._api_secret:
+            return 0.0
+        try:
+            for acct_type in ("UNIFIED", "SPOT"):
+                query   = f"accountType={acct_type}&coin={coin}"
+                ts      = str(int(time.time() * 1000))
+                msg     = f"{ts}{self._api_key}5000{query}"
+                sig     = hmac.new(
+                    self._api_secret.encode(), msg.encode(), hashlib.sha256
+                ).hexdigest()
+                headers = {
+                    "X-BAPI-API-KEY":     self._api_key,
+                    "X-BAPI-TIMESTAMP":   ts,
+                    "X-BAPI-SIGN":        sig,
+                    "X-BAPI-RECV-WINDOW": "5000",
+                    "User-Agent":         "Mozilla/5.0",
+                    "Referer":            "https://www.bybit.com",
+                }
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        f"https://api.bytick.com/v5/account/wallet-balance?{query}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as r:
+                        data = await r.json()
+                        if data.get("retCode") == 0:
+                            for c in data["result"]["list"][0].get("coin", []):
+                                if c.get("coin") == coin:
+                                    bal = float(c.get("walletBalance", 0))
+                                    if bal > 0:
+                                        logger.info(
+                                            "[executor] Balance real {} {}={:.6f}",
+                                            acct_type, coin, bal,
+                                        )
+                                        return bal
+        except Exception as exc:
+            logger.warning("[executor] _fetch_coin_balance({}) error: {}", coin, exc)
+        return 0.0
+
+    async def _place_close_order(self, pair: str, coin_qty: float) -> bool:
+        """
+        Coloca orden MARKET SELL por coin_qty en Bybit Spot para cerrar posición LONG.
+        Usa el balance real recién consultado — sin estimaciones.
+        """
+        if not self._api_key or not self._api_secret:
+            return False
+        ts       = int(time.time() * 1000)
+        body_d   = {
+            "category":    "spot",
+            "symbol":      pair,
+            "side":        "Sell",
+            "orderType":   "Market",
+            "qty":         str(round(coin_qty, 8)),
+            "timeInForce": "GTC",
+        }
+        body_str  = json.dumps(body_d, separators=(",", ":"))
+        signature = self._sign(body_str, ts)
+        headers   = {
+            "X-BAPI-API-KEY":     self._api_key,
+            "X-BAPI-TIMESTAMP":   str(ts),
+            "X-BAPI-SIGN":        signature,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type":       "application/json",
+            "User-Agent":         "Mozilla/5.0",
+            "Referer":            "https://www.bybit.com",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._BASE_URL}/v5/order/create",
+                    headers=headers,
+                    data=body_str,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data     = await resp.json()
+                    ret_code = data.get("retCode", -1)
+                    if ret_code == 0:
+                        order_id = data.get("result", {}).get("orderId", "")
+                        logger.info(
+                            "[executor] SELL CIERRE {} qty={:.6f} orderId={}",
+                            pair, coin_qty, order_id,
+                        )
+                        return True
+                    logger.error(
+                        "[executor] SELL CIERRE FALLO {} retCode={} msg={}",
+                        pair, ret_code, data.get("retMsg"),
+                    )
+                    return False
+        except Exception as exc:
+            logger.error("[executor] _place_close_order({}) excepción: {}", pair, exc)
+            return False
 
     # ── Bybit Testnet API ─────────────────────────────────────────────────────
 

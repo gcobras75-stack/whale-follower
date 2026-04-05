@@ -338,16 +338,80 @@ class OKXExecutor:
 
     async def close_position(self, pair: str, size_usd: float = 0.0, price_hint: float = 0.0) -> bool:
         """
-        For SPOT trading, cross-arb is already a round-trip (buy+sell simultaneous).
-        No open position remains after execution. This is a no-op for SPOT.
-        If size_usd and price_hint are provided, places a sell market order to liquidate.
+        Cierra posición LONG vendiendo el 100% del balance real del coin.
+        Consulta el balance actual antes de ejecutar para evitar dust residual.
+        Fallback a size_usd/price_hint si el balance real no se puede obtener.
         """
         if not self._enabled:
             return False
+
+        coin = pair.replace("USDT", "")
+        actual_qty = await self.get_coin_balance(coin)
+
+        if actual_qty > 0 and price_hint > 0:
+            actual_usd = actual_qty * price_hint
+            if actual_usd < _MIN_SPOT_USD:
+                logger.debug(
+                    "[okx_exec] close_position {}: balance ${:.4f} < mínimo OKX, skip",
+                    pair, actual_usd,
+                )
+                return True
+
+            inst_id = _PAIR_TO_INST.get(pair)
+            if not inst_id:
+                logger.warning("[okx_exec] close_position: par desconocido {}", pair)
+                return False
+
+            path = "/api/v5/trade/order"
+            body_dict = {
+                "instId":  inst_id,
+                "tdMode":  "cash",
+                "side":    "sell",
+                "ordType": "market",
+                "sz":      str(round(actual_qty, 6)),
+            }
+            body = json.dumps(body_dict)
+            logger.info(
+                "[okx_exec] close_position SELL 100% {} qty={:.6f} ≈${:.2f}",
+                pair, actual_qty, actual_usd,
+            )
+            try:
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        _BASE_URL + path,
+                        headers=_auth_headers("POST", path, body),
+                        data=body,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    )
+                    data = await resp.json()
+                if data.get("code") != "0":
+                    err   = data.get("msg", "")
+                    smsg  = data.get("data", [{}])[0].get("sMsg", "") if data.get("data") else ""
+                    logger.error(
+                        "[okx_exec] close_position SELL FALLO {}: {} | {}",
+                        pair, err, smsg,
+                    )
+                    return False
+                order_id = data["data"][0].get("ordId", "")
+                logger.info(
+                    "[okx_exec] close_position OK {} qty={:.6f} ordId={}",
+                    pair, actual_qty, order_id,
+                )
+                return True
+            except Exception as exc:
+                logger.error("[okx_exec] close_position excepción {}: {}", pair, exc)
+                return False
+
+        # Fallback: usar size_usd / price_hint si no se pudo obtener balance real
         if size_usd > 0 and price_hint > 0:
+            logger.warning(
+                "[okx_exec] close_position {}: balance real=0, fallback a size_usd=${:.2f}",
+                pair, size_usd,
+            )
             result = await self.market_order(pair, "sell", size_usd, price_hint)
             return result is not None
-        logger.debug("[okx_exec] close_position no-op for SPOT {} (no amount provided)", pair)
+
+        logger.debug("[okx_exec] close_position no-op {} (sin balance ni size_usd)", pair)
         return True
 
     # ── Get fill price ──────────────────────────────────────────────────────

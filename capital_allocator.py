@@ -30,6 +30,7 @@ class AllocationPlan:
     mode: str
     total_risk_pct: float   # fraction of capital at risk across all trades
     description: str
+    preferred_exchange: str = "bybit"   # exchange con más USDT libre al momento de la señal
 
 
 class CapitalAllocator:
@@ -40,6 +41,25 @@ class CapitalAllocator:
     C: BTC score>=85 + BTC correlation → BTC=40%, ETH=35%, SOL=25% (BTC first).
     Total risk capped at 3% of capital in all modes.
     """
+
+    # ── Asignación de exchange ───────────────────────────────────────────────
+    @staticmethod
+    def select_exchange(bybit_usdt: float, okx_usdt: float) -> str:
+        """
+        Retorna el exchange con mayor USDT libre para maximizar
+        la probabilidad de ejecución del trade.
+        """
+        if okx_usdt > bybit_usdt:
+            logger.info(
+                "CapitalAllocator: OKX preferido (${:.2f}) > Bybit (${:.2f})",
+                okx_usdt, bybit_usdt,
+            )
+            return "okx"
+        logger.debug(
+            "CapitalAllocator: Bybit preferido (${:.2f}) >= OKX (${:.2f})",
+            bybit_usdt, okx_usdt,
+        )
+        return "bybit"
 
     _MAX_TOTAL_RISK_FRACTION: float = 0.03   # 3 %
     _MODE_A_RISK_FRACTION: float = 0.01      # 1 %
