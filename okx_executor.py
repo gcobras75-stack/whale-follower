@@ -104,32 +104,60 @@ class OKXExecutor:
     # ── Balance ─────────────────────────────────────────────────────────────
 
     async def get_balance(self) -> float:
-        """Get total USDT equity in OKX trading account."""
+        """Get total USDT balance: trading account + funding account."""
         if not self._enabled:
             return 0.0
 
-        path = "/api/v5/account/balance?ccy=USDT"
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.get(
-                    _BASE_URL + path,
-                    headers=_auth_headers("GET", path),
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-                data = await resp.json()
-
-            if data.get("code") != "0":
-                logger.warning("[okx_exec] balance error: {}", data.get("msg", "unknown"))
-                return 0.0
-
-            for detail in data.get("data", [{}])[0].get("details", []):
-                if detail.get("ccy") == "USDT":
-                    bal = float(detail.get("eq", 0))
-                    self._last_balance = bal
-                    self._last_balance_ts = time.time()
-                    logger.debug("[okx_exec] USDT balance: ${:.2f}", bal)
+        def _extract_usdt(data: dict, in_details: bool) -> float:
+            """Lee cashBal > eq > availBal del primer entry USDT."""
+            if in_details:
+                entries = data.get("data", [{}])[0].get("details", [])
+            else:
+                entries = data.get("data", [])
+            for d in entries:
+                if d.get("ccy") == "USDT":
+                    cash  = float(d.get("cashBal",  0) or 0)
+                    eq    = float(d.get("eq",       0) or 0)
+                    avail = float(d.get("availBal", 0) or 0)
+                    bal   = cash or eq or avail
+                    logger.debug("[okx_exec] USDT cashBal={:.4f} eq={:.4f} availBal={:.4f} -> {:.4f}",
+                                 cash, eq, avail, bal)
                     return bal
             return 0.0
+
+        try:
+            trading_bal = 0.0
+            funding_bal = 0.0
+
+            async with aiohttp.ClientSession() as session:
+                # 1. Trading account
+                path_t = "/api/v5/account/balance?ccy=USDT"
+                resp_t = await session.get(
+                    _BASE_URL + path_t,
+                    headers=_auth_headers("GET", path_t),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                data_t = await resp_t.json()
+                if data_t.get("code") == "0":
+                    trading_bal = _extract_usdt(data_t, in_details=True)
+
+                # 2. Funding account
+                path_f = "/api/v5/asset/balances?ccy=USDT"
+                resp_f = await session.get(
+                    _BASE_URL + path_f,
+                    headers=_auth_headers("GET", path_f),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                data_f = await resp_f.json()
+                if data_f.get("code") == "0":
+                    funding_bal = _extract_usdt(data_f, in_details=False)
+
+            total = trading_bal + funding_bal
+            logger.info("[okx_exec] USDT balance — trading=${:.2f} funding=${:.2f} total=${:.2f}",
+                        trading_bal, funding_bal, total)
+            self._last_balance = total
+            self._last_balance_ts = time.time()
+            return total
 
         except Exception as exc:
             logger.warning("[okx_exec] get_balance error: {}", exc)
@@ -166,8 +194,12 @@ class OKXExecutor:
             """Busca coin en data[0].details[] — estructura de /account/balance."""
             for detail in data.get("data", [{}])[0].get("details", []):
                 if detail.get("ccy") == coin:
-                    bal = float(detail.get("availBal", 0) or 0)
-                    logger.info("[okx] {} encontrado en details availBal={:.6f}", coin, bal)
+                    cash  = float(detail.get("cashBal",  0) or 0)
+                    eq    = float(detail.get("eq",       0) or 0)
+                    avail = float(detail.get("availBal", 0) or 0)
+                    bal   = cash or eq or avail
+                    logger.info("[okx] {} details cashBal={:.6f} eq={:.6f} avail={:.6f} -> {:.6f}",
+                                coin, cash, eq, avail, bal)
                     return bal
             return 0.0
 
@@ -175,8 +207,11 @@ class OKXExecutor:
             """Busca coin en data[] directamente — estructura de /asset/balances."""
             for item in data.get("data", []):
                 if item.get("ccy") == coin:
-                    bal = float(item.get("availBal", 0) or 0)
-                    logger.info("[okx] {} encontrado en asset list availBal={:.6f}", coin, bal)
+                    cash  = float(item.get("cashBal",  0) or 0)
+                    avail = float(item.get("availBal", 0) or 0)
+                    bal   = cash or avail
+                    logger.info("[okx] {} asset list cashBal={:.6f} avail={:.6f} -> {:.6f}",
+                                coin, cash, avail, bal)
                     return bal
             return 0.0
 
