@@ -24,6 +24,16 @@ _BYBIT_HEADERS_EXTRA = {
     "Referer":    "https://www.bybit.com",
 }
 
+# Endpoints de órdenes a probar en secuencia (el primero que funcione se cachea)
+_ORDER_ENDPOINTS = [
+    "https://api.bytick.com/v5/order/create",
+    "https://api.bybit.com/v5/order/create",
+    "https://api.bybit.nl/v5/order/create",
+    "https://api2.bybit.com/v5/order/create",
+]
+# Caché del endpoint que funcionó — None = aún no descubierto
+_working_order_endpoint: Optional[str] = None
+
 
 def _make_bybit_get_headers(query: str) -> dict:
     """Genera headers de autenticación para GET requests a Bybit v5."""
@@ -139,17 +149,19 @@ async def place_spot_order(
     caller: str = "bybit",
 ) -> dict:
     """
-    Coloca una orden de mercado spot en Bybit via aiohttp directo a api.bytick.com.
-    side: "Buy" o "Sell"
-    Retorna el response dict completo, o {} en caso de error.
+    Coloca una orden de mercado spot en Bybit.
+    Prueba endpoints en secuencia hasta que uno funcione:
+      1. BYBIT_ORDER_ENDPOINT (si configurado en Railway)
+      2. api.bytick.com → api.bybit.com → api.bybit.nl → api2.bybit.com
+    Cachea el endpoint que retorna retCode=0 para los trades siguientes.
     """
     import json
+    global _working_order_endpoint
 
     if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
         logger.error("[{}] place_spot_order: keys vacías", caller)
         return {}
 
-    url = f"{_BYBIT_BASE}/v5/order/create"
     body = {
         "category":  "spot",
         "symbol":    symbol,
@@ -158,62 +170,96 @@ async def place_spot_order(
         "qty":       str(qty),
     }
     body_str = json.dumps(body, separators=(",", ":"))
-    ts  = str(int(time.time() * 1000))
-    # HMAC-SHA256: timestamp + api_key + recv_window + body_json
-    msg = f"{ts}{config.BYBIT_API_KEY}{_RECV_WINDOW}{body_str}"
-    sig = hmac.new(
-        config.BYBIT_API_SECRET.encode("utf-8"),
-        msg.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-SIGN":        sig,
-        "X-BAPI-RECV-WINDOW": _RECV_WINDOW,
-        "Content-Type":       "application/json",
-        **_BYBIT_HEADERS_EXTRA,
-    }
+
+    def _make_post_headers() -> dict:
+        """Recalcula HMAC con timestamp fresco (necesario por cada intento)."""
+        ts  = str(int(time.time() * 1000))
+        msg = f"{ts}{config.BYBIT_API_KEY}{_RECV_WINDOW}{body_str}"
+        sig = hmac.new(
+            config.BYBIT_API_SECRET.encode("utf-8"),
+            msg.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
+            "X-BAPI-TIMESTAMP":   ts,
+            "X-BAPI-SIGN":        sig,
+            "X-BAPI-RECV-WINDOW": _RECV_WINDOW,
+            "Content-Type":       "application/json",
+            **_BYBIT_HEADERS_EXTRA,
+        }
+
+    # Construir lista de URLs a intentar
+    # Si BYBIT_ORDER_ENDPOINT configurado → úsalo primero, luego fallbacks
+    env_ep = config.BYBIT_ORDER_ENDPOINT.strip()
+    if env_ep:
+        urls_to_try = [env_ep] + [u for u in _ORDER_ENDPOINTS if u != env_ep]
+    elif _working_order_endpoint:
+        # Usar el que funcionó antes primero, luego el resto como fallback
+        urls_to_try = [_working_order_endpoint] + [
+            u for u in _ORDER_ENDPOINTS if u != _working_order_endpoint
+        ]
+    else:
+        urls_to_try = list(_ORDER_ENDPOINTS)
 
     logger.info(
-        "[{}] → Bybit ORDER REQUEST {} {} qty={} | url={} | body={}",
-        caller, side, symbol, qty, url, body_str,
+        "[{}] → Bybit ORDER {} {} qty={} | body={} | probando {} endpoints",
+        caller, side, symbol, qty, body_str, len(urls_to_try),
     )
 
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(
-                url, headers=headers, data=body_str,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                http_status = r.status
-                data = await r.json()
-                ret_code = data.get("retCode", -1)
-                ret_msg  = data.get("retMsg", "")
+    last_data: dict = {}
+    for url in urls_to_try:
+        try:
+            headers = _make_post_headers()
+            logger.info("[{}] → POST {}", caller, url)
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    url, headers=headers, data=body_str,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    http_status = r.status
+                    if http_status in (403, 404, 503):
+                        logger.warning(
+                            "[{}] {} → HTTP {} (IP bloqueado) → probando siguiente",
+                            caller, url, http_status,
+                        )
+                        continue
+                    data = await r.json()
+                    last_data = data
 
+            ret_code = data.get("retCode", -1)
+            ret_msg  = data.get("retMsg", "")
+
+            logger.info(
+                "[{}] ← {} http={} retCode={} retMsg='{}' | full={}",
+                caller, url, http_status, ret_code, ret_msg, data,
+            )
+
+            if ret_code == 0:
+                order_id = data.get("result", {}).get("orderId", "")
                 logger.info(
-                    "[{}] ← Bybit ORDER RESPONSE http={} retCode={} retMsg='{}' | full={}",
-                    caller, http_status, ret_code, ret_msg, data,
+                    "[{}] Bybit {} {} qty={} orderId={} ✅ via {}",
+                    caller, side, symbol, qty, order_id, url,
                 )
-
-                if ret_code == 0:
-                    order_id = data.get("result", {}).get("orderId", "")
-                    logger.info(
-                        "[{}] Bybit spot {} {} qty={} orderId={} ✅",
-                        caller, side, symbol, qty, order_id,
-                    )
-                else:
-                    logger.error(
-                        "[{}] ORDER FAILED {} {} qty={} — retCode={} msg='{}'",
-                        caller, side, symbol, qty, ret_code, ret_msg,
-                    )
+                _working_order_endpoint = url  # cachear para próximos trades
                 return data
-    except Exception as exc:
-        logger.error(
-            "[{}] place_spot_order EXCEPCIÓN {}/{} qty={}: {}",
-            caller, symbol, side, qty, exc,
-        )
-        return {}
+            else:
+                # Error de aplicación (auth, parámetros) → no seguir probando
+                logger.error(
+                    "[{}] ORDER FAILED {} {} qty={} — retCode={} msg='{}' — sin fallback",
+                    caller, side, symbol, qty, ret_code, ret_msg,
+                )
+                return data
+
+        except Exception as exc:
+            logger.warning("[{}] {} → excepción: {} → probando siguiente", caller, url, exc)
+            continue
+
+    logger.error(
+        "[{}] ORDER FAILED {} {} qty={} — todos los endpoints bloqueados (403)",
+        caller, side, symbol, qty,
+    )
+    return last_data
 
 
 async def get_bybit_coin_balance(coin: str, caller: str = "bybit") -> float:

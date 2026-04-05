@@ -83,6 +83,7 @@ OKX_PASSPHRASE:    str  = os.getenv("OKX_PASSPHRASE",    "")
 ENABLE_CROSS_ARB_REAL: bool = os.getenv("ENABLE_CROSS_ARB_REAL", "false").lower() == "true"
 CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    "50"))
 CROSS_ARB_MAX_SIZE:        float = float(os.getenv("CROSS_ARB_MAX_SIZE",        "25"))
+BYBIT_ORDER_ENDPOINT:      str   = os.getenv("BYBIT_ORDER_ENDPOINT", "")
 CROSS_ARB_MIN_SPREAD_PCT:  float = float(os.getenv("CROSS_ARB_MIN_SPREAD_PCT",  "0.08"))
 CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", "10"))
 
