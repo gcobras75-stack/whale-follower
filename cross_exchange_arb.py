@@ -222,16 +222,22 @@ class CrossExchangeArb:
     # ── Real executors init ───────────────────────────────────────────────────
 
     def _init_real_executors(self) -> None:
-        """Initialize real exchange connections."""
+        """Initialize real exchange connections. Logs exact reason on failure."""
         # OKX
         try:
             from okx_executor import OKXExecutor
             self._okx_exec = OKXExecutor()
             if not self._okx_exec.enabled:
-                logger.warning("[cross_arb] OKX executor not enabled — missing credentials")
+                logger.error(
+                    "[cross_arb] OKX executor DESHABILITADO — "
+                    "verificar OKX_API_KEY={} OKX_SECRET={} OKX_PASSPHRASE={}",
+                    bool(config.OKX_API_KEY), bool(config.OKX_SECRET), bool(config.OKX_PASSPHRASE),
+                )
                 self._okx_exec = None
+            else:
+                logger.info("[cross_arb] OKX executor OK ✅")
         except Exception as exc:
-            logger.warning("[cross_arb] OKX executor init failed: {}", exc)
+            logger.error("[cross_arb] OKX executor init ERROR: {}", exc)
             self._okx_exec = None
 
         # Bybit (using pybit)
@@ -244,11 +250,17 @@ class CrossExchangeArb:
                     api_secret=config.BYBIT_API_SECRET,
                     base_url="https://api.bytick.com",
                 )
-                logger.info("[cross_arb] Bybit real session initialized")
+                logger.info("[cross_arb] Bybit session OK ✅ (key={}****)", config.BYBIT_API_KEY[:4])
             else:
-                logger.warning("[cross_arb] Bybit real keys missing")
+                logger.error(
+                    "[cross_arb] Bybit keys FALTANTES — "
+                    "BYBIT_API_KEY={} BYBIT_API_SECRET={}",
+                    bool(config.BYBIT_API_KEY), bool(config.BYBIT_API_SECRET),
+                )
+        except ImportError:
+            logger.error("[cross_arb] pybit no instalado — 'pip install pybit'")
         except Exception as exc:
-            logger.warning("[cross_arb] Bybit session init failed: {}", exc)
+            logger.error("[cross_arb] Bybit session init ERROR: {}", exc)
 
     def _can_execute_real(self) -> bool:
         """Check if both exchanges are ready for real execution."""
@@ -299,9 +311,19 @@ class CrossExchangeArb:
         4. Persist to Supabase
         """
         if not self._can_execute_real():
-            logger.warning("[cross_arb] REAL execution skipped — executors not ready")
-            self._trades.append(trade)  # still record as paper
-            return
+            # Reintentar init si algún executor es None
+            if self._okx_exec is None or self._bybit_session is None:
+                logger.warning("[cross_arb] Executors no listos — reintentando init...")
+                self._init_real_executors()
+            if not self._can_execute_real():
+                logger.error(
+                    "[cross_arb] REAL skipped — okx_exec={} bybit_session={} balance_ok={}",
+                    self._okx_exec is not None,
+                    self._bybit_session is not None,
+                    self._balance_ok,
+                )
+                self._trades.append(trade)  # still record as paper
+                return
 
         # Balance check
         if not await self._check_balances():
