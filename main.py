@@ -205,6 +205,8 @@ async def trading_loop() -> None:
         asyncio.create_task(dashboard.run(), name="dashboard")
     if arb_engine:
         asyncio.create_task(arb_engine.run(), name="arb_engine")
+    if grid_eng:
+        asyncio.create_task(grid_eng.run(), name="grid_retry_loop")
     if dn_eng:
         asyncio.create_task(dn_eng.run(), name="delta_neutral")
     if macro_agent:

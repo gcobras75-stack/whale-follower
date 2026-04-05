@@ -31,40 +31,60 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+import base64
+import hashlib
+import hmac
+import json
+
 import aiohttp
 from loguru import logger
 
+import config
 import db_writer
 
 # ── Config por par ────────────────────────────────────────────────────────────
 _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
-        "levels":        12,        # niveles de grid (6 arriba, 6 abajo)
-        "capital_usd":   600.0,     # capital total asignado
-        "min_spacing":   0.008,     # spacing minimo 0.8% (antes 0.3%)
-        "max_spacing":   0.015,     # spacing maximo 1.5%
-        "atr_mult":      1.5,       # spacing = ATR * multiplicador
-        "bb_period":     20,        # periodo Bollinger Bands
-        "bb_std":        2.0,       # desviaciones estandar
+        "levels":        4,         # reducido para capital real ($30)
+        "capital_usd":   30.0,      # $30 total — $7.50 por nivel
+        "min_spacing":   0.008,
+        "max_spacing":   0.015,
+        "atr_mult":      1.5,
+        "bb_period":     20,
+        "bb_std":        2.0,
     },
     "ETHUSDT": {
-        "levels":        10,
-        "capital_usd":   400.0,
-        "min_spacing":   0.010,     # spacing minimo 1.0% (antes 0.4%)
+        "levels":        4,         # reducido para capital real ($25)
+        "capital_usd":   25.0,      # $25 total — $6.25 por nivel
+        "min_spacing":   0.010,
         "max_spacing":   0.020,
         "atr_mult":      2.0,
         "bb_period":     20,
         "bb_std":        2.0,
     },
     "SOLUSDT": {
-        "levels":        8,
-        "capital_usd":   200.0,
-        "min_spacing":   0.012,     # spacing minimo 1.2% (antes 0.6%)
+        "levels":        2,         # reducido para capital real ($20)
+        "capital_usd":   20.0,      # $20 total — $10 por nivel
+        "min_spacing":   0.012,
         "max_spacing":   0.025,
         "atr_mult":      2.5,
         "bb_period":     20,
         "bb_std":        2.0,
     },
+}
+
+# Balance minimo de Bybit (USDT) requerido por par para operar en real
+_MIN_BALANCE: Dict[str, float] = {
+    "BTCUSDT": 30.0,
+    "ETHUSDT": 25.0,
+    "SOLUSDT": 20.0,
+}
+
+# Cantidad minima de activo base por par en Bybit spot
+_MIN_QTY: Dict[str, float] = {
+    "BTCUSDT": 0.000048,
+    "ETHUSDT": 0.005,
+    "SOLUSDT": 0.1,
 }
 
 _FEES_PCT             = 0.0002    # 0.02% por lado (maker/taker Bybit)
@@ -84,6 +104,8 @@ class GridLevel:
     fill_ts:    float = 0.0
     fill_price: float = 0.0   # precio real al que se compró
     pnl:        float = 0.0
+    pending:    bool = False   # True mientras espera respuesta de API
+    order_id:   str  = ""     # orderId de Bybit si la orden fue colocada
 
 
 @dataclass
@@ -126,10 +148,15 @@ class GridTradingEngine:
             p: deque(maxlen=_PRICE_HISTORY) for p in _GRID_CONFIG
         }
         self._initialized:       Dict[str, bool]  = {p: False for p in _GRID_CONFIG}
-        self._out_of_range_since: Dict[str, float] = {}   # pair -> ts when price first left BB
+        self._out_of_range_since: Dict[str, float] = {}
+        self._bybit_balance:     float = 0.0
+        self._balance_ts:        float = 0.0
+        self._failed_sells: list = []   # (grid, level, price) tuples to retry
 
         mode = "REAL" if production else "PAPEL"
-        logger.info("[grid] Iniciado en modo {} | pares={}", mode, list(_GRID_CONFIG.keys()))
+        logger.info("[grid] Iniciado en modo {} | pares={} | max_exposure=${}",
+                    mode, list(_GRID_CONFIG.keys()),
+                    sum(c["capital_usd"] for c in _GRID_CONFIG.values()))
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -279,78 +306,36 @@ class GridTradingEngine:
 
     def _evaluate_levels(self, grid: GridState, pair: str, price: float) -> None:
         for level in grid.levels:
+            if level.pending:
+                continue   # esperando respuesta de Bybit API
             if level.filled:
-                # Venta ya colocada — verificar si se ejecuta
                 if level.side == "sell" and price >= level.price:
                     self._fill_sell(grid, level, price)
                 continue
-
-            # Nivel de COMPRA: precio baja hasta el nivel
             if level.side == "buy" and price <= level.price:
                 self._fill_buy(grid, level, price, pair)
 
     def _fill_buy(self, grid: GridState, level: GridLevel, price: float, pair: str) -> None:
-        level.filled     = True
-        level.fill_ts    = time.time()
-        level.fill_price = price
-
-        # Convertir nivel de compra en nivel de venta en el siguiente grid arriba
-        sell_price = price * (1 + grid.spacing_pct)
-        sell_level = GridLevel(
-            price=sell_price, side="sell", size_usd=level.size_usd,
-            fill_price=price,   # guardar buy_price en el sell_level para el writer
-        )
-        grid.levels.append(sell_level)
-
         if self._production:
-            logger.info(
-                "[grid] 🟢 REAL ORDER {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
-                pair, price, level.size_usd, sell_price,
-            )
+            level.pending = True
+            asyncio.create_task(self._handle_buy(grid, level, price, pair))
         else:
+            level.filled     = True
+            level.fill_ts    = time.time()
+            level.fill_price = price
+            sell_price = price * (1 + grid.spacing_pct)
+            grid.levels.append(GridLevel(
+                price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+            ))
             logger.info("[grid] {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
                         pair, price, level.size_usd, sell_price)
 
     def _fill_sell(self, grid: GridState, level: GridLevel, price: float) -> None:
-        level.filled = False   # resetear para poder usarse de nuevo
-
-        # P&L de este ciclo: spacing - fees * 2
-        pnl = level.size_usd * (grid.spacing_pct - _FEES_PCT * 2)
-        grid.pnl_total  += pnl
-        grid.cycles_done += 1
-
         if self._production:
-            logger.info(
-                "[grid] ✅ REAL ORDER {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
-                grid.pair, price, pnl, grid.pnl_total,
-            )
+            level.pending = True
+            asyncio.create_task(self._handle_sell(grid, level, price))
         else:
-            logger.info("[grid] {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
-                        grid.pair, price, pnl, grid.pnl_total)
-        try:
-            import alerts as _alerts
-            _alerts.record_grid_cycle(pnl)
-            if self._production:
-                asyncio.create_task(_alerts.send_trade_alert("grid", {
-                    "pair":       grid.pair,
-                    "buy_price":  level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
-                    "sell_price": price,
-                    "pnl":        pnl,
-                    "pnl_total":  grid.pnl_total,
-                }))
-        except Exception:
-            pass
-        asyncio.create_task(self._alert_cycle(grid, price, pnl))
-        asyncio.create_task(db_writer.save_grid_cycle(
-            pair=grid.pair,
-            center=grid.center_price,
-            spacing_pct=grid.spacing_pct,
-            buy_price=level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
-            sell_price=price,
-            size_usd=level.size_usd,
-            pnl_usd=pnl,
-            production=self._production,
-        ))
+            self._record_sell(grid, level, price)
 
     # ── ATR y Bollinger ───────────────────────────────────────────────────────
 
@@ -398,6 +383,234 @@ class GridTradingEngine:
             self._rebalance_grid(grid, pair, price)
             logger.info("[grid] {} reanudado, precio={:.2f} dentro del rango BB", pair, price)
 
+    # ── Real-order helpers ─────────────────────────────────────────────────────
+
+    def _record_sell(self, grid: GridState, level: GridLevel, price: float) -> None:
+        """Registra un ciclo completado (llamado tanto en papel como post-API-real)."""
+        level.filled     = False
+        level.pending    = False
+        pnl = level.size_usd * (grid.spacing_pct - _FEES_PCT * 2)
+        grid.pnl_total  += pnl
+        grid.cycles_done += 1
+        logger.info("[grid] {} VENTA @ {:.4f} pnl_ciclo={:+.4f} total_pnl={:+.4f}",
+                    grid.pair, price, pnl, grid.pnl_total)
+        try:
+            import alerts as _alerts
+            _alerts.record_grid_cycle(pnl)
+            if self._production:
+                asyncio.create_task(_alerts.send_trade_alert("grid", {
+                    "pair":       grid.pair,
+                    "buy_price":  level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
+                    "sell_price": price,
+                    "pnl":        pnl,
+                    "pnl_total":  grid.pnl_total,
+                }))
+        except Exception:
+            pass
+        asyncio.create_task(self._alert_cycle(grid, price, pnl))
+        asyncio.create_task(db_writer.save_grid_cycle(
+            pair=grid.pair,
+            center=grid.center_price,
+            spacing_pct=grid.spacing_pct,
+            buy_price=level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
+            sell_price=price,
+            size_usd=level.size_usd,
+            pnl_usd=pnl,
+            production=self._production,
+        ))
+
+    async def run(self) -> None:
+        """Tarea de fondo: retry de ventas fallidas cada 30s."""
+        if self._production:
+            await self._retry_sells_loop()
+
+    async def _retry_sells_loop(self) -> None:
+        """Reintenta ventas que fallaron en la primera llamada a Bybit."""
+        while True:
+            await asyncio.sleep(30)
+            if not self._failed_sells:
+                continue
+            retry_list = list(self._failed_sells)
+            self._failed_sells.clear()
+            for grid, level, price in retry_list:
+                if level.pending:
+                    logger.info("[grid] Reintentando VENTA {} @ {:.4f}", grid.pair, price)
+                    asyncio.create_task(self._handle_sell(grid, level, price))
+
+    async def _fetch_bybit_balance(self) -> float:
+        """Balance USDT disponible en Bybit Unified account."""
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        if time.time() - self._balance_ts < 60:
+            return self._bybit_balance   # cache 60 s
+        try:
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = hmac.new(
+                config.BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256
+            ).hexdigest()
+            headers = {
+                "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
+                "X-BAPI-TIMESTAMP":   ts,
+                "X-BAPI-SIGN":        sig,
+                "X-BAPI-RECV-WINDOW": "5000",
+            }
+            url = "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT"
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        for c in data["result"]["list"][0].get("coin", []):
+                            if c.get("coin") == "USDT":
+                                bal = float(c.get("walletBalance", 0))
+                                self._bybit_balance = bal
+                                self._balance_ts    = time.time()
+                                logger.info("[grid] Bybit balance: ${:.2f}", bal)
+                                return bal
+        except Exception as exc:
+            logger.warning("[grid] _fetch_bybit_balance error: {}", exc)
+        return self._bybit_balance
+
+    async def _bybit_spot_order(self, pair: str, side: str, size_usd: float,
+                                 price: float) -> Optional[str]:
+        """
+        Coloca una orden MARKET en Bybit SPOT.
+        Retorna orderId si OK, None si falla.
+        """
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            logger.error("[grid] Faltan credenciales Bybit")
+            return None
+
+        # Calcular qty en activo base
+        if price <= 0:
+            logger.error("[grid] {} precio invalido: {}", pair, price)
+            return None
+        qty = round(size_usd / price, 6)
+        min_qty = _MIN_QTY.get(pair, 0.001)
+        if qty < min_qty:
+            logger.error("[grid] {} qty={} < min={} (size_usd=${:.2f} price={:.2f})",
+                         pair, qty, min_qty, size_usd, price)
+            return None
+
+        ts       = str(int(time.time() * 1000))
+        body_dict = {
+            "category":    "spot",
+            "symbol":      pair,
+            "side":        side,        # "Buy" | "Sell"
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "IOC",
+        }
+        body_str = json.dumps(body_dict, separators=(",", ":"))
+        payload  = f"{ts}{config.BYBIT_API_KEY}5000{body_str}"
+        sig      = hmac.new(
+            config.BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        headers = {
+            "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
+            "X-BAPI-TIMESTAMP":   ts,
+            "X-BAPI-SIGN":        sig,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type":       "application/json",
+        }
+
+        for attempt in (1, 2):
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(
+                        "https://api.bybit.com/v5/order/create",
+                        headers=headers, data=body_str,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        data = await resp.json()
+                        ret_code = data.get("retCode", -1)
+                        if ret_code == 0:
+                            order_id = data.get("result", {}).get("orderId", "")
+                            logger.info("[grid] \U0001f7e2 REAL ORDER {} {} ${:.0f} qty={} orderId={}",
+                                        side.upper(), pair, size_usd, qty, order_id)
+                            self._bybit_balance = max(0, self._bybit_balance - size_usd)
+                            return order_id
+                        else:
+                            logger.error("[grid] \u274c ORDER RECHAZADA {} {} retCode={} msg={} (intento {})",
+                                         side, pair, ret_code, data.get("retMsg"), attempt)
+                            if attempt == 1:
+                                await asyncio.sleep(1)
+                            else:
+                                await self._alert_order_error(
+                                    pair, side, size_usd, data.get("retMsg", "")
+                                )
+                                return None
+            except Exception as exc:
+                logger.error("[grid] _bybit_spot_order exception (intento {}): {}", attempt, exc)
+                if attempt == 1:
+                    await asyncio.sleep(1)
+                else:
+                    return None
+        return None
+
+    async def _handle_buy(self, grid: GridState, level: GridLevel,
+                           price: float, pair: str) -> None:
+        """Ejecuta compra real en Bybit SPOT; actualiza estado solo si OK."""
+        # Gate de balance
+        balance = await self._fetch_bybit_balance()
+        min_bal = _MIN_BALANCE.get(pair, 20.0)
+        if balance < min_bal:
+            logger.warning("[grid] {} PAUSADO: balance=${:.2f} < ${:.0f} minimo",
+                           pair, balance, min_bal)
+            level.pending = False
+            grid.paused      = True
+            grid.pause_reason = f"balance insuficiente ${balance:.2f} < ${min_bal:.0f}"
+            return
+
+        order_id = await self._bybit_spot_order(pair, "Buy", level.size_usd, price)
+        if order_id:
+            level.filled     = True
+            level.pending    = False
+            level.fill_ts    = time.time()
+            level.fill_price = price
+            level.order_id   = order_id
+            sell_price = price * (1 + grid.spacing_pct)
+            grid.levels.append(GridLevel(
+                price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+            ))
+            logger.info("[grid] \U0001f7e2 REAL COMPRA {} @ {:.4f} \u2192 venta programada @ {:.4f}",
+                        pair, price, sell_price)
+        else:
+            level.pending = False   # liberar para que pueda intentarse de nuevo
+
+    async def _handle_sell(self, grid: GridState, level: GridLevel, price: float) -> None:
+        """Ejecuta venta real en Bybit SPOT; registra ciclo solo si OK."""
+        order_id = await self._bybit_spot_order(grid.pair, "Sell", level.size_usd, price)
+        if order_id:
+            level.order_id = order_id
+            self._record_sell(grid, level, price)
+        else:
+            level.pending = False
+            logger.error("[grid] \u274c VENTA FALLIDA {} @ {:.4f} \u2014 reintentando en 30s",
+                         grid.pair, price)
+            self._failed_sells.append((grid, level, price))
+
+    async def _alert_order_error(self, pair: str, side: str,
+                                  size_usd: float, msg: str) -> None:
+        """Envia error de orden rechazada a Telegram."""
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        alert = (
+            f"\u274c [GRID] ORDER RECHAZADA\n"
+            f"Par: {pair} | Lado: {side} | Size: ${size_usd:.0f}\n"
+            f"Error: {msg}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": alert},
+                             timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
+
     # ── Telegram ──────────────────────────────────────────────────────────────
 
     async def _alert_init(self, pair: str, center: float, spacing: float, levels: int) -> None:
@@ -426,12 +639,23 @@ class GridTradingEngine:
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        msg = (
-            f"✅ [GRID] Ciclo completado {grid.pair}\n"
-            f"Salida: ${exit_price:,.4f}\n"
-            f"P&L ciclo: +${pnl:.4f}\n"
-            f"P&L total: ${grid.pnl_total:.4f} | Ciclos: {grid.cycles_done}"
-        )
+        buy_price = exit_price * (1 - grid.spacing_pct)
+        if self._production:
+            msg = (
+                f"\U0001f7e2 GRID CICLO COMPLETADO\n"
+                f"Par: {grid.pair}\n"
+                f"Compra:  ${buy_price:,.4f}\n"
+                f"Venta:   ${exit_price:,.4f}\n"
+                f"PnL:     +${pnl:.4f}\n"
+                f"PnL total: ${grid.pnl_total:.4f} | Ciclos: {grid.cycles_done}"
+            )
+        else:
+            msg = (
+                f"\u2705 [GRID] Ciclo completado {grid.pair}\n"
+                f"Salida: ${exit_price:,.4f}\n"
+                f"P&L ciclo: +${pnl:.4f}\n"
+                f"P&L total: ${grid.pnl_total:.4f} | Ciclos: {grid.cycles_done}"
+            )
         try:
             async with aiohttp.ClientSession() as s:
                 await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
