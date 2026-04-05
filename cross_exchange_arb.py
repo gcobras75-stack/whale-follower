@@ -327,7 +327,7 @@ class CrossExchangeArb:
         coin       = pair.replace("USDT", "")   # ETHUSDT → ETH
 
         # ── Calcular size dinámico según balance del sell-side ────────────────
-        size_usd = min(trade.size_usd, config.CROSS_ARB_MAX_SIZE_USD)
+        size_usd = min(trade.size_usd, config.CROSS_ARB_MAX_SIZE)
 
         if trade.sell_exchange == "okx" and self._okx_exec:
             okx_coin_bal  = await self._okx_exec.get_coin_balance(coin)
@@ -439,7 +439,7 @@ class CrossExchangeArb:
     @staticmethod
     def _calc_size(coin: str, available_balance_usd: float) -> float:
         """Calcula size dinámico: 80% del balance disponible, entre $10 y $50."""
-        max_size = config.CROSS_ARB_MAX_SIZE_USD  # 50 por defecto
+        max_size = config.CROSS_ARB_MAX_SIZE  # configurable via env CROSS_ARB_MAX_SIZE
         min_size = 10.0
         dynamic  = available_balance_usd * 0.80
         size     = max(min_size, min(max_size, dynamic))
