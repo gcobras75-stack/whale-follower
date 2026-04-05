@@ -7,9 +7,11 @@ y garantizar UNIFIED→SPOT fallback + logging correcto en todos los módulos.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import time
+import uuid
 from typing import Optional
 
 import aiohttp
@@ -33,6 +35,12 @@ _ORDER_ENDPOINTS = [
 ]
 # Caché del endpoint que funcionó — None = aún no descubierto
 _working_order_endpoint: Optional[str] = None
+
+# WebSocket endpoints privados (órdenes — evita bloqueo IP Railway en REST)
+_WS_PRIVATE_ENDPOINTS = [
+    "wss://stream.bybit.com/v5/private",
+    "wss://stream.bytick.com/v5/private",
+]
 
 
 def _make_bybit_get_headers(query: str) -> dict:
@@ -142,6 +150,142 @@ async def fetch_usdt_balance(caller: str = "bybit") -> float:
         return 0.0
 
 
+async def _place_order_via_ws(
+    symbol: str,
+    side: str,
+    qty: float,
+    caller: str = "bybit",
+) -> dict:
+    """
+    Coloca una orden de mercado spot en Bybit via WebSocket privado.
+    Evita el bloqueo de IPs Railway que afecta al REST API.
+    Autenticación: op='auth' con HMAC-SHA256 de 'GET/realtime{expires}'.
+    Orden: op='order.create' con reqId único para correlacionar respuesta.
+    Retorna respuesta normalizada (igual que REST: usa clave 'result').
+    """
+    import json
+
+    if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+        return {}
+
+    # ── Auth signature (WS) ───────────────────────────────────────────────
+    expires  = int(time.time() * 1000) + 5000
+    ws_val   = f"GET/realtime{expires}"
+    ws_sig   = hmac.new(
+        config.BYBIT_API_SECRET.encode("utf-8"),
+        ws_val.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    auth_msg = {
+        "op":   "auth",
+        "args": [config.BYBIT_API_KEY, expires, ws_sig],
+    }
+
+    # ── Order message ─────────────────────────────────────────────────────
+    req_id    = str(uuid.uuid4())[:12]
+    ts_now    = str(int(time.time() * 1000))
+    order_msg = {
+        "reqId": req_id,
+        "header": {
+            "X-BAPI-TIMESTAMP":   ts_now,
+            "X-BAPI-RECV-WINDOW": _RECV_WINDOW,
+        },
+        "op": "order.create",
+        "args": [{
+            "category":  "spot",
+            "symbol":    symbol,
+            "side":      side,
+            "orderType": "Market",
+            "qty":       str(qty),
+        }],
+    }
+
+    for ws_url in _WS_PRIVATE_ENDPOINTS:
+        try:
+            logger.info(
+                "[{}] → Bybit WS ORDER {} {} qty={} reqId={} | {}",
+                caller, side, symbol, qty, req_id, ws_url,
+            )
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(
+                    ws_url,
+                    heartbeat=20,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as ws:
+
+                    # 1. Enviar auth
+                    await ws.send_str(json.dumps(auth_msg))
+
+                    # 2. Esperar respuesta de auth (op=auth)
+                    auth_ok = False
+                    deadline = time.time() + 6
+                    while time.time() < deadline:
+                        try:
+                            msg = await asyncio.wait_for(ws.receive(), timeout=1.5)
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            d = json.loads(msg.data)
+                            if d.get("op") == "auth":
+                                auth_ok = d.get("success", False)
+                                logger.info(
+                                    "[{}] WS auth op=auth success={}",
+                                    caller, auth_ok,
+                                )
+                                break
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+
+                    if not auth_ok:
+                        logger.warning("[{}] WS auth FAILED en {} — probando siguiente", caller, ws_url)
+                        continue
+
+                    # 3. Enviar orden
+                    await ws.send_str(json.dumps(order_msg))
+
+                    # 4. Esperar respuesta de la orden (op=order.create o reqId match)
+                    deadline = time.time() + 10
+                    while time.time() < deadline:
+                        try:
+                            msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            d = json.loads(msg.data)
+                            if d.get("op") == "order.create" or d.get("reqId") == req_id:
+                                ret_code = d.get("retCode", -1)
+                                ret_msg  = d.get("retMsg", "")
+                                logger.info(
+                                    "[{}] ← WS {} retCode={} retMsg='{}' | full={}",
+                                    caller, ws_url, ret_code, ret_msg, d,
+                                )
+                                if ret_code == 0:
+                                    order_id = d.get("data", {}).get("orderId", "")
+                                    logger.info(
+                                        "[{}] Bybit WS {} {} qty={} orderId={} ✅",
+                                        caller, side, symbol, qty, order_id,
+                                    )
+                                    # Normalizar: WS usa 'data', REST usa 'result'
+                                    d.setdefault("result", d.get("data", {}))
+                                else:
+                                    logger.error(
+                                        "[{}] WS ORDER FAILED retCode={} msg='{}'",
+                                        caller, ret_code, ret_msg,
+                                    )
+                                return d
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+
+                    logger.warning("[{}] WS order response timeout en {}", caller, ws_url)
+
+        except Exception as exc:
+            logger.warning("[{}] WS {} excepción: {} → probando siguiente", caller, ws_url, exc)
+            continue
+
+    return {}  # todos los WS fallaron
+
+
 async def place_spot_order(
     symbol: str,
     side: str,
@@ -150,10 +294,9 @@ async def place_spot_order(
 ) -> dict:
     """
     Coloca una orden de mercado spot en Bybit.
-    Prueba endpoints en secuencia hasta que uno funcione:
-      1. BYBIT_ORDER_ENDPOINT (si configurado en Railway)
-      2. api.bytick.com → api.bybit.com → api.bybit.nl → api2.bybit.com
-    Cachea el endpoint que retorna retCode=0 para los trades siguientes.
+    Orden de intentos:
+      1. WebSocket privado (evita bloqueo IP de Railway en REST)
+      2. REST multi-endpoint como fallback
     """
     import json
     global _working_order_endpoint
@@ -162,6 +305,19 @@ async def place_spot_order(
         logger.error("[{}] place_spot_order: keys vacías", caller)
         return {}
 
+    # ── 1. Intentar vía WebSocket (evita bloqueo IP Railway en REST) ─────────
+    ws_result = await _place_order_via_ws(symbol, side, qty, caller)
+    if ws_result and ws_result.get("retCode") == 0:
+        return ws_result
+    if ws_result:
+        logger.warning(
+            "[{}] WS retCode={} msg='{}' — probando REST como fallback",
+            caller, ws_result.get("retCode"), ws_result.get("retMsg", ""),
+        )
+    else:
+        logger.info("[{}] WS no respondió — probando REST como fallback", caller)
+
+    # ── 2. Fallback REST multi-endpoint ──────────────────────────────────────
     body = {
         "category":  "spot",
         "symbol":    symbol,
