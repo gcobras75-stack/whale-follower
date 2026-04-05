@@ -35,9 +35,9 @@ _POLL_SECS            = 120     # 2 minutos
 _MAX_BINANCE_FAILURES = 3      # intentos antes de cambiar a Bybit FAPI
 
 # Bybit FAPI fallback (publico, sin API key)
-_BYBIT_OI_URL    = ("https://api.bybit.com/v5/market/open-interest"
+_BYBIT_OI_URL    = ("https://api.bytick.com/v5/market/open-interest"
                     "?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=1")
-_BYBIT_PRICE_URL = ("https://api.bybit.com/v5/market/tickers"
+_BYBIT_PRICE_URL = ("https://api.bytick.com/v5/market/tickers"
                     "?category=linear&symbol=BTCUSDT")
 _LIQ_LONG_BLOCK = 50e6    # $50M liq LONG  → bloquear LONGS
 _LIQ_SHORT_BOOST = 50e6   # $50M liq SHORT → +10pts rebote

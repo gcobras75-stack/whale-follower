@@ -26,7 +26,7 @@ load_dotenv()
 
 _API_KEY    = os.environ.get("BYBIT_API_KEY", "")
 _API_SECRET = os.environ.get("BYBIT_API_SECRET", "")
-_BASE_URL   = "https://api.bybit.com"
+_BASE_URL   = "https://api.bytick.com"
 _RECV_WIN   = "5000"
 
 _TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")

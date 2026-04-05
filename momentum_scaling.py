@@ -191,10 +191,10 @@ class MomentumScalingEngine:
                            hashlib.sha256).hexdigest()
             headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
                        "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
-                       "X-BAPI-RECV-WINDOW": "5000"}
+                       "X-BAPI-RECV-WINDOW": "5000", "User-Agent": "Mozilla/5.0", "Referer": "https://www.bybit.com"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(
-                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
                     headers=headers, timeout=aiohttp.ClientTimeout(total=8),
                 ) as r:
                     data = await r.json()

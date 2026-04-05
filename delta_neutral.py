@@ -66,7 +66,7 @@ _FUNDING_POLL_SECS    = 300     # consultar funding cada 5 min
 
 # URLs funding rate
 _BYBIT_FUNDING_URL = (
-    "https://api.bybit.com/v5/market/tickers"
+    "https://api.bytick.com/v5/market/tickers"
     "?category=linear&symbol=BTCUSDT"
 )
 _OKX_FUNDING_URL = (
@@ -218,8 +218,10 @@ class DeltaNeutralEngine:
                 "X-BAPI-TIMESTAMP":   ts,
                 "X-BAPI-SIGN":        sig,
                 "X-BAPI-RECV-WINDOW": "5000",
+                "User-Agent":         "Mozilla/5.0",
+                "Referer":            "https://www.bybit.com",
             }
-            url = "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT"
+            url = "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT"
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers,
                                   timeout=aiohttp.ClientTimeout(total=8)) as r:

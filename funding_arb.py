@@ -38,7 +38,7 @@ _FUNDING_INTERVAL   = 8 * 3600  # cada 8 horas
 _MIN_CAPITAL_USD    = 300.0   # capital minimo para operar en real
 _REAL_SIZE_PCT      = 0.15    # 15% del capital real por pata
 _BYBIT_FUNDING_URL  = (
-    "https://api.bybit.com/v5/market/funding/history"
+    "https://api.bytick.com/v5/market/funding/history"
     "?category=linear&symbol=BTCUSDT&limit=1"
 )
 _SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -144,10 +144,10 @@ class FundingArbEngine:
                            hashlib.sha256).hexdigest()
             headers = {"X-BAPI-API-KEY": config.BYBIT_API_KEY,
                        "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sig,
-                       "X-BAPI-RECV-WINDOW": "5000"}
+                       "X-BAPI-RECV-WINDOW": "5000", "User-Agent": "Mozilla/5.0", "Referer": "https://www.bybit.com"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(
-                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
                     headers=headers, timeout=aiohttp.ClientTimeout(total=8),
                 ) as r:
                     data = await r.json()

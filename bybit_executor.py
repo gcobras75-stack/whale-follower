@@ -157,9 +157,11 @@ class BybitTestnetExecutor:
                         "X-BAPI-TIMESTAMP":   ts,
                         "X-BAPI-SIGN":        sig,
                         "X-BAPI-RECV-WINDOW": "5000",
+                        "User-Agent":         "Mozilla/5.0",
+                        "Referer":            "https://www.bybit.com",
                     }
                     async with s.get(
-                        f"https://api.bybit.com/v5/account/wallet-balance?{query}",
+                        f"https://api.bytick.com/v5/account/wallet-balance?{query}",
                         headers=headers,
                         timeout=aiohttp.ClientTimeout(total=8),
                     ) as r:
@@ -520,6 +522,8 @@ class BybitTestnetExecutor:
             "X-BAPI-SIGN":        signature,
             "X-BAPI-RECV-WINDOW": "5000",
             "Content-Type":       "application/json",
+            "User-Agent":         "Mozilla/5.0",
+            "Referer":            "https://www.bybit.com",
         }
 
         mode_label = "REAL" if self._production else "TESTNET"

@@ -289,11 +289,11 @@ async def trading_loop() -> None:
             _msg = f"{_ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
             _sig = _hmac.new(config.BYBIT_API_SECRET.encode(), _msg.encode(), _hashlib.sha256).hexdigest()
             _hdrs = {"X-BAPI-API-KEY": config.BYBIT_API_KEY, "X-BAPI-TIMESTAMP": _ts,
-                     "X-BAPI-SIGN": _sig, "X-BAPI-RECV-WINDOW": "5000"}
+                     "X-BAPI-SIGN": _sig, "X-BAPI-RECV-WINDOW": "5000", "User-Agent": "Mozilla/5.0", "Referer": "https://www.bybit.com"}
             import aiohttp as _aio
             async with _aio.ClientSession() as _s:
                 async with _s.get(
-                    "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                    "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
                     headers=_hdrs, timeout=_aio.ClientTimeout(total=8),
                 ) as _r:
                     _bd = await _r.json()
@@ -346,6 +346,7 @@ async def trading_loop() -> None:
 
     # ── Loop principal ─────────────────────────────────────────────────────────
     async for trade, _legacy_state in aggregator.stream():
+      try:
 
         # 1. Gestionar trades activos
         if executor._enabled:
@@ -682,6 +683,11 @@ async def trading_loop() -> None:
                 "size_usd": first.size_usd,
             }))
 
+      except asyncio.CancelledError:
+          raise
+      except Exception as _tick_exc:
+          logger.error("[main] Error en tick — continuando: {}", _tick_exc)
+
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
@@ -699,13 +705,23 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def main() -> None:
     runner = await start_healthcheck()
-    trading_task = asyncio.create_task(trading_loop())
-    try:
-        await trading_task
-    except asyncio.CancelledError:
-        logger.info("[main] Cancelled.")
-    finally:
-        await runner.cleanup()
+    _restart_delay = 30
+    while True:
+        trading_task = asyncio.create_task(trading_loop())
+        try:
+            await trading_task
+            break   # salida limpia
+        except asyncio.CancelledError:
+            logger.info("[main] Cancelled — shutdown limpio.")
+            break
+        except Exception as exc:
+            logger.error(
+                "[main] trading_loop crasheo: {} — reintentando en {}s",
+                exc, _restart_delay,
+            )
+            await asyncio.sleep(_restart_delay)
+            _restart_delay = min(_restart_delay * 2, 300)  # backoff hasta 5min
+    await runner.cleanup()
 
 
 if __name__ == "__main__":

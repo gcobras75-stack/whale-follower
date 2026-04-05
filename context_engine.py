@@ -68,11 +68,11 @@ class ContextEngine:
     """
 
     _BYBIT_FUNDING_URL = (
-        "https://api.bybit.com/v5/market/funding/history"
+        "https://api.bytick.com/v5/market/funding/history"
         "?category=linear&symbol=BTCUSDT&limit=1"
     )
     _BYBIT_OI_URL = (
-        "https://api.bybit.com/v5/market/open-interest"
+        "https://api.bytick.com/v5/market/open-interest"
         "?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=2"
     )
 
