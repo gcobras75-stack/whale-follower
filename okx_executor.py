@@ -136,26 +136,70 @@ class OKXExecutor:
             return self._last_balance  # return cached if API fails
 
     async def get_coin_balance(self, coin: str) -> float:
-        """Get available balance of a specific coin (ETH, BTC, SOL) in OKX trading account."""
+        """
+        Get available balance of a specific coin (ETH, BTC, SOL).
+        Intenta /api/v5/account/balance (trading) primero;
+        si retorna 0 → intenta /api/v5/asset/balances (funding).
+        Sin caché — siempre consulta la API en tiempo real.
+        """
         if not self._enabled:
             return 0.0
-        path = f"/api/v5/account/balance?ccy={coin}"
-        try:
+
+        async def _try_endpoint(path: str) -> float:
             async with aiohttp.ClientSession() as session:
                 resp = await session.get(
                     _BASE_URL + path,
                     headers=_auth_headers("GET", path),
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
+                http_status = resp.status
                 data = await resp.json()
-            if data.get("code") != "0":
+
+            logger.info(
+                "[okx] get_coin_balance({}) endpoint={} http={} respuesta={}",
+                coin, path, http_status, data,
+            )
+
+            code = data.get("code", "-1")
+            if code != "0":
+                logger.warning(
+                    "[okx] get_coin_balance({}) code={} msg='{}'",
+                    coin, code, data.get("msg", ""),
+                )
                 return 0.0
-            for detail in data.get("data", [{}])[0].get("details", []):
-                if detail.get("ccy") == coin:
-                    return float(detail.get("availBal", 0))
+
+            # /api/v5/account/balance → data[0].details[].availBal
+            items = data.get("data", [])
+            if items:
+                for detail in items[0].get("details", []):
+                    if detail.get("ccy") == coin:
+                        bal = float(detail.get("availBal", 0) or 0)
+                        logger.info("[okx] {} balance (trading) = {:.6f}", coin, bal)
+                        return bal
+                # /api/v5/asset/balances → data[].availBal directamente
+                for item in items:
+                    if item.get("ccy") == coin:
+                        bal = float(item.get("availBal", 0) or 0)
+                        logger.info("[okx] {} balance (funding) = {:.6f}", coin, bal)
+                        return bal
+
+            logger.info("[okx] {} no encontrado en respuesta de {}", coin, path)
             return 0.0
+
+        try:
+            # 1. Trading account
+            trading_path = f"/api/v5/account/balance?ccy={coin}"
+            bal = await _try_endpoint(trading_path)
+            if bal > 0:
+                return bal
+
+            # 2. Funding/asset account como fallback
+            logger.info("[okx] {} balance=0 en trading → probando funding account", coin)
+            funding_path = f"/api/v5/asset/balances?ccy={coin}"
+            return await _try_endpoint(funding_path)
+
         except Exception as exc:
-            logger.warning("[okx_exec] get_coin_balance({}) error: {}", coin, exc)
+            logger.warning("[okx_exec] get_coin_balance({}) excepción: {}", coin, exc)
             return 0.0
 
     # ── Market orders ───────────────────────────────────────────────────────
