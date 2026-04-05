@@ -55,8 +55,9 @@ import db_writer
 # ── Config ────────────────────────────────────────────────────────────────────
 _MIN_FUNDING_DIFF     = 0.005   # % diferencial minimo para abrir (cubre fees)
 _MIN_BASIS_SPREAD     = 0.008   # % basis spread minimo para abrir
-_MAX_SIZE_PCT_CAPITAL = 0.20    # maximo 20% del capital real por pata
+_MAX_SIZE_PCT_CAPITAL = 0.15    # maximo 15% del capital real por pata
 _POSITION_SIZE_USD    = 50.0    # USD por pata — referencia, se clampea en runtime
+_DELTA_NEUTRAL_MIN_CAPITAL = 500.0  # capital minimo para operar en real (USD)
 _REBALANCE_SECS       = 3600    # rebalancear cada hora
 _DELTA_TOLERANCE      = 0.005   # 0.5% de desviacion maxima antes de rebalancear
 _CLOSE_FUNDING_DIFF   = 0.003   # cerrar si diferencial cae por debajo de esto
@@ -143,30 +144,130 @@ class DeltaNeutralEngine:
     """
 
     def __init__(self, production: bool = False) -> None:
-        self._production = production
-        self._funding    = FundingRates()
+        self._production       = production
+        self._funding          = FundingRates()
         self._trades: List[DNTrade] = []
         self._perp_prices: Dict[str, float] = {}
         self._next_funding_ts: float = 0.0
-
-        real_cap = config.REAL_CAPITAL if production else config.PAPER_CAPITAL
-        self._max_size_usd = real_cap * _MAX_SIZE_PCT_CAPITAL
-        mode = "SIMULADO" if not production else "SIMULADO (sin API real)"
+        self._real_capital_usd: float = 0.0   # se actualiza en run() con balance real
+        self._paper_mode: bool = True          # True hasta verificar capital >= MIN
         logger.warning(
-            "[delta_neutral] Iniciado modo {} | NOTA: no ejecuta ordenes reales en ningun exchange "
-            "| min_diff={}% min_basis={}% max_size=${:.0f}",
-            mode, _MIN_FUNDING_DIFF, _MIN_BASIS_SPREAD, self._max_size_usd,
+            "[delta_neutral] Iniciado | min_capital_real=${} | min_diff={}% | min_basis={}%",
+            _DELTA_NEUTRAL_MIN_CAPITAL, _MIN_FUNDING_DIFF, _MIN_BASIS_SPREAD,
         )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Tareas de fondo: polling funding + settlement + rebalanceo."""
+        """Tareas de fondo: verificar capital, polling funding, settlement, rebalanceo."""
+        await self._check_capital()   # verifica balance real antes de arrancar
         await asyncio.gather(
             self._poll_funding(),
             self._settle_payments(),
             self._rebalance_loop(),
+            self._capital_poll_loop(),
         )
+
+    async def _capital_poll_loop(self) -> None:
+        """Re-verifica capital real cada hora para actualizar modo papel/real."""
+        while True:
+            await asyncio.sleep(3600)
+            await self._check_capital()
+
+    async def _check_capital(self) -> None:
+        """Obtiene balance real de Bybit + OKX y decide si operar en real o papel."""
+        if not self._production:
+            self._paper_mode = True
+            self._real_capital_usd = config.PAPER_CAPITAL
+            logger.info("[delta_neutral] Modo PAPEL (PRODUCTION=false)")
+            return
+
+        bybit_bal = await self._fetch_bybit_balance()
+        okx_bal   = await self._fetch_okx_balance()
+        total     = bybit_bal + okx_bal
+        self._real_capital_usd = total
+
+        if total < _DELTA_NEUTRAL_MIN_CAPITAL:
+            self._paper_mode = True
+            logger.warning(
+                "[delta_neutral] Capital real ${:.2f} < ${:.0f} minimo "
+                "— forzando PAPEL hasta acumular capital suficiente",
+                total, _DELTA_NEUTRAL_MIN_CAPITAL,
+            )
+        else:
+            self._paper_mode = False
+            logger.info(
+                "[delta_neutral] Capital real ${:.2f} >= ${:.0f} "
+                "— modo REAL habilitado",
+                total, _DELTA_NEUTRAL_MIN_CAPITAL,
+            )
+
+    async def _fetch_bybit_balance(self) -> float:
+        """Obtiene balance USDT de Bybit Unified account."""
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            return 0.0
+        try:
+            import hmac as _hmac, hashlib as _hashlib
+            ts  = str(int(time.time() * 1000))
+            msg = f"{ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
+            sig = _hmac.new(
+                config.BYBIT_API_SECRET.encode(), msg.encode(), _hashlib.sha256
+            ).hexdigest()
+            headers = {
+                "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
+                "X-BAPI-TIMESTAMP":   ts,
+                "X-BAPI-SIGN":        sig,
+                "X-BAPI-RECV-WINDOW": "5000",
+            }
+            url = "https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT"
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("retCode") == 0:
+                        coins = data["result"]["list"][0].get("coin", [])
+                        for c in coins:
+                            if c.get("coin") == "USDT":
+                                bal = float(c.get("walletBalance", 0))
+                                logger.info("[delta_neutral] Bybit balance: ${:.2f}", bal)
+                                return bal
+        except Exception as exc:
+            logger.warning("[delta_neutral] Bybit balance error: {}", exc)
+        return 0.0
+
+    async def _fetch_okx_balance(self) -> float:
+        """Obtiene balance USDT disponible de OKX funding account."""
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            return 0.0
+        try:
+            import hmac as _hmac, hashlib as _hashlib, base64 as _b64
+            from datetime import datetime, timezone as _tz
+            ts      = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            path    = "/api/v5/asset/balances?ccy=USDT"
+            prehash = ts + "GET" + path
+            sig = _b64.b64encode(
+                _hmac.new(config.OKX_SECRET.encode(), prehash.encode(),
+                          _hashlib.sha256).digest()
+            ).decode()
+            headers = {
+                "OK-ACCESS-KEY":        config.OKX_API_KEY,
+                "OK-ACCESS-SIGN":       sig,
+                "OK-ACCESS-TIMESTAMP":  ts,
+                "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE,
+            }
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://www.okx.com{path}", headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    data = await r.json()
+                    if data.get("code") == "0":
+                        for item in data.get("data", []):
+                            if item.get("ccy") == "USDT":
+                                bal = float(item.get("availBal", 0))
+                                logger.info("[delta_neutral] OKX balance: ${:.2f}", bal)
+                                return bal
+        except Exception as exc:
+            logger.warning("[delta_neutral] OKX balance error: {}", exc)
+        return 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -279,9 +380,15 @@ class DeltaNeutralEngine:
                 if abs(basis) < _MIN_BASIS_SPREAD * 0.3:
                     self._close_trade(trade, "basis_reverted")
 
+    def _calc_size(self) -> float:
+        """15% del capital real disponible, nunca mas de _POSITION_SIZE_USD."""
+        cap = self._real_capital_usd if self._real_capital_usd > 0 else _POSITION_SIZE_USD
+        return min(_POSITION_SIZE_USD, cap * _MAX_SIZE_PCT_CAPITAL)
+
     async def _open_funding_diff(self) -> None:
         f        = self._funding
-        size_usd = min(_POSITION_SIZE_USD, self._max_size_usd)
+        size_usd = self._calc_size()
+        is_real  = self._production and not self._paper_mode
         trade = DNTrade(
             trade_id       = str(uuid.uuid4()),
             strategy       = "funding_diff",
@@ -292,7 +399,7 @@ class DeltaNeutralEngine:
             size_usd       = size_usd,
             funding_diff   = f.diff_pct,
             basis_pct      = 0.0,
-            production     = self._production,
+            production     = is_real,
         )
         self._trades.append(trade)
         logger.info(
@@ -306,7 +413,8 @@ class DeltaNeutralEngine:
         # Si basis > 0: perp > spot → short perp (bybit), long spot (okx)
         long_ex  = "okx"   if basis_pct > 0 else "bybit"
         short_ex = "bybit" if basis_pct > 0 else "okx"
-        size_usd = min(_POSITION_SIZE_USD, self._max_size_usd)
+        size_usd = self._calc_size()
+        is_real  = self._production and not self._paper_mode
         trade = DNTrade(
             trade_id       = str(uuid.uuid4()),
             strategy       = "basis",
@@ -317,7 +425,7 @@ class DeltaNeutralEngine:
             size_usd       = size_usd,
             funding_diff   = 0.0,
             basis_pct      = abs(basis_pct),
-            production     = self._production,
+            production     = is_real,
         )
         self._trades.append(trade)
         logger.info(
@@ -403,13 +511,26 @@ class DeltaNeutralEngine:
         if not token or not chat_id:
             return
         est_daily = trade.size_usd * (trade.funding_diff + trade.basis_pct) / 100 * 3
-        msg = (
-            f"⚖️ [DELTA NEUTRAL] Simulado (sin ejecucion real)\n"
-            f"Estrategia: {trade.strategy}\n"
-            f"LONG: {trade.long_exchange} | SHORT: {trade.short_exchange}\n"
-            f"Funding diff: {trade.funding_diff:.4f}% | Basis: {trade.basis_pct:.4f}%\n"
-            f"Tamaño: ${trade.size_usd:,.0f} | Est. diario: ${est_daily:.4f}"
-        )
+        if trade.production:
+            pct_used = (trade.size_usd / self._real_capital_usd * 100
+                        if self._real_capital_usd > 0 else 0)
+            msg = (
+                f"\u2696\ufe0f [DELTA NEUTRAL] REAL EJECUTADO\n"
+                f"Estrategia: {trade.strategy}\n"
+                f"LONG: {trade.long_exchange} | SHORT: {trade.short_exchange}\n"
+                f"Funding diff: {trade.funding_diff:.4f}% | Basis: {trade.basis_pct:.4f}%\n"
+                f"Tama\u00f1o real: ${trade.size_usd:,.0f} USD\n"
+                f"Capital usado: {pct_used:.0f}% de ${self._real_capital_usd:.0f}\n"
+                f"Est. diario: ${est_daily:.4f}"
+            )
+        else:
+            msg = (
+                f"\U0001f4ca [DELTA NEUTRAL] Simulado\n"
+                f"Estrategia: {trade.strategy}\n"
+                f"LONG: {trade.long_exchange} | SHORT: {trade.short_exchange}\n"
+                f"Funding diff: {trade.funding_diff:.4f}% | Basis: {trade.basis_pct:.4f}%\n"
+                f"Tama\u00f1o papel: ${trade.size_usd:,.0f} | Est. diario: ${est_daily:.4f}"
+            )
         try:
             async with aiohttp.ClientSession() as s:
                 await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
