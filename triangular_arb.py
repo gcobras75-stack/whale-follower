@@ -1,26 +1,25 @@
 # -*- coding: utf-8 -*-
 """
 triangular_arb.py -- Whale Follower Bot
-Arbitraje Triangular: BTC/USDT × ETH/BTC ≠ ETH/USDT
+Arbitraje Cross-Exchange: BTC/USDT en Bybit Spot vs OKX Spot
 
 Estrategia:
-  Con los precios en tiempo real de BTC y ETH (ambos en USDT),
-  se calcula el tipo implicito ETH/BTC = ETH_USDT / BTC_USDT.
+  Compara el precio de BTC/USDT en Bybit y OKX en tiempo real.
+  Si la diferencia supera el coste de fees (0.10% x 2 patas = 0.20%):
 
-  Si el tipo real en Bybit difiere del tipo implicito por > 0.05%
-  (despues de fees 0.02% x 3 patas = 0.06%):
-    Triangulo A (implicito < real):
-      1. Comprar ETH con USDT   (ETHUSDT)
-      2. Vender ETH por BTC     (ETHBTC)
-      3. Vender BTC por USDT    (BTCUSDT)
-    Triangulo B (implicito > real):
-      Ruta inversa
+    Ruta A (Bybit mas barato):
+      1. Comprar BTC/USDT en Bybit Spot
+      2. Vender BTC/USDT en OKX Spot
 
-  En la practica capturamos la diferencia entre el tipo implicito
-  y el tipo observable directamente desde los WebSockets.
+    Ruta B (OKX mas barato):
+      1. Comprar BTC/USDT en OKX Spot
+      2. Vender BTC/USDT en Bybit Spot
 
-En papel: simula las tres patas y registra spread capturado.
-En real:  ejecuta ordenes simultaneas en Bybit (tres pares).
+  Umbral minimo: net P&L > $0.01 por operacion.
+  Tamano real: hasta $30 por ciclo.
+
+En papel: simula las dos patas y registra spread capturado.
+En real:  ejecuta ordenes simultaneas en Bybit (pybit) y OKX (REST API v5).
 """
 from __future__ import annotations
 
@@ -32,38 +31,44 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+import base64
+import hashlib
+import hmac
+import json
+
 import aiohttp
 from loguru import logger
 
 import config
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_MIN_SPREAD_PCT    = 0.06    # > fees (0.02% x 3 patas = 0.06%)
+_MIN_SPREAD_PCT    = 0.20    # > fees spot (0.10% Bybit + 0.10% OKX = 0.20%)
 _MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo
-_POSITION_SIZE_USD = 300.0   # USD por ciclo triangular en papel
-_REAL_POSITION_USD = 30.0    # USD por ciclo en REAL (capped para $90 Bybit)
+_POSITION_SIZE_USD = 300.0   # USD por ciclo en papel
+_REAL_POSITION_USD = 30.0    # USD por ciclo en REAL
 _MIN_NET_PNL       = 0.01    # minimo P&L neto para ejecutar ($0.01)
-_TAKER_FEE_PCT     = 0.02    # fee por pata (Bybit taker)
-_COOLDOWN_SECS     = 10      # cooldown entre arbs del mismo triangulo
+_TAKER_FEE_PCT     = 0.10    # fee por pata en spot (Bybit/OKX taker 0.10%)
+_COOLDOWN_SECS     = 10      # cooldown entre arbs
 _PRICE_STALE_MS    = 2000    # datos stale si > 2s
 
 
 @dataclass
 class TriPrice:
-    btc_usdt:  float = 0.0   # BTC/USDT (eg. 65000)
-    eth_usdt:  float = 0.0   # ETH/USDT (eg. 3000)
-    eth_btc:   float = 0.0   # ETH/BTC real (eg. 0.04615) — desde WebSocket directo
-    ts_ms:     float = field(default_factory=lambda: time.time() * 1000)
+    btc_usdt:     float = 0.0   # BTC/USDT en Bybit
+    eth_usdt:     float = 0.0   # reservado
+    eth_btc:      float = 0.0   # reservado
+    btc_usdt_okx: float = 0.0   # BTC/USDT en OKX
+    ts_ms:        float = field(default_factory=lambda: time.time() * 1000)
 
 
 @dataclass
 class TriArbTrade:
     trade_id:       str
-    route:          str       # "A" | "B"
-    btc_usdt:       float
-    eth_usdt:       float
-    eth_btc_real:   float
-    eth_btc_impl:   float
+    route:          str       # "A" (buy Bybit/sell OKX) | "B" (buy OKX/sell Bybit)
+    btc_usdt:       float     # precio Bybit
+    eth_usdt:       float     # precio OKX (campo reutilizado)
+    eth_btc_real:   float     # precio en exchange de compra
+    eth_btc_impl:   float     # precio en exchange de venta
     spread_pct:     float
     size_usd:       float
     gross_pnl:      float
@@ -74,8 +79,8 @@ class TriArbTrade:
 
 @dataclass
 class TriArbSnapshot:
-    eth_btc_implied:   float = 0.0
-    eth_btc_real:      float = 0.0
+    eth_btc_implied:   float = 0.0   # precio BTC en Bybit
+    eth_btc_real:      float = 0.0   # precio BTC en OKX
     spread_pct:        float = 0.0
     opportunities_1h:  int   = 0
     trades_total:      int   = 0
@@ -85,14 +90,12 @@ class TriArbSnapshot:
 
 class TriangularArb:
     """
-    Detecta arbitraje triangular usando precios BTC/USDT, ETH/USDT y ETH/BTC
-    en tiempo real desde el aggregator y WebSocket Bybit.
+    Detecta y ejecuta arbitraje cross-exchange BTC/USDT (Bybit vs OKX).
 
     Uso:
-        arb = TriangularArb(production=False)
-        arb.update_btc_usdt(65000.0)
-        arb.update_eth_usdt(3000.0)
-        arb.update_eth_btc(0.04550)  # precio real ETH/BTC desde Bybit
+        arb = TriangularArb(production=True)
+        arb.update_btc_usdt(83500.0)       # precio BTC en Bybit
+        arb.update_btc_usdt_okx(83600.0)   # precio BTC en OKX
     """
 
     def __init__(self, production: bool = False) -> None:
@@ -115,24 +118,27 @@ class TriangularArb:
     def update_eth_usdt(self, price: float) -> None:
         self._prices.eth_usdt = price
         self._prices.ts_ms    = time.time() * 1000
-        self._check_arb()
 
     def update_eth_btc(self, price: float) -> None:
-        """Precio ETH/BTC desde mercado spot (distinto del implicito)."""
+        """Reservado por compatibilidad — no usado en estrategia cross-exchange."""
         self._prices.eth_btc = price
         self._prices.ts_ms   = time.time() * 1000
+
+    def update_btc_usdt_okx(self, price: float) -> None:
+        """Precio BTC/USDT en OKX — dispara la deteccion de arbitraje."""
+        self._prices.btc_usdt_okx = price
+        self._prices.ts_ms        = time.time() * 1000
         self._check_arb()
 
     def snapshot(self) -> TriArbSnapshot:
         now    = time.time()
         p      = self._prices
-        impl   = self._implied_eth_btc()
-        spread = self._spread_pct(impl, p.eth_btc) if (impl and p.eth_btc) else 0.0
+        spread = self._cross_spread(p.btc_usdt, p.btc_usdt_okx)
         stale  = (time.time() * 1000 - p.ts_ms) > _PRICE_STALE_MS
         ops_1h = sum(1 for t in self._opportunities if now - t < 3600)
         return TriArbSnapshot(
-            eth_btc_implied  = round(impl, 8) if impl else 0.0,
-            eth_btc_real     = round(p.eth_btc, 8),
+            eth_btc_implied  = round(p.btc_usdt, 2),
+            eth_btc_real     = round(p.btc_usdt_okx, 2),
             spread_pct       = round(spread, 4),
             opportunities_1h = ops_1h,
             trades_total     = len(self._trades),
@@ -153,36 +159,29 @@ class TriangularArb:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _implied_eth_btc(self) -> Optional[float]:
-        if self._prices.btc_usdt <= 0 or self._prices.eth_usdt <= 0:
-            return None
-        return self._prices.eth_usdt / self._prices.btc_usdt
-
     @staticmethod
-    def _spread_pct(impl: float, real: float) -> float:
-        if real <= 0:
+    def _cross_spread(bybit: float, okx: float) -> float:
+        """Spread porcentual entre los dos exchanges."""
+        if bybit <= 0 or okx <= 0:
             return 0.0
-        return abs(impl - real) / real * 100
+        ref = min(bybit, okx)
+        return abs(bybit - okx) / ref * 100
 
     def _check_arb(self) -> None:
         now = time.time()
         if now - self._last_check < _COOLDOWN_SECS:
             return
 
-        # Necesitamos los tres precios
         p = self._prices
-        if not p.btc_usdt or not p.eth_usdt or not p.eth_btc:
+        # Necesitamos precio BTC en ambos exchanges
+        if not p.btc_usdt or not p.btc_usdt_okx:
             return
 
         # Datos stale?
         if (time.time() * 1000 - p.ts_ms) > _PRICE_STALE_MS:
             return
 
-        impl   = self._implied_eth_btc()
-        if impl is None:
-            return
-
-        spread = self._spread_pct(impl, p.eth_btc)
+        spread = self._cross_spread(p.btc_usdt, p.btc_usdt_okx)
 
         if spread < _MIN_SPREAD_PCT or spread > _MAX_SPREAD_PCT:
             return
@@ -190,18 +189,27 @@ class TriangularArb:
         self._last_check = now
         self._opportunities.append(now)
 
-        # Determinar ruta: si real < implicito -> ruta A (comprar ETH/BTC barato)
-        route     = "A" if p.eth_btc < impl else "B"
+        # Ruta A: Bybit mas barato → comprar Bybit, vender OKX
+        # Ruta B: OKX mas barato  → comprar OKX,   vender Bybit
+        if p.btc_usdt <= p.btc_usdt_okx:
+            route      = "A"
+            buy_price  = p.btc_usdt
+            sell_price = p.btc_usdt_okx
+        else:
+            route      = "B"
+            buy_price  = p.btc_usdt_okx
+            sell_price = p.btc_usdt
+
         gross_pnl = _POSITION_SIZE_USD * spread / 100
-        fees      = _POSITION_SIZE_USD * _TAKER_FEE_PCT / 100 * 3   # 3 patas
+        fees      = _POSITION_SIZE_USD * _TAKER_FEE_PCT / 100 * 2   # 2 patas
         net_pnl   = gross_pnl - fees
 
         if net_pnl < _MIN_NET_PNL:
             return
 
         logger.info(
-            "[tri_arb] OPORTUNIDAD ruta={} spread={:.4f}% impl={:.8f} real={:.8f} net=+${:.4f}",
-            route, spread, impl, p.eth_btc, net_pnl,
+            "[arb] OPORTUNIDAD ruta={} bybit={:.2f} okx={:.2f} spread={:.4f}% net=+${:.4f}",
+            route, p.btc_usdt, p.btc_usdt_okx, spread, net_pnl,
         )
         try:
             import alerts as _alerts
@@ -213,9 +221,9 @@ class TriangularArb:
             trade_id      = str(uuid.uuid4()),
             route         = route,
             btc_usdt      = p.btc_usdt,
-            eth_usdt      = p.eth_usdt,
-            eth_btc_real  = p.eth_btc,
-            eth_btc_impl  = round(impl, 8),
+            eth_usdt      = p.btc_usdt_okx,   # OKX price (campo reutilizado)
+            eth_btc_real  = buy_price,
+            eth_btc_impl  = sell_price,
             spread_pct    = round(spread, 4),
             size_usd      = _POSITION_SIZE_USD,
             gross_pnl     = round(gross_pnl, 4),
@@ -234,75 +242,66 @@ class TriangularArb:
 
     async def _execute_real(self, trade: TriArbTrade) -> None:
         """
-        Ejecuta arbitraje triangular real en Bybit Spot:
-          Ruta A: Buy ETHUSDT → Sell ETHBTC → Sell BTCUSDT
-          Ruta B: Buy BTCUSDT → Buy ETHBTC  → Sell ETHUSDT
+        Ejecuta arbitraje cross-exchange real:
+          Ruta A: Buy BTC en Bybit Spot + Sell BTC en OKX Spot
+          Ruta B: Buy BTC en OKX Spot  + Sell BTC en Bybit Spot
         """
-        try:
-            from pybit.unified_trading import HTTP as BybitHTTP
-        except ImportError:
-            logger.error("[tri_arb] pybit no disponible")
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            logger.warning("[arb] Faltan BYBIT_API_KEY/BYBIT_API_SECRET")
+            self._trades.append(trade)
+            return
+        if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
+            logger.warning("[arb] Faltan credenciales OKX")
             self._trades.append(trade)
             return
 
-        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            logger.warning("[tri_arb] Faltan BYBIT_API_KEY/BYBIT_API_SECRET reales")
+        try:
+            from pybit.unified_trading import HTTP as BybitHTTP
+        except ImportError:
+            logger.error("[arb] pybit no disponible")
             self._trades.append(trade)
             return
 
         size_usd  = min(trade.size_usd, _REAL_POSITION_USD)
-        eth_price = trade.eth_usdt
-        eth_qty   = round(size_usd / eth_price, 4) if eth_price > 0 else 0
-        btc_qty   = round(eth_qty * trade.eth_btc_real, 6)
+        btc_price = trade.eth_btc_real   # precio en exchange de compra
+        btc_qty   = round(size_usd / btc_price, 6) if btc_price > 0 else 0
 
-        if eth_qty <= 0 or btc_qty <= 0:
-            logger.warning("[tri_arb] qty <= 0, saltando")
+        if btc_qty <= 0:
+            logger.warning("[arb] btc_qty <= 0, saltando")
             self._trades.append(trade)
             return
 
         logger.info(
-            "[tri_arb] REAL INICIO ruta={} size=${:.0f} eth_qty={} btc_qty={}",
-            trade.route, size_usd, eth_qty, btc_qty,
+            "[arb] REAL INICIO ruta={} size=${:.0f} btc_qty={} bybit={:.2f} okx={:.2f}",
+            trade.route, size_usd, btc_qty, trade.btc_usdt, trade.eth_usdt,
         )
 
+        session  = BybitHTTP(testnet=False, api_key=config.BYBIT_API_KEY, api_secret=config.BYBIT_API_SECRET)
+        loop     = asyncio.get_event_loop()
+        _qty     = btc_qty
+
+        if trade.route == "A":
+            # Buy Bybit, Sell OKX
+            bybit_fn  = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Buy",  orderType="Market", qty=str(_qty))
+            okx_side  = "sell"
+        else:
+            # Buy OKX, Sell Bybit
+            bybit_fn  = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Sell", orderType="Market", qty=str(_qty))
+            okx_side  = "buy"
+
         try:
-            session = BybitHTTP(
-                testnet=False,
-                api_key=config.BYBIT_API_KEY,
-                api_secret=config.BYBIT_API_SECRET,
-            )
-            loop = asyncio.get_event_loop()
-
-            if trade.route == "A":
-                # Buy ETHUSDT → Sell ETHBTC → Sell BTCUSDT
-                _eth_qty  = eth_qty
-                _btc_qty  = btc_qty
-                leg1 = lambda: session.place_order(category="spot", symbol="ETHUSDT", side="Buy",  orderType="Market", qty=str(_eth_qty))
-                leg2 = lambda: session.place_order(category="spot", symbol="ETHBTC",  side="Sell", orderType="Market", qty=str(_eth_qty))
-                leg3 = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Sell", orderType="Market", qty=str(_btc_qty))
-            else:
-                # Buy BTCUSDT → Buy ETHBTC → Sell ETHUSDT
-                _eth_qty  = eth_qty
-                _btc_qty  = btc_qty
-                leg1 = lambda: session.place_order(category="spot", symbol="BTCUSDT", side="Buy",  orderType="Market", qty=str(_btc_qty))
-                leg2 = lambda: session.place_order(category="spot", symbol="ETHBTC",  side="Buy",  orderType="Market", qty=str(_eth_qty))
-                leg3 = lambda: session.place_order(category="spot", symbol="ETHUSDT", side="Sell", orderType="Market", qty=str(_eth_qty))
-
-            results = await asyncio.gather(
-                loop.run_in_executor(None, leg1),
-                loop.run_in_executor(None, leg2),
-                loop.run_in_executor(None, leg3),
+            bybit_result, okx_result = await asyncio.gather(
+                loop.run_in_executor(None, bybit_fn),
+                self._okx_spot_order("BTC-USDT", okx_side, _qty),
                 return_exceptions=True,
             )
 
-            all_ok = all(
-                isinstance(r, dict) and r.get("retCode") == 0
-                for r in results
-            )
+            bybit_ok = isinstance(bybit_result, dict) and bybit_result.get("retCode") == 0
+            okx_ok   = bybit_result is not None and okx_result is True
 
-            if all_ok:
+            if bybit_ok and okx_result is True:
                 logger.info(
-                    "[tri_arb] ✅ REAL EJECUTADO ruta={} net=+${:.4f} spread={:.4f}%",
+                    "[arb] ✅ REAL EJECUTADO ruta={} net=+${:.4f} spread={:.4f}%",
                     trade.route, trade.net_pnl, trade.spread_pct,
                 )
                 trade.production = True
@@ -312,19 +311,55 @@ class TriangularArb:
                 except Exception:
                     pass
             else:
-                for i, r in enumerate(results):
-                    if isinstance(r, Exception):
-                        logger.error("[tri_arb] Pata {} exception: {}", i + 1, r)
-                    elif isinstance(r, dict) and r.get("retCode") != 0:
-                        logger.error(
-                            "[tri_arb] Pata {} error retCode={} msg={}",
-                            i + 1, r.get("retCode"), r.get("retMsg"),
-                        )
+                if not bybit_ok:
+                    logger.error("[arb] Bybit leg fallido: {}", bybit_result)
+                if okx_result is not True:
+                    logger.error("[arb] OKX leg fallido: {}", okx_result)
 
         except Exception as exc:
-            logger.error("[tri_arb] _execute_real exception: {}", exc)
+            logger.error("[arb] _execute_real exception: {}", exc)
 
         self._trades.append(trade)
+
+    async def _okx_spot_order(self, inst_id: str, side: str, sz: float) -> bool:
+        """Coloca una orden de mercado en OKX Spot. Retorna True si exitosa."""
+        from datetime import datetime, timezone
+        ts      = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        payload = {
+            "instId":  inst_id,
+            "tdMode": "cash",
+            "side":    side,
+            "ordType": "market",
+            "sz":      str(round(sz, 6)),
+        }
+        body    = json.dumps(payload)
+        prehash = ts + "POST" + "/api/v5/trade/order" + body
+        sig     = base64.b64encode(
+            hmac.new(config.OKX_SECRET.encode(), prehash.encode(), hashlib.sha256).digest()
+        ).decode()
+        headers = {
+            "OK-ACCESS-KEY":        config.OKX_API_KEY,
+            "OK-ACCESS-SIGN":       sig,
+            "OK-ACCESS-TIMESTAMP":  ts,
+            "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE,
+            "Content-Type":         "application/json",
+        }
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    "https://www.okx.com/api/v5/trade/order",
+                    headers=headers,
+                    data=body,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("code") == "0":
+                        return True
+                    logger.error("[arb] OKX orden error: {}", data)
+                    return False
+        except Exception as exc:
+            logger.error("[arb] OKX request exception: {}", exc)
+            return False
 
     # ── Telegram alert ────────────────────────────────────────────────────────
 
@@ -333,17 +368,14 @@ class TriangularArb:
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        mode  = "REAL" if trade.production else "PAPEL"
-        route_desc = (
-            "BUY ETHUSDT → SELL ETHBTC → SELL BTCUSDT"
-            if trade.route == "A"
-            else "BUY BTCUSDT → BUY ETHBTC → SELL ETHUSDT"
-        )
+        mode = "REAL" if trade.production else "PAPEL"
+        if trade.route == "A":
+            route_desc = f"BUY BTC Bybit @ {trade.btc_usdt:.2f} → SELL BTC OKX @ {trade.eth_usdt:.2f}"
+        else:
+            route_desc = f"BUY BTC OKX @ {trade.eth_usdt:.2f} → SELL BTC Bybit @ {trade.btc_usdt:.2f}"
         msg = (
-            f"[TRI ARB] Oportunidad ({mode})\n"
+            f"[CROSS ARB] Oportunidad ({mode})\n"
             f"Ruta: {trade.route} — {route_desc}\n"
-            f"ETH/BTC implicito: {trade.eth_btc_impl:.8f}\n"
-            f"ETH/BTC real:      {trade.eth_btc_real:.8f}\n"
             f"Spread: {trade.spread_pct:.4f}%\n"
             f"P&L neto: +${trade.net_pnl:.4f}"
         )

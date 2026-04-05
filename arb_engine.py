@@ -111,18 +111,21 @@ class ArbEngine:
         if pair in ("ETHUSDT", "SOLUSDT", "BNBUSDT"):
             self._lead_lag.update_price(pair, price)
 
-        # Triangular: necesita BTC y ETH en USDT
+        # Triangular (cross-exchange): BTC/USDT de Bybit y OKX por separado
         if pair == "BTCUSDT":
-            self._triangular.update_btc_usdt(price)
+            if exchange in ("bybit", "bybit_spot", ""):
+                self._triangular.update_btc_usdt(price)
+            elif exchange in ("okx", "okx_spot"):
+                self._triangular.update_btc_usdt_okx(price)
+            else:
+                self._triangular.update_btc_usdt(price)
         elif pair == "ETHUSDT":
             self._triangular.update_eth_usdt(price)
 
     def on_eth_btc_price(self, price: float) -> None:
         """
-        Precio directo ETH/BTC desde Bybit spot WebSocket.
-        Necesario para el arb triangular real.
-        Opcional: si no esta disponible, el triangular funciona
-        solo con la tasa implicita (sin oportunidad real).
+        Reservado por compatibilidad — la estrategia triangular ahora usa
+        cross-exchange BTC/USDT (Bybit vs OKX), no requiere ETH/BTC.
         """
         self._triangular.update_eth_btc(price)
 
