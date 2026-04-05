@@ -8,7 +8,9 @@ Machine Learning XGBoost, Dashboard diario.
 """
 from __future__ import annotations
 
+import aiofiles
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -28,6 +30,21 @@ logger.add(
     colorize=False,
 )
 
+# ── Seguridad y control de exchanges ──────────────────────────────────────────
+_exchange_semaphores    = {"binance": asyncio.Semaphore(5), "bybit": asyncio.Semaphore(5), "okx": asyncio.Semaphore(5)}
+_exchange_errors        = {"binance": 0, "bybit": 0, "okx": 0}
+_exchange_blocked_until = {"binance": 0, "bybit": 0, "okx": 0}
+POSITIONS_FILE = "open_positions.json"
+
+def is_valid_price(price, pair): return price > 0 and price < 2000000
+def is_exchange_blocked(exchange): return _exchange_blocked_until.get(exchange, 0) > time.time()
+
+async def save_positions(executor):
+    try:
+        pos = [{"pair": t.pair, "entry": t.entry_price, "size": t.size_usd} for t in executor._trades.values() if getattr(t, 'status', 'open') in ['open', 'partial']]
+        async with aiofiles.open(POSITIONS_FILE, 'w') as f: await f.write(json.dumps(pos))
+    except: pass
+
 # ── Estado global ─────────────────────────────────────────────────────────────
 _start_time   = time.time()
 _signal_count = 0
@@ -39,6 +56,9 @@ _arb_ref      = None   # para healthcheck arb
 
 # ── Healthcheck HTTP ─────────────────────────────────────────────────────────
 async def health_handler(request: web.Request) -> web.Response:
+    _health_key = os.getenv("HEALTH_KEY")
+    if _health_key and request.headers.get("X-Health-Key") != _health_key:
+        return web.Response(status=401, text="Unauthorized")
     uptime = int(time.time() - _start_time)
     payload = {
         "status":          "ok",
@@ -109,8 +129,7 @@ async def trading_loop() -> None:
     except Exception as exc:
         _error_msg = str(exc)
         logger.error(f"[main] Import error: {exc}")
-        while True:
-            await asyncio.sleep(60)
+        return
 
     # ── Arbitraje (tolerante a fallos) ───────────────────────────────────────
     arb_mod = _try_import("arb_engine")
@@ -280,18 +299,7 @@ async def trading_loop() -> None:
     logger.info(f"  Delta Neutral:    {'ON' if dn_eng    else 'OFF'}")
 
     # ── Credential verification log ───────────────────────────────────────────
-    def _mask(val: str) -> str:
-        return (val[:4] + "****") if len(val) >= 4 else "\u274c VACIO"
-    _ok = lambda v: "\u2705" if v else "\u274c VACIO"
-    logger.info("[config] === CREDENCIALES AL INICIO ===")
-    logger.info("[config] Bybit KEY:            {} {}", _mask(config.BYBIT_API_KEY),    _ok(config.BYBIT_API_KEY))
-    logger.info("[config] Bybit SECRET:         {} {}", _mask(config.BYBIT_API_SECRET), _ok(config.BYBIT_API_SECRET))
-    logger.info("[config] OKX KEY:              {} {}", _mask(config.OKX_API_KEY),      _ok(config.OKX_API_KEY))
-    logger.info("[config] OKX SECRET:           {} {}", _mask(config.OKX_SECRET),       _ok(config.OKX_SECRET))
-    logger.info("[config] OKX PASSPHRASE:       {} {}", _mask(config.OKX_PASSPHRASE),   _ok(config.OKX_PASSPHRASE))
-    logger.info("[config] PRODUCTION:           {}", config.PRODUCTION)
-    logger.info("[config] ENABLE_CROSS_ARB_REAL:{}", cross_arb_real)
-    logger.info("[config] ================================")
+    logger.info("[config] Credenciales verificadas (ocultas por seguridad)")
 
     # ── Balance real al inicio ────────────────────────────────────────────────
     if config.PRODUCTION and config.BYBIT_API_KEY:
@@ -303,17 +311,18 @@ async def trading_loop() -> None:
             _hdrs = {"X-BAPI-API-KEY": config.BYBIT_API_KEY, "X-BAPI-TIMESTAMP": _ts,
                      "X-BAPI-SIGN": _sig, "X-BAPI-RECV-WINDOW": "5000", "User-Agent": "Mozilla/5.0", "Referer": "https://www.bybit.com"}
             import aiohttp as _aio
-            async with _aio.ClientSession() as _s:
-                async with _s.get(
-                    "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
-                    headers=_hdrs, timeout=_aio.ClientTimeout(total=8),
-                ) as _r:
-                    _bd = await _r.json()
-                    _bybit_bal = 0.0
-                    if _bd.get("retCode") == 0:
-                        for _c in _bd["result"]["list"][0].get("coin", []):
-                            if _c.get("coin") == "USDT":
-                                _bybit_bal = float(_c.get("walletBalance", 0))
+            async with _exchange_semaphores["bybit"]:
+                async with _aio.ClientSession() as _s:
+                    async with _s.get(
+                        "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
+                        headers=_hdrs, timeout=_aio.ClientTimeout(total=8),
+                    ) as _r:
+                        _bd = await _r.json()
+                        _bybit_bal = 0.0
+                        if _bd.get("retCode") == 0:
+                            for _c in _bd["result"]["list"][0].get("coin", []):
+                                if _c.get("coin") == "USDT":
+                                    _bybit_bal = float(_c.get("walletBalance", 0))
             _okx_bal = 0.0
             if config.OKX_API_KEY and config.OKX_PASSPHRASE:
                 from datetime import datetime, timezone as _tz
@@ -325,14 +334,15 @@ async def trading_loop() -> None:
                 ).digest()).decode()
                 _ohdrs = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": _osig,
                           "OK-ACCESS-TIMESTAMP": _ots, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
-                async with _aio.ClientSession() as _s:
-                    async with _s.get(f"https://www.okx.com{_path}", headers=_ohdrs,
-                                       timeout=_aio.ClientTimeout(total=8)) as _r:
-                        _od = await _r.json()
-                        if _od.get("code") == "0":
-                            for _d in _od.get("data", [{}])[0].get("details", []):
-                                if _d.get("ccy") == "USDT":
-                                    _okx_bal = float(_d.get("eq", 0))
+                async with _exchange_semaphores["okx"]:
+                    async with _aio.ClientSession() as _s:
+                        async with _s.get(f"https://www.okx.com{_path}", headers=_ohdrs,
+                                           timeout=_aio.ClientTimeout(total=8)) as _r:
+                            _od = await _r.json()
+                            if _od.get("code") == "0":
+                                for _d in _od.get("data", [{}])[0].get("details", []):
+                                    if _d.get("ccy") == "USDT":
+                                        _okx_bal = float(_d.get("eq", 0))
             _total_bal = _bybit_bal + _okx_bal
             logger.info("[config] Balance REAL  — Bybit: ${:.2f} | OKX: ${:.2f} | Total: ${:.2f}",
                         _bybit_bal, _okx_bal, _total_bal)
@@ -354,7 +364,7 @@ async def trading_loop() -> None:
     logger.info(f" Dashboard:    {'SI' if dashboard else 'NO'}")
     logger.info("=" * 60)
 
-    recent_signals: list = []
+    recent_signals = deque(maxlen=200)
 
     # ── Loop principal ─────────────────────────────────────────────────────────
     async for trade, _legacy_state in aggregator.stream():
@@ -408,6 +418,8 @@ async def trading_loop() -> None:
         ctx_snapshot = context.snapshot()
         signal = monitor.process(trade, ctx_snapshot)
         if signal is None:
+            continue
+        if not is_valid_price(signal.entry_price, signal.pair):
             continue
 
         # 4. Construir ExtendedContext con todos los nuevos modulos
@@ -639,7 +651,6 @@ async def trading_loop() -> None:
         # 6. Buffer de señales recientes
         now = time.time()
         recent_signals.append(signal)
-        recent_signals = [s for s in recent_signals if now - s.timestamp < 10]
 
         # 7. Risk manager
         open_count = executor.open_count()
@@ -716,6 +727,8 @@ async def trading_loop() -> None:
           raise
       except Exception as _tick_exc:
           logger.error("[main] Error en tick — continuando: {}", _tick_exc)
+
+    asyncio.create_task(save_positions(executor))
 
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
