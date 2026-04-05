@@ -149,6 +149,7 @@ async def trading_loop() -> None:
     btc_dom_mod  = _try_import("btc_dominance")
     liq_glob_mod = _try_import("liquidations_global")
     dxy_mod      = _try_import("dxy_monitor")
+    daily_rep_mod = _try_import("daily_report")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -161,9 +162,10 @@ async def trading_loop() -> None:
     macro_agent   = macro_mod.MacroAgent()              if macro_mod       else None
     regime_det    = regime_mod.MarketRegimeDetector()   if regime_mod      else None
     deribit_eng   = deribit_mod.DeribitOptionsEngine()  if deribit_mod     else None
-    btc_dom   = btc_dom_mod.BtcDominanceMonitor()        if btc_dom_mod  else None
-    liq_glob  = liq_glob_mod.LiquidationsGlobal()        if liq_glob_mod else None
-    dxy_mon   = dxy_mod.DxyMonitor()                     if dxy_mod      else None
+    btc_dom    = btc_dom_mod.BtcDominanceMonitor()       if btc_dom_mod   else None
+    liq_glob   = liq_glob_mod.LiquidationsGlobal()       if liq_glob_mod  else None
+    dxy_mon    = dxy_mod.DxyMonitor()                    if dxy_mod       else None
+    daily_rep  = daily_rep_mod.DailyReporter()           if daily_rep_mod else None
     session_vol   = session_vol_mod.SessionVolumeTracker() if session_vol_mod else None
     ml_model      = ml_mod.MLModel()                   if ml_mod          else None
 
@@ -210,11 +212,13 @@ async def trading_loop() -> None:
     if deribit_eng:
         asyncio.create_task(deribit_eng.run(), name="deribit_options")
     if btc_dom:
-        asyncio.create_task(btc_dom.run(),   name="btc_dominance")
+        asyncio.create_task(btc_dom.run(),    name="btc_dominance")
     if liq_glob:
-        asyncio.create_task(liq_glob.run(),  name="liq_global")
+        asyncio.create_task(liq_glob.run(),   name="liq_global")
     if dxy_mon:
-        asyncio.create_task(dxy_mon.run(),   name="dxy_monitor")
+        asyncio.create_task(dxy_mon.run(),    name="dxy_monitor")
+    if daily_rep:
+        asyncio.create_task(daily_rep.run(),  name="daily_report")
 
     _ready = True
 
@@ -593,6 +597,18 @@ async def trading_loop() -> None:
             allocation=allocation,
             all_scores=monitor.get_all_scores(),
         ))
+
+        # 11. Notificacion Telegram por trade Wyckoff real
+        if allocation.trades:
+            first = allocation.trades[0]
+            asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                "pair":     signal.pair,
+                "score":    new_score,
+                "entry":    first.entry_price,
+                "sl":       first.stop_loss,
+                "tp":       first.take_profit,
+                "size_usd": first.size_usd,
+            }))
 
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
