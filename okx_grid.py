@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-okx_grid.py — Grid Trading solo OKX (modo temporal)
+okx_grid.py — Grid Trading OKX (estrategia principal)
 
-Estrategia de grid en OKX mientras Railway IPs están bloqueadas por Bybit.
-Usa OKX REST API que NO está afectada por el bloqueo.
+OKX SPOT tiene mínimo $1/orden — ideal para capital < $200.
+Bybit SPOT mínimos: ETH=$103, SOL=$40, BTC=$67 — incompatibles con capital actual.
+Cross-Arb Bybit desactivado hasta acumular >= $200 en Bybit.
 
 Pares activos: ETH/USDT, SOL/USDT
 Capital: ETH $25, SOL $20 desde balance OKX
-Exchange: OKX SPOT — mínimo $1/orden (vs Bybit mínimo $5-$67)
+Exchange: OKX SPOT — mínimo $1/orden
 """
 from __future__ import annotations
 

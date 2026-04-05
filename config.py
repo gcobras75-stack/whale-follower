@@ -86,6 +86,7 @@ CROSS_ARB_MAX_SIZE:        float = float(os.getenv("CROSS_ARB_MAX_SIZE",        
 BYBIT_ORDER_ENDPOINT:      str   = os.getenv("BYBIT_ORDER_ENDPOINT", "")
 CROSS_ARB_MIN_SPREAD_PCT:  float = float(os.getenv("CROSS_ARB_MIN_SPREAD_PCT",  "0.08"))
 CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", "10"))
+BYBIT_MIN_FOR_CROSS_ARB:  float = float(os.getenv("BYBIT_MIN_FOR_CROSS_ARB",  "200"))  # Bybit spot mínimos: ETH=$103, SOL=$40, BTC=$67
 
 # ── Modo OKX-only (Bybit bloqueado por Railway IPs) ───────────────────────────
 BYBIT_ORDERS_BLOCKED: bool = os.getenv("BYBIT_ORDERS_BLOCKED", "false").lower() == "true"

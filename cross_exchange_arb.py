@@ -292,7 +292,7 @@ class CrossExchangeArb:
     # ── Balance check ────────────────────────────────────────────────────────
 
     async def _check_balances(self) -> bool:
-        """Verify OKX has enough balance. Cache for 60s."""
+        """Verify OKX has enough balance and Bybit meets minimum for cross-arb. Cache for 60s."""
         now = time.time()
         if now - self._last_balance_check < 60:
             return self._balance_ok
@@ -304,17 +304,39 @@ class CrossExchangeArb:
 
         okx_bal = await self._okx_exec.get_balance()
         if okx_bal < _MIN_BALANCE_USD:
-            if self._balance_ok:  # only log on state change
+            if self._balance_ok:
                 logger.warning(
                     "[cross_arb] OKX balance ${:.2f} < min ${:.0f} — PAUSING arb",
                     okx_bal, _MIN_BALANCE_USD,
                 )
             self._balance_ok = False
-        else:
-            if not self._balance_ok:
-                logger.info("[cross_arb] OKX balance OK ${:.2f} — RESUMING arb", okx_bal)
-            self._balance_ok = True
+            return False
 
+        # ── Gate Bybit: mínimos spot ETH=$103, SOL=$40, BTC=$67 ─────────────
+        # Cross-arb requiere Bybit >= $200 para cubrir órdenes mínimas reales
+        min_bybit = config.BYBIT_MIN_FOR_CROSS_ARB
+        if self._bybit_ready and min_bybit > 0:
+            try:
+                from bybit_utils import get_bybit_coin_balance
+                bybit_usdt = await get_bybit_coin_balance("USDT", caller="cross_arb")
+                if bybit_usdt < min_bybit:
+                    if self._balance_ok:
+                        logger.warning(
+                            "[cross_arb] ⚠️ Bybit USDT=${:.2f} < ${:.0f} mín "
+                            "(spot ETH=$103/SOL=$40/BTC=$67 imposibles) "
+                            "— cross-arb en PAPEL hasta >= ${:.0f}",
+                            bybit_usdt, min_bybit, min_bybit,
+                        )
+                    self._balance_ok = False
+                    return False
+                logger.info("[cross_arb] Bybit USDT=${:.2f} ✅ OKX=${:.2f} ✅ — arb OK",
+                            bybit_usdt, okx_bal)
+            except Exception as exc:
+                logger.warning("[cross_arb] No se pudo verificar balance Bybit: {}", exc)
+
+        if not self._balance_ok:
+            logger.info("[cross_arb] OKX balance OK ${:.2f} — RESUMING arb", okx_bal)
+        self._balance_ok = True
         return self._balance_ok
 
     # ── Real execution (dinero real) ──────────────────────────────────────────
