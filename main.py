@@ -146,6 +146,9 @@ async def trading_loop() -> None:
     regime_mod      = _try_import("market_regime")
     range_mod       = _try_import("range_trader")
     deribit_mod     = _try_import("deribit_options")
+    btc_dom_mod  = _try_import("btc_dominance")
+    liq_glob_mod = _try_import("liquidations_global")
+    dxy_mod      = _try_import("dxy_monitor")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -158,6 +161,9 @@ async def trading_loop() -> None:
     macro_agent   = macro_mod.MacroAgent()              if macro_mod       else None
     regime_det    = regime_mod.MarketRegimeDetector()   if regime_mod      else None
     deribit_eng   = deribit_mod.DeribitOptionsEngine()  if deribit_mod     else None
+    btc_dom   = btc_dom_mod.BtcDominanceMonitor()        if btc_dom_mod  else None
+    liq_glob  = liq_glob_mod.LiquidationsGlobal()        if liq_glob_mod else None
+    dxy_mon   = dxy_mod.DxyMonitor()                     if dxy_mod      else None
     session_vol   = session_vol_mod.SessionVolumeTracker() if session_vol_mod else None
     ml_model      = ml_mod.MLModel()                   if ml_mod          else None
 
@@ -203,6 +209,12 @@ async def trading_loop() -> None:
         asyncio.create_task(macro_agent.run(), name="macro_agent")
     if deribit_eng:
         asyncio.create_task(deribit_eng.run(), name="deribit_options")
+    if btc_dom:
+        asyncio.create_task(btc_dom.run(),   name="btc_dominance")
+    if liq_glob:
+        asyncio.create_task(liq_glob.run(),  name="liq_global")
+    if dxy_mon:
+        asyncio.create_task(dxy_mon.run(),   name="dxy_monitor")
 
     _ready = True
 
@@ -227,7 +239,9 @@ async def trading_loop() -> None:
         macro_agent is not None,  regime_det is not None,
         range_trader is not None, deribit_eng is not None,
     ])
-    logger.info(f" Arbitraje:  {'ACTIVO (4 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
+    thermo_active = sum([btc_dom is not None, liq_glob is not None, dxy_mon is not None])
+    logger.info(f" Termometros: {thermo_active}/3 activos (dom/liq/dxy)")
+    logger.info(f" Arbitraje:  {'ACTIVO (5 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
     strats_active = sum([mean_rev is not None, grid_eng is not None,
                          ofi_eng is not None, mom_eng is not None, dn_eng is not None])
     logger.info(f" Estrategias avanzadas: {strats_active}/5 activas")
@@ -391,6 +405,28 @@ async def trading_loop() -> None:
                 logger.info(
                     f"[main] {signal.pair} macro adj={macro_adj:+d} → score={new_score}"
                 )
+
+        # 5d. Termometros de mercado
+        if btc_dom:
+            dom_adj = btc_dom.adjustment(signal.pair)
+            if dom_adj != 0:
+                new_score = max(0, new_score + dom_adj)
+                logger.info(f"[main] {signal.pair} btc_dom adj={dom_adj:+d} → score={new_score}")
+
+        if liq_glob:
+            if liq_glob.is_long_blocked():
+                logger.warning(f"[main] {signal.pair} BLOQUEADO por liq_global: liq LONG masivas")
+                continue
+            liq_adj = liq_glob.adjustment()
+            if liq_adj != 0:
+                new_score = max(0, new_score + liq_adj)
+                logger.info(f"[main] {signal.pair} liq_glob adj={liq_adj:+d} → score={new_score}")
+
+        if dxy_mon:
+            dxy_adj = dxy_mon.adjustment()
+            if dxy_adj != 0:
+                new_score = max(0, new_score + dxy_adj)
+                logger.info(f"[main] {signal.pair} dxy adj={dxy_adj:+d} → score={new_score}")
 
         # 5c. Aplicar ML (ultimo filtro)
         if ml_model:

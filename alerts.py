@@ -38,6 +38,18 @@ _stats: Dict[str, Any] = {
     "bitso_spread_count":  0,
 }
 
+# ── Termometros de mercado (actualizados por los monitores) ───────────────
+_thermometers: Dict[str, Any] = {
+    "btc_dom_pct":    0.0,
+    "btc_dom_signal": "?",
+    "liq_long_m":     0.0,
+    "liq_short_m":    0.0,
+    "liq_signal":     "?",
+    "dxy_value":      0.0,
+    "dxy_change_pct": 0.0,
+    "dxy_signal":     "?",
+}
+
 # ── Stats public API ──────────────────────────────────────────────────
 
 def record_grid_cycle(pnl: float = 0.0) -> None:
@@ -53,6 +65,10 @@ def record_arb_executed(pnl: float = 0.0) -> None:
     """Llamar desde triangular_arb._execute_real() cuando ejecuta en real."""
     _stats["arb_executed"] += 1
     _stats["arb_pnl"]      += pnl
+
+def update_thermometers(**kwargs: Any) -> None:
+    """Llamar desde btc_dominance, liquidations_global y dxy_monitor al actualizar."""
+    _thermometers.update(kwargs)
 
 def record_bitso_opportunity(spread_pct: float = 0.0) -> None:
     """Llamar desde bitso_arb._check_vs() cuando detecta spread >= umbral."""
@@ -432,6 +448,18 @@ async def _cmd_stats() -> None:
     b_count = _stats["bitso_spread_count"]
     b_avg   = (_stats["bitso_spread_sum"] / b_count) if b_count > 0 else 0.0
 
+    # Termometros
+    t = _thermometers
+    dom_line = f"{t['btc_dom_pct']:.1f}% ({t['btc_dom_signal']})"
+    liq_line = (f"LONG=${t['liq_long_m']:.1f}M  SHORT=${t['liq_short_m']:.1f}M"
+                f" ({t['liq_signal']})")
+    dxy_sign = "+" if t['dxy_change_pct'] >= 0 else ""
+    dxy_line = (f"{t['dxy_value']:.2f} ({dxy_sign}{t['dxy_change_pct']:.2f}%"
+                f" {t['dxy_signal']})")
+
+    # Bitso spread prima
+    bitso_prima = f"{b_avg:+.2f}%" if b_opps > 0 else "sin datos"
+
     await _reply(
         f"Estadisticas\n"
         f"------------\n"
@@ -440,13 +468,18 @@ async def _cmd_stats() -> None:
         f"Oportunidades Arb:    {_stats['arb_opportunities']}\n"
         f"Arb ejecutados:       {_stats['arb_executed']}\n"
         f"Oportunidades Bitso:  {b_opps}\n"
-        f"Spread prom Bitso:    {b_avg:.2f}%\n"
+        f"Prima Bitso:          {bitso_prima}\n"
         f"PnL Grid:             ${_stats['grid_pnl']:+.4f}\n"
         f"PnL Arb real:         ${_stats['arb_pnl']:+.4f}\n"
         f"PnL Total sesion:     ${total_pnl:+.4f}\n"
         f"Capital Bybit:        ~${cap_bybit:.0f}\n"
         f"Capital OKX:          ~${cap_okx:.0f}\n"
-        f"Uptime:               {h}h {m}m\n"
+        f"\nTermometros de mercado\n"
+        f"----------------------\n"
+        f"BTC Dominancia:       {dom_line}\n"
+        f"Liquidaciones 1h:     {liq_line}\n"
+        f"DXY:                  {dxy_line}\n"
+        f"\nUptime:               {h}h {m}m\n"
     )
 
 
