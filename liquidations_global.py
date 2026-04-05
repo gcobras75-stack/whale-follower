@@ -17,6 +17,7 @@ Logica:
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -185,13 +186,14 @@ class LiquidationsGlobal:
                 ll / 1e6, ls / 1e6,
             )
 
-        try:
-            import alerts as _alerts
-            snap = self.snapshot()
-            _alerts.update_thermometers(
-                liq_long_m  = snap.liq_long_m,
-                liq_short_m = snap.liq_short_m,
-                liq_signal  = self._signal,
-            )
-        except Exception:
-            pass
+        _almod = sys.modules.get("alerts")
+        if _almod is not None:
+            try:
+                snap = self.snapshot()
+                _almod.update_thermometers(
+                    liq_long_m  = snap.liq_long_m,
+                    liq_short_m = snap.liq_short_m,
+                    liq_signal  = self._signal,
+                )
+            except Exception as exc:
+                logger.warning("[liq_global] update_thermometers error: {}", exc)

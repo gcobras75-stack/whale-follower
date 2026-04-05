@@ -12,6 +12,7 @@ Logica:
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from collections import deque
 
@@ -20,10 +21,15 @@ from loguru import logger
 
 _URL       = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=5m&range=1d"
 _URL_ALT   = "https://query2.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=5m&range=1d"
+_URL_STOOQ = "https://stooq.com/q/l/?s=dxy&f=sd2t2ohlcv&h&e=csv"
 _POLL_SECS = 600     # 10 minutos
 _MOVE_UP   = 0.30    # DXY +0.3% en 1h = dolar fuerte
 _MOVE_DOWN = -0.30   # DXY -0.3% en 1h = dolar debil
-_HEADERS   = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+_HEADERS   = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/html,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class DxyMonitor:
@@ -80,14 +86,44 @@ class DxyMonitor:
                 async with aiohttp.ClientSession(headers=_HEADERS) as s:
                     async with s.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
+                            data = await resp.json(content_type=None)
                             self._parse(data)
                             return
-                        logger.warning("[dxy] HTTP {} en {}", resp.status, url)
+                        logger.warning("[dxy] Yahoo HTTP {} — probando Stooq", resp.status)
             except Exception as exc:
-                logger.warning("[dxy] Fetch error ({}): {} — probando alternativa", url, exc)
+                logger.warning("[dxy] Yahoo error ({}): {} — probando Stooq", url, exc)
 
-        logger.warning("[dxy] Ambas URLs fallaron — reintento en {}s", _POLL_SECS)
+        await self._fetch_stooq()
+
+    async def _fetch_stooq(self) -> None:
+        """Fallback: Stooq CSV — retorna precio actual sin necesidad de auth."""
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(_URL_STOOQ, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        logger.warning("[dxy] Stooq HTTP {}", resp.status)
+                        return
+                    text = await resp.text()
+                    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+                    if len(lines) < 2:
+                        logger.warning("[dxy] Stooq CSV vacio")
+                        return
+                    parts = lines[1].split(",")  # Symbol,Date,Time,Open,High,Low,Close,Volume
+                    if len(parts) < 7:
+                        logger.warning("[dxy] Stooq CSV formato inesperado: {}", lines[1])
+                        return
+                    close_val = float(parts[6])
+                    if close_val <= 0:
+                        return
+                    prev = self._value if self._value > 0 else close_val
+                    self._value    = close_val
+                    self._updated  = time.time()
+                    self._change_1h = (close_val - prev) / prev * 100 if prev > 0 else 0.0
+                    self._history.append((self._updated, self._value))
+                    self._classify()
+                    logger.info("[dxy] Stooq OK → DXY={:.2f}", close_val)
+        except Exception as exc:
+            logger.warning("[dxy] Stooq error: {}", exc)
 
     def _parse(self, data: dict) -> None:
         try:
@@ -137,12 +173,13 @@ class DxyMonitor:
                 v, ch,
             )
 
-        try:
-            import alerts as _alerts
-            _alerts.update_thermometers(
-                dxy_value      = round(v, 2),
-                dxy_change_pct = round(ch, 3),
-                dxy_signal     = self._signal,
-            )
-        except Exception:
-            pass
+        _almod = sys.modules.get("alerts")
+        if _almod is not None:
+            try:
+                _almod.update_thermometers(
+                    dxy_value      = round(v, 2),
+                    dxy_change_pct = round(ch, 3),
+                    dxy_signal     = self._signal,
+                )
+            except Exception as exc:
+                logger.warning("[dxy] update_thermometers error: {}", exc)

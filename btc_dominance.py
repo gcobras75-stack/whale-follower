@@ -12,6 +12,7 @@ Ajuste de score:
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 
 import aiohttp
@@ -121,11 +122,12 @@ class BtcDominanceMonitor:
             )
 
         # Notificar a alerts para /stats
-        try:
-            import alerts as _alerts
-            _alerts.update_thermometers(
-                btc_dom_pct=round(d, 2),
-                btc_dom_signal=self._signal,
-            )
-        except Exception:
-            pass
+        _almod = sys.modules.get("alerts")
+        if _almod is not None:
+            try:
+                _almod.update_thermometers(
+                    btc_dom_pct=round(d, 2),
+                    btc_dom_signal=self._signal,
+                )
+            except Exception as exc:
+                logger.warning("[btc_dom] update_thermometers error: {}", exc)

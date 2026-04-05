@@ -399,11 +399,12 @@ class TriangularArb:
             short_name, bybit_price, okx_price, spread, buy_ex, sell_ex,
         )
 
-        try:
-            import alerts as _alerts
-            _alerts.record_arb_opportunity()
-        except Exception:
-            pass
+        _almod = sys.modules.get("alerts")
+        if _almod is not None:
+            try:
+                _almod.record_arb_opportunity()
+            except Exception as exc:
+                logger.warning("[cross_arb] record_arb_opportunity error: {}", exc)
 
         trade = TriArbTrade(
             trade_id      = str(uuid.uuid4()),
@@ -498,10 +499,11 @@ class TriangularArb:
                 )
                 trade.production = True
                 self._exec_by_pair[pair] = self._exec_by_pair.get(pair, 0) + 1
-                try:
-                    import alerts as _alerts
-                    _alerts.record_arb_executed(trade.net_pnl)
-                    asyncio.create_task(_alerts.send_trade_alert("cross_arb", {
+                _almod2 = sys.modules.get("alerts")
+                if _almod2 is not None:
+                  try:
+                    _almod2.record_arb_executed(trade.net_pnl)
+                    asyncio.create_task(_almod2.send_trade_alert("cross_arb", {
                         "pair":       pair,
                         "route":      trade.route,
                         "buy_ex":     buy_ex,
@@ -511,8 +513,8 @@ class TriangularArb:
                         "net_pnl":    trade.net_pnl,
                         "size_usd":   size_usd,
                     }))
-                except Exception:
-                    pass
+                  except Exception as exc:
+                    logger.warning("[cross_arb] record_arb_executed error: {}", exc)
             else:
                 bybit_err = bybit_result if not bybit_ok else "OK"
                 okx_err   = okx_result   if okx_result is not True else "OK"
