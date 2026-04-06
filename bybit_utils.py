@@ -36,7 +36,7 @@ _ORDER_ENDPOINTS = [
 # Caché del endpoint que funcionó — None = aún no descubierto
 _working_order_endpoint: Optional[str] = None
 
-# WebSocket endpoints privados (órdenes — evita bloqueo IP Railway en REST)
+# WebSocket endpoints privados (órdenes — intenta WS primero, REST como fallback)
 _WS_PRIVATE_ENDPOINTS = [
     "wss://stream.bybit.com/v5/private",
     "wss://stream.bytick.com/v5/private",
@@ -164,7 +164,7 @@ async def _place_order_via_ws(
 ) -> dict:
     """
     Coloca una orden de mercado spot en Bybit via WebSocket privado.
-    Evita el bloqueo de IPs Railway que afecta al REST API.
+    Usa WebSocket para mayor confiabilidad vs REST.
     Autenticación: op='auth' con HMAC-SHA256 de 'GET/realtime{expires}'.
     Orden: op='order.create' con reqId único para correlacionar respuesta.
     Retorna respuesta normalizada (igual que REST: usa clave 'result').
@@ -323,7 +323,7 @@ async def place_spot_order(
     """
     Coloca una orden de mercado spot en Bybit.
     Orden de intentos:
-      1. WebSocket privado (evita bloqueo IP de Railway en REST)
+      1. WebSocket privado (más confiable que REST)
       2. REST multi-endpoint como fallback
     """
     import json

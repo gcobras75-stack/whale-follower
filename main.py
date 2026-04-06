@@ -22,7 +22,7 @@ from aiohttp import web
 from loguru import logger
 
 # ── KILL SWITCH DE EMERGENCIA ─────────────────────────────────────────────────
-# Pon STOP_BOT=1 en Railway → Variables para detener el bot sin borrar el servicio
+# Pon STOP_BOT=1 en .env del VPS para detener el bot sin matar el proceso
 if os.getenv("STOP_BOT", "0") == "1":
     print("[STOP_BOT] Bot detenido por variable de entorno STOP_BOT=1", flush=True)
     sys.exit(0)
@@ -137,7 +137,7 @@ async def trading_loop() -> None:
         logger.error(f"[main] Import error: {exc}")
         return
 
-    # ── Arbitraje COMPLETAMENTE DESHABILITADO — Bybit bloqueado en Railway ──────
+    # ── Arbitraje DESHABILITADO — ENABLE_CROSS_ARB=false / ENABLE_TRI_ARB=false ──
     prod           = config.PRODUCTION       # requerido por estrategias OKX
     arb_engine     = None
     _arb_ref       = None
@@ -292,7 +292,7 @@ async def trading_loop() -> None:
     ])
     thermo_active = sum([btc_dom is not None, liq_glob is not None, dxy_mon is not None])
     logger.info(f" Termometros: {thermo_active}/3 activos (dom/liq/dxy)")
-    logger.info(" Arbitraje:  DESHABILITADO (Bybit bloqueado en Railway — solo OKX)")
+    logger.info(" Arbitraje:  DESHABILITADO (ENABLE_CROSS_ARB=false — solo OKX Grid activo)")
     strats_active = sum([mean_rev is not None, grid_eng is not None,
                          ofi_eng is not None, mom_eng is not None, dn_eng is not None])
     logger.info(f" Estrategias avanzadas: {strats_active}/5 activas")
@@ -305,7 +305,7 @@ async def trading_loop() -> None:
     # ── Credential verification log ───────────────────────────────────────────
     logger.info("[config] Credenciales verificadas (ocultas por seguridad)")
 
-    # ── Balance real al inicio (solo OKX — Bybit bloqueado en Railway) ─────────
+    # ── Balance real OKX al inicio ────────────────────────────────────────────
     if config.PRODUCTION and config.OKX_API_KEY and config.OKX_PASSPHRASE:
         try:
             import hmac as _hmac, hashlib as _hashlib
@@ -756,7 +756,7 @@ async def _log_server_ip() -> None:
         f"🚀 Whale Follower Bot iniciado\n"
         f"🌍 IP: {ip} Singapore ✅\n"
         f"🔧 Modo: {'REAL' if prod else 'PAPEL'}\n"
-        f"📊 Estrategias: Cross-Arb + Grid Bybit + Grid OKX + Wyckoff"
+        f"📊 Estrategias: Grid OKX (ETH/SOL) + Wyckoff Spring + Termómetros"
     )
     try:
         async with _aiohttp.ClientSession() as s:

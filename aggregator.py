@@ -1,7 +1,7 @@
 """
 aggregator.py — Whale Follower Bot
 Simultaneous WebSocket connections to Kraken, Bybit, OKX.
-Kraken reemplaza Binance (geo-bloqueado en Railway, HTTP 451).
+Kraken reemplaza Binance (geo-bloqueado en México/VPS, HTTP 451).
 Normalizes trades, computes CVD + CVD velocity, detects stop cascades.
 """
 from __future__ import annotations
@@ -126,7 +126,7 @@ class Aggregator:
 
     def _launch_exchange_tasks(self) -> List[asyncio.Task]:
         tasks = []
-        # Binance geo-bloquea Railway (HTTP 451) — reemplazado por Kraken
+        # Binance geo-bloqueado en México/VPS — reemplazado por Kraken
         if config.ENABLE_KRAKEN:
             tasks.append(asyncio.create_task(
                 self._connect_with_backoff("kraken", self._kraken_handler),

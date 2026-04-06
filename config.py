@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID: str   = os.environ["TELEGRAM_CHAT_ID"]
 SUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str = os.environ["SUPABASE_KEY"]
 
-# ── Railway / HTTP ────────────────────────────────────────────────────────────
+# ── HTTP Server (VPS Contabo Singapore, puerto 8080) ─────────────────────────
 PORT: int = int(os.getenv("PORT", "8080"))
 
 # ── Trading parameters ────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ SIGNAL_SCORE_THRESHOLD:  int   = int(os.getenv("SIGNAL_SCORE_THRESHOLD", "65")) 
 HIGH_CONFIDENCE_SCORE:   int   = int(os.getenv("HIGH_CONFIDENCE_SCORE",  "80"))
 
 # ── Exchange enable flags ─────────────────────────────────────────────────────
-# Binance geo-bloquea Railway (HTTP 451) — usar Kraken como tercera fuente
+# Binance geo-bloqueado en México/VPS — usar Kraken como tercera fuente
 ENABLE_KRAKEN:  bool = os.getenv("ENABLE_KRAKEN",  "true").lower() == "true"
 ENABLE_BYBIT:   bool = os.getenv("ENABLE_BYBIT",   "true").lower() == "true"
 ENABLE_OKX:     bool = os.getenv("ENABLE_OKX",     "true").lower() == "true"
@@ -80,7 +80,7 @@ LEVERAGE_WARMUP_SAMPLES: int   = int(os.getenv("LEVERAGE_WARMUP_SAMPLES", "20"))
 OKX_API_KEY:       str  = os.getenv("OKX_API_KEY",       "")
 OKX_SECRET:        str  = os.getenv("OKX_SECRET",        "")
 OKX_PASSPHRASE:    str  = os.getenv("OKX_PASSPHRASE",    "")
-ENABLE_CROSS_ARB_REAL: bool = False  # deshabilitado — Railway bloqueado por Bybit
+ENABLE_CROSS_ARB_REAL: bool = False  # deshabilitado — ver ENABLE_CROSS_ARB env var
 ENABLE_LEAD_LAG_ARB:  bool = False  # deshabilitado — requiere Bybit
 CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    "50"))
 CROSS_ARB_MAX_SIZE:        float = float(os.getenv("CROSS_ARB_MAX_SIZE",        "25"))
@@ -89,7 +89,7 @@ CROSS_ARB_MIN_SPREAD_PCT:  float = float(os.getenv("CROSS_ARB_MIN_SPREAD_PCT",  
 CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", "10"))
 BYBIT_MIN_FOR_CROSS_ARB:  float = float(os.getenv("BYBIT_MIN_FOR_CROSS_ARB",  "200"))  # Bybit spot mínimos: ETH=$103, SOL=$40, BTC=$67
 
-# ── Modo OKX-only (Bybit bloqueado por Railway IPs) ───────────────────────────
+# ── Control Bybit / OKX ─────────────────────────────────────────────────────
 BYBIT_ORDERS_BLOCKED: bool = os.getenv("BYBIT_ORDERS_BLOCKED", "false").lower() == "true"
 ENABLE_OKX_GRID:      bool = os.getenv("ENABLE_OKX_GRID",      "true").lower()  == "true"
 
@@ -107,9 +107,9 @@ BACKOFF_BASE: float = 1.0
 BACKOFF_MAX:  float = 60.0
 
 # ── Kill switch de emergencia ─────────────────────────────────────────────────
-# Pon STOP_BOT=1 en Railway Variables para detener el bot sin borrar el servicio
+# Pon STOP_BOT=1 en .env del VPS para detener el bot sin matar el proceso
 STOP_BOT: bool = os.getenv("STOP_BOT", "0") == "1"
 
-# ── Control Bybit — bloqueado por Railway IPs (403) ─────────────────────────
-# NUNCA poner BYBIT_ORDERS_ENABLED=True mientras el bot corra en Railway
-BYBIT_ORDERS_ENABLED: bool = False  # hardcoded — inmune a env vars
+# ── Control adicional Bybit ──────────────────────────────────────────────────
+# BYBIT_ORDERS_ENABLED controla el executor Wyckoff Spring (grid usa config.BYBIT_ORDERS_BLOCKED)
+BYBIT_ORDERS_ENABLED: bool = False  # hardcoded — activar solo cuando Wyckoff Spring validado
