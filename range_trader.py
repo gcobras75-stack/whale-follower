@@ -35,14 +35,15 @@ except ImportError:
 
 
 # ── Parámetros ────────────────────────────────────────────────────────────────
-_RSI_OVERSOLD     = 32     # umbral entrada long
-_RSI_OVERBOUGHT   = 68     # umbral entrada short
-_BB_PERIOD        = 20
-_RSI_PERIOD       = 14
-_SAMPLE_INTERVAL  = 15.0   # segundos entre muestras (mismo que regime detector)
-_MAX_OPEN_TRADES  = 2      # máximo trades range abiertos simultáneos
-_MIN_BB_WIDTH_PCT = 0.005  # no operar si BB demasiado estrecho (sin rango)
-_TIMEOUT_SECS     = 900    # cierre forzado a los 15 min si no llega a TP/SL
+_RSI_OVERSOLD      = 25     # umbral entrada long (más estricto — verdadero oversold)
+_RSI_OVERBOUGHT    = 75     # umbral entrada short (más estricto — verdadero overbought)
+_BB_PERIOD         = 20
+_RSI_PERIOD        = 14
+_SAMPLE_INTERVAL   = 15.0   # segundos entre muestras (mismo que regime detector)
+_MAX_OPEN_TRADES   = 2      # máximo trades range abiertos simultáneos
+_MIN_BB_WIDTH_PCT  = 0.008  # no operar si BB demasiado estrecho (rango mínimo 0.8%)
+_TIMEOUT_SECS      = 900    # cierre forzado a los 15 min si no llega a TP/SL
+_LATERAL_MIN_STREAK = 5     # lecturas LATERAL consecutivas requeridas (~75s) antes de operar
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -83,6 +84,7 @@ class RangeTrader:
         self._last_sample: Dict[str, float] = {}
         self._open_trades: Dict[str, RangeTrade] = {}   # trade_id → trade
         self._cooldown: Dict[str, float] = {}            # pair → ts último trade
+        self._lateral_streak: Dict[str, int] = {}        # pair → lecturas LATERAL consecutivas
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -114,9 +116,20 @@ class RangeTrader:
         if len(closes) < _BB_PERIOD + _RSI_PERIOD:
             return
 
-        # Solo operar en régimen lateral
+        # Solo operar cuando régimen LATERAL confirmado y estable
         regime = self._regime.regime(pair)
-        if regime not in (Regime.LATERAL, Regime.UNKNOWN):
+        if regime == Regime.LATERAL:
+            self._lateral_streak[pair] = self._lateral_streak.get(pair, 0) + 1
+        else:
+            self._lateral_streak[pair] = 0  # resetear si salió del lateral
+
+        streak = self._lateral_streak.get(pair, 0)
+        if streak < _LATERAL_MIN_STREAK:
+            if streak > 0:
+                logger.debug(
+                    "[range] {} lateral streak {}/{} — esperando condiciones estables",
+                    pair, streak, _LATERAL_MIN_STREAK,
+                )
             return
 
         # Respetar cooldown (evitar entradas repetidas en el mismo nivel)
