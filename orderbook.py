@@ -159,7 +159,7 @@ class OrderBookEngine:
             for p in list(gone):
                 age = now - lts[side_key][p]
                 if age < _SPOOF_TTL_SECS:
-                    logger.info(
+                    logger.debug(
                         "[orderbook] SPOOFING detectado {} {} nivel {} desapareció en {:.2f}s",
                         pair, side_label, p, age,
                     )
