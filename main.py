@@ -185,6 +185,7 @@ async def trading_loop() -> None:
     dxy_mod        = _try_import("dxy_monitor")
     daily_rep_mod  = _try_import("daily_report")
     rebalancer_mod = _try_import("rebalancer")
+    strat_mgr_mod  = _try_import("strategy_manager")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -217,6 +218,15 @@ async def trading_loop() -> None:
 
     range_trader = (range_mod.RangeTrader(executor, regime_det, production=prod)
                     if range_mod and regime_det else None)
+
+    strat_mgr = (
+        strat_mgr_mod.StrategyManager(
+            regime_detector      = regime_det,
+            liq_monitor          = liq_glob,
+            delta_neutral_engine = dn_eng,
+            btc_dominance_monitor= btc_dom,
+        ) if strat_mgr_mod else None
+    )
 
     dashboard  = (dashboard_mod.DashboardReporter(executor)
                   if dashboard_mod else None)
@@ -266,6 +276,9 @@ async def trading_loop() -> None:
     if rebalancer:
         rebalancer.set_executor(executor)   # proteger coins con trades activos en dust cleanup
         asyncio.create_task(rebalancer.run(),  name="rebalancer")
+    if strat_mgr:
+        asyncio.create_task(strat_mgr.run(),   name="strategy_manager")
+        logger.info("[main] Strategy Manager iniciado ✅ (eval cada 60s)")
 
     _ready = True
 
@@ -376,7 +389,7 @@ async def trading_loop() -> None:
             grid_eng.on_price(trade.pair, trade.price)
         if okx_grid_eng:
             okx_grid_eng.on_price(trade.pair, trade.price)
-        if ofi_eng:
+        if ofi_eng and (not strat_mgr or strat_mgr_mod.is_active("ofi")):
             ofi_eng.on_trade_volume(trade.pair, trade.quantity)
             ofi_eng.on_price(trade.pair, trade.price)
             # OFI recibe order book completo multi-nivel para calculo preciso
@@ -394,7 +407,7 @@ async def trading_loop() -> None:
         # Regime detector + Range trader (operan en cada tick, sin spring)
         if regime_det:
             regime_det.on_price(trade.pair, trade.price)
-        if range_trader:
+        if range_trader and (not strat_mgr or strat_mgr_mod.is_active("range_trader")):
             await range_trader.on_price(trade.pair, trade.price)
 
 
@@ -601,7 +614,7 @@ async def trading_loop() -> None:
         #     arb_engine.on_btc_spring(signal.entry_price)
 
         # Mean Reversion: pasar datos de cascade al motor
-        if mean_rev:
+        if mean_rev and (not strat_mgr or strat_mgr_mod.is_active("mean_reversion")):
             cascade = signal.cascade_event
             ob_ratio_mr, _, _ = orderbook.imbalance(signal.pair) if orderbook else (0.5, False, 0)
             cvd_delta = signal.cvd_metrics.velocity_3s if hasattr(signal, "cvd_metrics") else 0.0
@@ -616,7 +629,7 @@ async def trading_loop() -> None:
             mean_rev.try_add_tramo(signal.pair, signal.entry_price, cvd_delta)
 
         # Momentum Scaling: pasar todas las metricas CVD + OB
-        if mom_eng and hasattr(signal, "cvd_metrics"):
+        if mom_eng and hasattr(signal, "cvd_metrics") and (not strat_mgr or strat_mgr_mod.is_active("momentum")):
             cv = signal.cvd_metrics
             ob_ratio_mom, _, _ = orderbook.imbalance(signal.pair) if orderbook else (0.5, False, 0)
             cvd_snap = cvd_combined.snapshot() if cvd_combined else None
