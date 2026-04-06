@@ -42,8 +42,13 @@ from loguru import logger
 
 import config
 
-# DESHABILITADO — Railway bloqueado por Bybit (403 en IPs de Railway)
-TRIANGULAR_ARB_ENABLED = False
+# ── CONTROL PRINCIPAL — poner ENABLE_TRI_ARB=false en Railway y .env del VPS ─────────
+# Default = false. Solo activa con ENABLE_TRI_ARB=true
+ENABLE_TRI_ARB: bool = os.getenv("ENABLE_TRI_ARB", "false").lower() == "true"
+TRIANGULAR_ARB_ENABLED = ENABLE_TRI_ARB  # alias para compatibilidad
+
+if not ENABLE_TRI_ARB:
+    logger.info("[tri_arb] DESHABILITADO — ENABLE_TRI_ARB=false. Sin órdenes triangulares.")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo (compartido)
@@ -129,6 +134,10 @@ class TriangularArb:
     """
 
     def __init__(self, production: bool = False) -> None:
+        if not ENABLE_TRI_ARB:
+            self._enabled = False
+            return
+        self._enabled = True
         self._production  = production
         self._prices:    TriPrice           = TriPrice()
         self._trades:    List[TriArbTrade]  = []
@@ -147,26 +156,31 @@ class TriangularArb:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def update_btc_usdt(self, price: float) -> None:
+        if not ENABLE_TRI_ARB: return
         self._prices.btc_usdt = price
         self._prices.ts_ms    = time.time() * 1000
         self._check_pair("BTCUSDT")
 
     def update_btc_usdt_okx(self, price: float) -> None:
+        if not ENABLE_TRI_ARB: return
         self._prices.btc_usdt_okx = price
         self._prices.ts_ms        = time.time() * 1000
         self._check_pair("BTCUSDT")
 
     def update_eth_usdt(self, price: float) -> None:
+        if not ENABLE_TRI_ARB: return
         self._prices.eth_usdt = price
         self._prices.ts_ms    = time.time() * 1000
         self._check_pair("ETHUSDT")
 
     def update_eth_usdt_okx(self, price: float) -> None:
+        if not ENABLE_TRI_ARB: return
         self._prices.eth_usdt_okx = price
         self._prices.ts_ms        = time.time() * 1000
         self._check_pair("ETHUSDT")
 
     def update_sol_usdt(self, price: float) -> None:
+        if not ENABLE_TRI_ARB: return
         self._prices.sol_usdt = price
         self._prices.ts_ms    = time.time() * 1000
         self._check_pair("SOLUSDT")
@@ -203,8 +217,7 @@ class TriangularArb:
 
     async def startup_check(self) -> None:
         """Verifica conectividad Bybit SPOT y OKX SPOT al inicio. Envia resultado a Telegram."""
-        if not TRIANGULAR_ARB_ENABLED:
-            logger.info("[cross_arb] startup_check DESHABILITADO (TRIANGULAR_ARB_ENABLED=False)")
+        if not ENABLE_TRI_ARB:
             return
         if not self._production:
             logger.info("[cross_arb] startup_check omitido (modo PAPEL)")
@@ -322,6 +335,7 @@ class TriangularArb:
 
     def _check_pair(self, pair: str) -> None:
         """Detecta y ejecuta arbitraje cross-exchange para cualquier par."""
+        if not ENABLE_TRI_ARB: return
         now = time.time()
         cfg = _PAIR_CONFIG.get(pair)
         if cfg is None:

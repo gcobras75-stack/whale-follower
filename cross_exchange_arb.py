@@ -47,14 +47,14 @@ _CB_MAX_ERRORS    = 3    # errores seguidos antes de circuit breaker
 _CB_PAUSE_SECS    = 300  # 5 min de pausa al activar CB
 MIN_ORDER_USD     = 10   # valor mínimo de orden en USD
 FORCE_OKX_ONLY    = True # True = usar solo OKX cuando Bybit sin saldo
-CROSS_ARB_ENABLED = False  # False = cross-arb deshabilitado (Railway bloqueado por Bybit)
-LEAD_LAG_ENABLED  = False  # False = lead-lag arb deshabilitado (requiere Bybit)
 
-# Variable de entorno adicional: set DISABLE_CROSS_ARB=1 en Railway para forzar apagado
-DISABLE_CROSS_ARB: bool = os.getenv("DISABLE_CROSS_ARB", "0") == "1" or not CROSS_ARB_ENABLED
+# ── CONTROL PRINCIPAL — poner ENABLE_CROSS_ARB=false en Railway y .env del VPS ──────
+# Default = false — inmune a cualquier otra variable.  Solo activa con ENABLE_CROSS_ARB=true
+ENABLE_CROSS_ARB: bool = os.getenv("ENABLE_CROSS_ARB", "false").lower() == "true"
+LEAD_LAG_ENABLED: bool = False   # requiere Bybit — siempre deshabilitado
 
-if DISABLE_CROSS_ARB:
-    logger.info("[cross_arb] COMPLETAMENTE DESHABILITADO (DISABLE_CROSS_ARB=True / CROSS_ARB_ENABLED=False)")
+if not ENABLE_CROSS_ARB:
+    logger.info("[cross_arb] DESHABILITADO — ENABLE_CROSS_ARB=false. Solo monitoreo pasivo.")
 
 
 @dataclass
@@ -98,7 +98,7 @@ class CrossExchangeArb:
     """
 
     def __init__(self, production: bool = False) -> None:
-        if DISABLE_CROSS_ARB:  # CROSS_ARB_ENABLED=False OR DISABLE_CROSS_ARB=1 en Railway
+        if not ENABLE_CROSS_ARB:
             self.enabled = False
             self.active  = False
             return
@@ -142,7 +142,7 @@ class CrossExchangeArb:
 
     def update_price(self, exchange: str, pair: str, price: float, ts_ms: float) -> None:
         """Actualizar precio desde el aggregator. Llamar con cada trade recibido."""
-        if DISABLE_CROSS_ARB or not getattr(self, "enabled", False):
+        if not ENABLE_CROSS_ARB or not getattr(self, "enabled", False):
             return
         if pair not in self._prices:
             return
@@ -204,7 +204,7 @@ class CrossExchangeArb:
         return spread
 
     def _check_arb(self, pair: str) -> None:
-        if DISABLE_CROSS_ARB or not getattr(self, "enabled", False):
+        if not ENABLE_CROSS_ARB or not getattr(self, "enabled", False):
             return
         # Arrancar loop de inventario en el primer _check_arb en producción
         if self._production and not self._inventory_started:
