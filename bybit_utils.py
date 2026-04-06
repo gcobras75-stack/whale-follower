@@ -337,7 +337,7 @@ async def place_spot_order(
     if price > 0:
         qty_usd = qty * price
         if qty_usd < _MIN_ORDER_USD:
-            qty = _MIN_ORDER_USD / price
+            qty = round(_MIN_ORDER_USD / price, 6)
             logger.info(
                 "[{}] Ajustando {} {} al mínimo ${:.0f}: qty={:.6f} (era ${:.2f})",
                 caller, symbol, side, _MIN_ORDER_USD, qty, qty_usd,
@@ -349,7 +349,7 @@ async def place_spot_order(
                 "[{}] Ajustando {} qty al mínimo: {:.6f} → {:.6f}",
                 caller, symbol, qty, min_qty,
             )
-            qty = min_qty
+            qty = round(min_qty, 6)
 
     # ── Cancelar si valor < $5 (absoluto — no enviar ni con ajuste) ────────────
     if price > 0 and qty * price < 5.0:

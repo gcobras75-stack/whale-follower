@@ -55,8 +55,8 @@ _GRID_CONFIG: Dict[str, dict] = {
         "bb_std":        2.0,
     },
     "ETHUSDT": {
-        "levels":        4,         # reducido para capital real ($25)
-        "capital_usd":   25.0,      # $25 total — $6.25 por nivel
+        "levels":        2,         # 2 niveles para capital real ($25 → $12.50/nivel > min Bybit)
+        "capital_usd":   25.0,      # $25 total — $12.50 por nivel
         "min_spacing":   0.010,
         "max_spacing":   0.020,
         "atr_mult":      2.0,
@@ -91,7 +91,7 @@ _MIN_QTY: Dict[str, float] = {
 # Minimo en USD por orden (derivado de _MIN_QTY * precio referencia)
 _MIN_ORDER_USD: Dict[str, float] = {
     "BTCUSDT": 5.0,    # 0.000048 BTC * $84k ~ $4  → redondeamos a $5
-    "ETHUSDT": 5.0,    # 0.005 ETH    * $1k  ~ $5
+    "ETHUSDT": 11.0,   # 0.005 ETH    * $2100 ~ $10.50 → redondeamos a $11
     "SOLUSDT": 67.0,   # 0.5 SOL      * $134 ~ $67
 }
 
