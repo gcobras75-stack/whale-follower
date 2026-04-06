@@ -38,6 +38,7 @@ STRATEGIES = [
 
 # ── Estado global — consultable desde cualquier módulo ───────────────────────
 _active: Dict[str, bool] = {s: True for s in STRATEGIES}
+_meta_override: bool = False  # True cuando meta_agent toma control
 
 
 def is_active(strategy: str) -> bool:
@@ -124,6 +125,8 @@ class StrategyManager:
     # ── Evaluación ────────────────────────────────────────────────────────────
 
     async def _evaluate(self) -> None:
+        if _meta_override:
+            return  # meta_agent tiene el control — no sobrescribir
         self._eval_count += 1
         cond = self._gather_conditions()
         self._last_cond = cond

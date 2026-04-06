@@ -184,8 +184,9 @@ async def trading_loop() -> None:
     liq_glob_mod = _try_import("liquidations_global")
     dxy_mod        = _try_import("dxy_monitor")
     daily_rep_mod  = _try_import("daily_report")
-    rebalancer_mod = _try_import("rebalancer")
-    strat_mgr_mod  = _try_import("strategy_manager")
+    rebalancer_mod  = _try_import("rebalancer")
+    strat_mgr_mod   = _try_import("strategy_manager")
+    meta_agent_mod  = _try_import("meta_agent")
 
     # Instanciar
     cvd_combined  = cvd_comb_mod.CVDCombinedEngine()   if cvd_comb_mod    else None
@@ -226,6 +227,15 @@ async def trading_loop() -> None:
             delta_neutral_engine = dn_eng,
             btc_dominance_monitor= btc_dom,
         ) if strat_mgr_mod else None
+    )
+
+    meta_agt = (
+        meta_agent_mod.MetaAgent(
+            fear_greed  = fear_greed,
+            btc_dom     = btc_dom,
+            dxy_mon     = dxy_mon,
+            liq_monitor = liq_glob,
+        ) if meta_agent_mod else None
     )
 
     dashboard  = (dashboard_mod.DashboardReporter(executor)
@@ -279,6 +289,9 @@ async def trading_loop() -> None:
     if strat_mgr:
         asyncio.create_task(strat_mgr.run(),   name="strategy_manager")
         logger.info("[main] Strategy Manager iniciado ✅ (eval cada 60s)")
+    if meta_agt:
+        asyncio.create_task(meta_agt.run(),    name="meta_agent")
+        logger.info("[main] Meta-Agente iniciado ✅ (eval cada 5min | ATR+EMA20/50+F&G+DXY)")
 
     _ready = True
 
@@ -409,6 +422,8 @@ async def trading_loop() -> None:
             regime_det.on_price(trade.pair, trade.price)
         if range_trader and (not strat_mgr or strat_mgr_mod.is_active("range_trader")):
             await range_trader.on_price(trade.pair, trade.price)
+        if meta_agt and trade.pair == "BTCUSDT":
+            meta_agt.on_price(trade.pair, trade.price, trade.quantity)
 
 
         # 3. Procesar spring detection
