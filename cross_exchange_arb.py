@@ -92,6 +92,11 @@ class CrossExchangeArb:
     """
 
     def __init__(self, production: bool = False) -> None:
+        if os.getenv("ENABLE_CROSS_ARB_REAL", "false").lower() != "true":
+            self.enabled = False
+            logger.info("[cross_arb] DESHABILITADO — ENABLE_CROSS_ARB_REAL != true")
+            return
+        self.enabled = True
         self._production  = production
         # prices[pair][exchange] = PricePoint
         self._prices: Dict[str, Dict[str, PricePoint]] = {
@@ -130,6 +135,8 @@ class CrossExchangeArb:
 
     def update_price(self, exchange: str, pair: str, price: float, ts_ms: float) -> None:
         """Actualizar precio desde el aggregator. Llamar con cada trade recibido."""
+        if not getattr(self, "enabled", False):
+            return
         if pair not in self._prices:
             return
         self._prices[pair][exchange] = PricePoint(price=price, ts=ts_ms)
@@ -190,6 +197,8 @@ class CrossExchangeArb:
         return spread
 
     def _check_arb(self, pair: str) -> None:
+        if not getattr(self, "enabled", False):
+            return
         # Arrancar loop de inventario en el primer _check_arb en producción
         if self._production and not self._inventory_started:
             self._inventory_started = True
@@ -296,8 +305,9 @@ class CrossExchangeArb:
     # ── Balance check ────────────────────────────────────────────────────────
 
     async def _check_balances(self) -> bool:
-        """DESHABILITADO — Railway bloqueado por Bybit. Retorna False siempre."""
-        logger.debug("[cross_arb] _check_balances: CROSS_ARB_ENABLED=False — skip")
+        """Retorna False siempre — cross-arb deshabilitado (ENABLE_CROSS_ARB_REAL != true)."""
+        if not getattr(self, "enabled", False):
+            return False
         self._balance_ok = False
         return False
 
