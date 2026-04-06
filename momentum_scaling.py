@@ -95,6 +95,7 @@ class MomentumTrade:
     trailing_on:  bool  = False
     breakeven_on: bool  = False
     opened_at:    float = field(default_factory=time.time)
+    closed_at:    float = 0.0
     status:       str   = "open"
     exit_price:   float = 0.0
     pnl_usd:      float = 0.0
@@ -191,7 +192,7 @@ class MomentumScalingEngine:
         try:
             from datetime import datetime, timezone as _tz
             ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-            path = "/api/v5/asset/balances?ccy=USDT"
+            path = "/api/v5/account/balance?ccy=USDT"
             sig  = base64.b64encode(
                 hmac.new(config.OKX_SECRET.encode(),
                          (ts + "GET" + path).encode(), hashlib.sha256).digest()
@@ -203,9 +204,9 @@ class MomentumScalingEngine:
                                   timeout=aiohttp.ClientTimeout(total=8)) as r:
                     data = await r.json()
                     if data.get("code") == "0":
-                        for item in data.get("data", []):
-                            if item.get("ccy") == "USDT":
-                                return float(item.get("availBal", 0))
+                        for d in data.get("data", [{}])[0].get("details", []):
+                            if d.get("ccy") == "USDT":
+                                return float(d.get("eq", 0))
         except Exception as exc:
             logger.warning("[momentum] OKX balance error: {}", exc)
         return 0.0
@@ -249,9 +250,9 @@ class MomentumScalingEngine:
         wr      = (len(wins) / len(closed) * 100) if closed else 0.0
         pnl     = sum(t.pnl_usd for t in self._trades)
         if closed:
-            now = time.time()
             avg_hold = sum(
-                (t.opened_at + _MAX_HOLD_SECS - t.opened_at) for t in closed
+                (t.closed_at - t.opened_at) if t.closed_at > 0 else _MAX_HOLD_SECS
+                for t in closed
             ) / len(closed)
         else:
             avg_hold = 0.0
@@ -403,6 +404,7 @@ class MomentumScalingEngine:
         if trade.status != "open":
             return
         trade.status     = "closed"
+        trade.closed_at  = time.time()
         trade.exit_price = exit_price
         pnl_pct          = (exit_price - trade.avg_entry) / trade.avg_entry
         trade.pnl_usd    = trade.size_usd * pnl_pct

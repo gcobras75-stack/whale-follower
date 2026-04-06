@@ -226,7 +226,7 @@ class OFIEngine:
         try:
             from datetime import datetime, timezone as _tz
             ts = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-            path = "/api/v5/asset/balances?ccy=USDT"
+            path = "/api/v5/account/balance?ccy=USDT"
             sig  = base64.b64encode(
                 hmac.new(config.OKX_SECRET.encode(),
                          (ts + "GET" + path).encode(), hashlib.sha256).digest()
@@ -238,9 +238,9 @@ class OFIEngine:
                                   timeout=aiohttp.ClientTimeout(total=8)) as r:
                     data = await r.json()
                     if data.get("code") == "0":
-                        for item in data.get("data", []):
-                            if item.get("ccy") == "USDT":
-                                return float(item.get("availBal", 0))
+                        for d in data.get("data", [{}])[0].get("details", []):
+                            if d.get("ccy") == "USDT":
+                                return float(d.get("eq", 0))
         except Exception as exc:
             logger.warning("[ofi] OKX balance error: {}", exc)
         return 0.0

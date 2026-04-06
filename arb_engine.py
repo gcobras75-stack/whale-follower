@@ -29,12 +29,12 @@ import aiohttp
 from loguru import logger
 
 from funding_arb       import FundingArbEngine
-# from cross_exchange_arb import CrossExchangeArb  # DESHABILITADO — Railway bloqueado
-# from lead_lag_arb      import LeadLagArb         # DESHABILITADO — requiere Bybit
+# from cross_exchange_arb import CrossExchangeArb  # DESHABILITADO — ENABLE_CROSS_ARB=false
+# from lead_lag_arb      import LeadLagArb         # DESHABILITADO — ENABLE_LEAD_LAG_ARB=false
 from triangular_arb    import TriangularArb
 from bitso_arb         import BitsoArb
 
-# DESHABILITADO — Railway bloqueado por Bybit (403 en IPs de Railway)
+# DESHABILITADO — ENABLE_CROSS_ARB=false por defecto (ver .env para activar)
 ARB_ENGINE_ENABLED = False
 
 
