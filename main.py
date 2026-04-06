@@ -100,8 +100,11 @@ async def start_healthcheck() -> web.AppRunner:
     app.router.add_get("/",       health_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()
-    logger.info(f"[health] HTTP server on 0.0.0.0:{port}")
+    try:
+        await web.TCPSite(runner, "0.0.0.0", port).start()
+        logger.info(f"[health] HTTP server on 0.0.0.0:{port}")
+    except OSError as e:
+        logger.warning(f"[health] Puerto {port} ocupado, healthcheck deshabilitado ({e})")
     return runner
 
 
