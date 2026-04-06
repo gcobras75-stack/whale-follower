@@ -296,6 +296,23 @@ async def trading_loop() -> None:
         asyncio.create_task(meta_agt.run(),    name="meta_agent")
         logger.info("[main] Meta-Agente iniciado ✅ (eval cada 5min | ATR+EMA20/50+F&G+DXY)")
 
+    # ── Adaptive Position Sizer + Auto-Reporte Telegram cada 4h ──────────────
+    try:
+        from position_sizer import get_sizer
+        import alerts as _alerts_main
+        total_cap = (
+            (_alerts_main._stats.get("capital_bybit") or 0)
+            + (_alerts_main._stats.get("capital_okx") or 0)
+        )
+        if total_cap <= 0:
+            total_cap = config.REAL_CAPITAL
+        get_sizer().update_capital(total_cap)
+        logger.info("[main] AdaptivePositionSizer iniciado ✅ capital=${:.0f}", total_cap)
+        asyncio.create_task(_alerts_main.auto_report_loop(interval_hours=4.0), name="auto_report")
+        logger.info("[main] Auto-reporte Telegram cada 4h iniciado ✅")
+    except Exception as _ps_err:
+        logger.warning("[main] position_sizer no disponible: {}", _ps_err)
+
     _ready = True
 
     try:

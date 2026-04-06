@@ -287,6 +287,7 @@ class OKXGridEngine:
         try:
             import alerts as _alerts
             _alerts.record_grid_cycle(pnl)
+            _alerts.record_strategy_pnl("okx_grid", pnl)
             if self._production:
                 asyncio.create_task(_alerts.send_trade_alert("grid", {
                     "pair":       grid.pair,

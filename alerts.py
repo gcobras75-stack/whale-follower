@@ -40,6 +40,21 @@ _stats: Dict[str, Any] = {
     "bitso_opportunities": 0,
     "bitso_spread_sum":    0.0,
     "bitso_spread_count":  0,
+    # P&L por estrategia (Adaptive Position Sizing)
+    "pnl_by_strategy": {
+        "grid":           0.0,
+        "okx_grid":       0.0,
+        "mean_reversion": 0.0,
+        "ofi":            0.0,
+        "delta_neutral":  0.0,
+        "wyckoff":        0.0,
+        "arb":            0.0,
+    },
+    # Drawdown tracking
+    "capital_peak":      0.0,
+    "drawdown_alerted":  False,   # para no spamear alertas
+    # Auto-report
+    "last_auto_report":  time.time(),
 }
 
 # ── Termometros de mercado (actualizados por los monitores) ───────────────
@@ -56,10 +71,140 @@ _thermometers: Dict[str, Any] = {
 
 # ── Stats public API ──────────────────────────────────────────────────
 
+def record_strategy_pnl(strategy: str, pnl: float) -> None:
+    """Registrar P&L por estrategia. Actualiza position_sizer si hay capital."""
+    _stats["pnl_by_strategy"][strategy] = (
+        _stats["pnl_by_strategy"].get(strategy, 0.0) + pnl
+    )
+
+def check_drawdown() -> float:
+    """Calcula drawdown actual y emite alerta Telegram si supera umbral."""
+    cap = _stats["capital_bybit"] + _stats["capital_okx"]
+    if cap <= 0:
+        return 0.0
+    if cap > _stats["capital_peak"]:
+        _stats["capital_peak"] = cap
+        _stats["drawdown_alerted"] = False
+        return 0.0
+    peak = _stats["capital_peak"]
+    if peak <= 0:
+        return 0.0
+    dd_pct = (peak - cap) / peak * 100
+    if dd_pct >= 5.0 and not _stats["drawdown_alerted"]:
+        _stats["drawdown_alerted"] = True
+        asyncio.ensure_future(_send_drawdown_alert(dd_pct, cap, peak))
+    if dd_pct < 3.0:
+        _stats["drawdown_alerted"] = False
+    return dd_pct
+
+async def _send_drawdown_alert(dd_pct: float, capital: float, peak: float) -> None:
+    token   = config.TELEGRAM_BOT_TOKEN
+    chat_id = config.TELEGRAM_CHAT_ID
+    if not token or not chat_id:
+        return
+    emoji = "🚨" if dd_pct >= 10 else "⚠️"
+    msg = (
+        f"{emoji} ALERTA DRAWDOWN\n"
+        f"──────────────────────\n"
+        f"Drawdown:   -{dd_pct:.1f}%\n"
+        f"Capital:    ${capital:.0f}\n"
+        f"Peak:       ${peak:.0f}\n"
+        f"Pérdida:    -${peak - capital:.0f}\n"
+        f"──────────────────────\n"
+        f"Hora: {time.strftime('%H:%M', time.localtime())} CST"
+    )
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+    except Exception as exc:
+        logger.warning("[alerts] drawdown alert error: {}", exc)
+
+async def auto_report_loop(interval_hours: float = 4.0) -> None:
+    """Tarea de fondo: envía reporte automático a Telegram cada N horas."""
+    interval_secs = int(interval_hours * 3600)
+    await asyncio.sleep(300)  # esperar 5 min antes del primer reporte
+    while True:
+        await asyncio.sleep(interval_secs)
+        try:
+            await _send_auto_report()
+        except Exception as exc:
+            logger.warning("[alerts] auto_report error: {}", exc)
+
+async def _send_auto_report() -> None:
+    token   = config.TELEGRAM_BOT_TOKEN
+    chat_id = config.TELEGRAM_CHAT_ID
+    if not token or not chat_id:
+        return
+
+    uptime    = int(time.time() - _stats["start_time"])
+    h, m      = divmod(uptime // 60, 60)
+    total_pnl = sum(_stats["pnl_by_strategy"].values())
+    cap_bybit = _stats["capital_bybit"]
+    cap_okx   = _stats["capital_okx"]
+    total_cap = cap_bybit + cap_okx
+    dd        = check_drawdown()
+
+    # P&L por estrategia
+    pnl_lines = ""
+    for strat, pnl in _stats["pnl_by_strategy"].items():
+        if pnl != 0.0:
+            pnl_lines += f"  {strat:<16} ${pnl:+.4f}\n"
+    if not pnl_lines:
+        pnl_lines = "  (sin trades completados)\n"
+
+    # Asignación de capital desde position_sizer
+    alloc_lines = ""
+    try:
+        from position_sizer import get_sizer
+        sz = get_sizer()
+        sz.update_capital(total_cap)
+        alloc = sz.allocation_summary()
+        for strat, max_usd in alloc.items():
+            alloc_lines += f"  {strat:<16} máx ${max_usd:.0f}\n"
+        regime = sz._regime()
+        atr    = sz._atr_pct()
+        sm     = sz._size_mult()
+    except Exception:
+        alloc_lines = "  (no disponible)\n"
+        regime = "?"
+        atr    = 0.0
+        sm     = 1.0
+
+    dd_str = f"-{dd:.1f}% ⚠️" if dd >= 5 else f"-{dd:.1f}% ✅"
+
+    msg = (
+        f"📊 REPORTE AUTOMÁTICO\n"
+        f"──────────────────────\n"
+        f"Uptime:  {h}h {m}m\n"
+        f"Capital: Bybit=${cap_bybit:.0f} | OKX=${cap_okx:.0f} | Total=${total_cap:.0f}\n"
+        f"Drawdown: {dd_str}\n"
+        f"\nRégimen: {regime} | ATR={atr:.2f}% | size_mult={sm:.1f}x\n"
+        f"\nP&L por estrategia:\n{pnl_lines}"
+        f"PnL Total sesión: ${total_pnl:+.4f}\n"
+        f"\nAsignación máx por estrategia:\n{alloc_lines}"
+        f"──────────────────────\n"
+        f"Hora: {time.strftime('%H:%M', time.localtime())} CST"
+    )
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+        logger.info("[alerts] Auto-reporte enviado a Telegram ✅")
+    except Exception as exc:
+        logger.warning("[alerts] auto_report send error: {}", exc)
+
 def record_grid_cycle(pnl: float = 0.0) -> None:
     """Llamar desde grid_trading._fill_sell() en cada ciclo completado."""
     _stats["grid_cycles"] += 1
     _stats["grid_pnl"]    += pnl
+    record_strategy_pnl("grid", pnl)
 
 def record_arb_opportunity() -> None:
     """Llamar desde triangular_arb._check_arb() cuando detecta oportunidad."""
@@ -69,11 +214,13 @@ def record_arb_executed(pnl: float = 0.0) -> None:
     """Llamar desde triangular_arb._execute_real() cuando ejecuta en real."""
     _stats["arb_executed"] += 1
     _stats["arb_pnl"]      += pnl
+    record_strategy_pnl("arb", pnl)
 
 def record_arb_executed_pair(pair: str, pnl: float = 0.0) -> None:
     """Registrar ejecucion real por par especifico."""
     _stats["arb_executed"] += 1
     _stats["arb_pnl"]      += pnl
+    record_strategy_pnl("arb", pnl)
     key_map = {"BTCUSDT": "arb_btc_exec", "ETHUSDT": "arb_eth_exec", "SOLUSDT": "arb_sol_exec"}
     k = key_map.get(pair)
     if k:
@@ -162,13 +309,23 @@ def record_bitso_opportunity(spread_pct: float = 0.0) -> None:
     _stats["bitso_spread_count"]   += 1
 
 def set_capital(bybit: float = 0.0, okx: float = 0.0, okx_breakdown: dict = None) -> None:
-    """Actualizar capital conocido (llamar desde healthcheck o executor)."""
+    """Actualizar capital conocido. También actualiza position_sizer y verifica drawdown."""
     if bybit > 0:
         _stats["capital_bybit"] = bybit
     if okx > 0:
         _stats["capital_okx"] = okx
     if okx_breakdown:
         _stats["capital_okx_breakdown"] = okx_breakdown
+    # Actualizar position_sizer con capital total real
+    total = (_stats["capital_bybit"] or 0) + (_stats["capital_okx"] or 0)
+    if total > 0:
+        try:
+            from position_sizer import get_sizer
+            get_sizer().update_capital(total)
+        except Exception:
+            pass
+    # Verificar drawdown
+    check_drawdown()
 
 # ── Supabase cliente (lazy) ────────────────────────────────────────────────────
 _supabase: Optional[Client] = None
@@ -524,11 +681,12 @@ async def _cmd_stats() -> None:
     uptime = int(time.time() - _stats["start_time"])
     h, m   = divmod(uptime // 60, 60)
 
-    total_pnl = _stats["grid_pnl"] + _stats["arb_pnl"]
+    total_pnl = sum(_stats["pnl_by_strategy"].values())
 
     # Capital: usar valor guardado o fallback a config
     cap_bybit = _stats["capital_bybit"] or config.REAL_CAPITAL
     cap_okx   = _stats["capital_okx"]   or 0.0
+    total_cap = cap_bybit + cap_okx
 
     # Desglose OKX por coin
     okx_bd    = _stats.get("capital_okx_breakdown", {})
@@ -540,10 +698,41 @@ async def _cmd_stats() -> None:
     else:
         cap_okx_str = "sin datos"
 
+    # Drawdown
+    dd     = check_drawdown()
+    dd_str = f"-{dd:.1f}% ⚠️" if dd >= 5 else f"-{dd:.1f}% ✅"
+
+    # P&L por estrategia (solo las que tienen actividad)
+    pnl_strat = _stats["pnl_by_strategy"]
+    pnl_lines = ""
+    for strat, pnl in pnl_strat.items():
+        if pnl != 0.0:
+            pnl_lines += f"  {strat:<16} ${pnl:+.4f}\n"
+    if not pnl_lines:
+        pnl_lines = "  (sin trades completados aun)\n"
+
+    # Adaptive sizing info
+    regime_line = "?"
+    atr_line    = "?"
+    sm_line     = "1.0x"
+    alloc_lines = ""
+    try:
+        from position_sizer import get_sizer
+        sz = get_sizer()
+        sz.update_capital(total_cap)
+        regime_line = sz._regime()
+        atr_line    = f"{sz._atr_pct():.2f}%"
+        sm_line     = f"{sz._size_mult():.1f}x"
+        alloc = sz.allocation_summary()
+        alloc_lines = " | ".join(f"{s}=${v:.0f}" for s, v in alloc.items())
+    except Exception:
+        pass
+
     # Bitso stats
     b_opps  = _stats["bitso_opportunities"]
     b_count = _stats["bitso_spread_count"]
     b_avg   = (_stats["bitso_spread_sum"] / b_count) if b_count > 0 else 0.0
+    bitso_prima = f"{b_avg:+.2f}%" if b_opps > 0 else "sin datos"
 
     # Termometros
     t = _thermometers
@@ -553,9 +742,6 @@ async def _cmd_stats() -> None:
     dxy_sign = "+" if t['dxy_change_pct'] >= 0 else ""
     dxy_line = (f"{t['dxy_value']:.2f} ({dxy_sign}{t['dxy_change_pct']:.2f}%"
                 f" {t['dxy_signal']})")
-
-    # Bitso spread prima
-    bitso_prima = f"{b_avg:+.2f}%" if b_opps > 0 else "sin datos"
 
     await _reply(
         f"Estadisticas\n"
@@ -568,11 +754,21 @@ async def _cmd_stats() -> None:
         f"Arb SOL ejecutados:   {_stats['arb_sol_exec']}\n"
         f"Oportunidades Bitso:  {b_opps}\n"
         f"Prima Bitso:          {bitso_prima}\n"
-        f"PnL Grid:             ${_stats['grid_pnl']:+.4f}\n"
-        f"PnL Arb real:         ${_stats['arb_pnl']:+.4f}\n"
+        f"\nP&L por estrategia\n"
+        f"------------------\n"
+        f"{pnl_lines}"
         f"PnL Total sesion:     ${total_pnl:+.4f}\n"
+        f"\nCapital & Riesgo\n"
+        f"----------------\n"
         f"Capital Bybit:        ~${cap_bybit:.0f}\n"
         f"Capital OKX:          {cap_okx_str}\n"
+        f"Capital Total:        ~${total_cap:.0f}\n"
+        f"Drawdown:             {dd_str}\n"
+        f"\nAdaptive Sizing\n"
+        f"---------------\n"
+        f"Régimen:              {regime_line}\n"
+        f"ATR volatilidad:      {atr_line}\n"
+        f"Size multiplier:      {sm_line}\n"
         f"\nTermometros de mercado\n"
         f"----------------------\n"
         f"BTC Dominancia:       {dom_line}\n"
