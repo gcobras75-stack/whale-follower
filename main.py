@@ -21,6 +21,12 @@ from collections import deque
 from aiohttp import web
 from loguru import logger
 
+# ── KILL SWITCH DE EMERGENCIA ─────────────────────────────────────────────────
+# Pon STOP_BOT=1 en Railway → Variables para detener el bot sin borrar el servicio
+if os.getenv("STOP_BOT", "0") == "1":
+    print("[STOP_BOT] Bot detenido por variable de entorno STOP_BOT=1", flush=True)
+    sys.exit(0)
+
 # ── Logging sin dependencia de config ─────────────────────────────────────────
 logger.remove()
 logger.add(
