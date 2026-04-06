@@ -29,8 +29,8 @@ import aiohttp
 from loguru import logger
 
 from funding_arb       import FundingArbEngine
-from cross_exchange_arb import CrossExchangeArb
-from lead_lag_arb      import LeadLagArb
+# from cross_exchange_arb import CrossExchangeArb  # DESHABILITADO — Railway bloqueado
+# from lead_lag_arb      import LeadLagArb         # DESHABILITADO — requiere Bybit
 from triangular_arb    import TriangularArb
 from bitso_arb         import BitsoArb
 
@@ -91,11 +91,10 @@ class ArbEngine:
             self._funding = self._cross = self._lead_lag = self._triangular = self._bitso = None
             return
         self._production   = production
-        # Cross-exchange arb can be enabled in real mode independently
         cross_prod = production or cross_arb_real
         self._funding      = FundingArbEngine(production=production)
-        self._cross        = CrossExchangeArb(production=cross_prod)
-        self._lead_lag     = LeadLagArb(production=production)
+        self._cross        = None  # CrossExchangeArb deshabilitado
+        self._lead_lag     = None  # LeadLagArb deshabilitado
         self._triangular   = TriangularArb(production=cross_prod)
         self._bitso        = BitsoArb()
 

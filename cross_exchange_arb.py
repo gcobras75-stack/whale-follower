@@ -50,6 +50,12 @@ FORCE_OKX_ONLY    = True # True = usar solo OKX cuando Bybit sin saldo
 CROSS_ARB_ENABLED = False  # False = cross-arb deshabilitado (Railway bloqueado por Bybit)
 LEAD_LAG_ENABLED  = False  # False = lead-lag arb deshabilitado (requiere Bybit)
 
+# Variable de entorno adicional: set DISABLE_CROSS_ARB=1 en Railway para forzar apagado
+DISABLE_CROSS_ARB: bool = os.getenv("DISABLE_CROSS_ARB", "0") == "1" or not CROSS_ARB_ENABLED
+
+if DISABLE_CROSS_ARB:
+    logger.info("[cross_arb] COMPLETAMENTE DESHABILITADO (DISABLE_CROSS_ARB=True / CROSS_ARB_ENABLED=False)")
+
 
 @dataclass
 class PricePoint:
@@ -92,10 +98,9 @@ class CrossExchangeArb:
     """
 
     def __init__(self, production: bool = False) -> None:
-        if not CROSS_ARB_ENABLED:           # hardcoded False — inmune a Railway env vars
+        if DISABLE_CROSS_ARB:  # CROSS_ARB_ENABLED=False OR DISABLE_CROSS_ARB=1 en Railway
             self.enabled = False
             self.active  = False
-            logger.info("[cross_arb] DESHABILITADO (CROSS_ARB_ENABLED=False)")
             return
         self.enabled = True
         self.active  = True
@@ -137,7 +142,7 @@ class CrossExchangeArb:
 
     def update_price(self, exchange: str, pair: str, price: float, ts_ms: float) -> None:
         """Actualizar precio desde el aggregator. Llamar con cada trade recibido."""
-        if not getattr(self, "enabled", False):
+        if DISABLE_CROSS_ARB or not getattr(self, "enabled", False):
             return
         if pair not in self._prices:
             return
@@ -199,7 +204,7 @@ class CrossExchangeArb:
         return spread
 
     def _check_arb(self, pair: str) -> None:
-        if not getattr(self, "enabled", False):
+        if DISABLE_CROSS_ARB or not getattr(self, "enabled", False):
             return
         # Arrancar loop de inventario en el primer _check_arb en producción
         if self._production and not self._inventory_started:
@@ -307,10 +312,9 @@ class CrossExchangeArb:
     # ── Balance check ────────────────────────────────────────────────────────
 
     async def _check_balances(self) -> bool:
-        """Retorna False siempre — cross-arb deshabilitado (ENABLE_CROSS_ARB_REAL != true)."""
-        if not getattr(self, "enabled", False):
+        """Retorna False siempre — cross-arb deshabilitado."""
+        if DISABLE_CROSS_ARB or not getattr(self, "enabled", False):
             return False
-        self._balance_ok = False
         return False
 
     # ── Real execution (dinero real) ──────────────────────────────────────────
@@ -324,6 +328,8 @@ class CrossExchangeArb:
         3. Schedule auto-close after _CLOSE_AFTER_SECS
         4. Persist to Supabase
         """
+        if DISABLE_CROSS_ARB or not getattr(self, "enabled", False):
+            return
         if not self._can_execute_real():
             # Reintentar init si algún executor es None
             if self._okx_exec is None or not self._bybit_ready:
