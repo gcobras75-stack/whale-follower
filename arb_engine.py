@@ -34,6 +34,9 @@ from lead_lag_arb      import LeadLagArb
 from triangular_arb    import TriangularArb
 from bitso_arb         import BitsoArb
 
+# DESHABILITADO — Railway bloqueado por Bybit (403 en IPs de Railway)
+ARB_ENGINE_ENABLED = False
+
 
 @dataclass
 class ArbSummary:
@@ -99,6 +102,9 @@ class ArbEngine:
 
     async def run(self) -> None:
         """Tarea de fondo: arranca todas las subtareas de arbitraje."""
+        if not ARB_ENGINE_ENABLED:
+            logger.info("[arb_engine] DESHABILITADO (ARB_ENGINE_ENABLED=False) — no iniciando subtareas")
+            return
         asyncio.create_task(self._triangular.startup_check(), name="cross_arb_startup")
         await asyncio.gather(
             self._funding.run(),
@@ -114,6 +120,8 @@ class ArbEngine:
         Enrutar cada trade tick recibido del aggregator.
         Llamar con cada Trade object que llega del stream.
         """
+        if not ARB_ENGINE_ENABLED:
+            return
         # Cross-exchange: necesita precios por exchange
         self._cross.update_price(exchange, pair, price, ts_ms)
 

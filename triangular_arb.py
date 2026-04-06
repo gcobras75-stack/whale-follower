@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 import uuid
 from collections import deque
@@ -40,6 +41,9 @@ import aiohttp
 from loguru import logger
 
 import config
+
+# DESHABILITADO — Railway bloqueado por Bybit (403 en IPs de Railway)
+TRIANGULAR_ARB_ENABLED = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _MAX_SPREAD_PCT    = 1.5     # spread > 1.5% = dato anomalo (compartido)
@@ -199,6 +203,9 @@ class TriangularArb:
 
     async def startup_check(self) -> None:
         """Verifica conectividad Bybit SPOT y OKX SPOT al inicio. Envia resultado a Telegram."""
+        if not TRIANGULAR_ARB_ENABLED:
+            logger.info("[cross_arb] startup_check DESHABILITADO (TRIANGULAR_ARB_ENABLED=False)")
+            return
         if not self._production:
             logger.info("[cross_arb] startup_check omitido (modo PAPEL)")
             return
