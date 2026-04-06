@@ -92,11 +92,13 @@ class CrossExchangeArb:
     """
 
     def __init__(self, production: bool = False) -> None:
-        if os.getenv("ENABLE_CROSS_ARB_REAL", "false").lower() != "true":
+        if not CROSS_ARB_ENABLED:           # hardcoded False — inmune a Railway env vars
             self.enabled = False
-            logger.info("[cross_arb] DESHABILITADO — ENABLE_CROSS_ARB_REAL != true")
+            self.active  = False
+            logger.info("[cross_arb] DESHABILITADO (CROSS_ARB_ENABLED=False)")
             return
         self.enabled = True
+        self.active  = True
         self._production  = production
         # prices[pair][exchange] = PricePoint
         self._prices: Dict[str, Dict[str, PricePoint]] = {

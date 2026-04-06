@@ -85,6 +85,11 @@ class ArbEngine:
     """
 
     def __init__(self, production: bool = False, cross_arb_real: bool = False) -> None:
+        if not ARB_ENGINE_ENABLED:
+            logger.info("[arb_engine] DESHABILITADO (ARB_ENGINE_ENABLED=False) — no se instancia nada")
+            self._production = False
+            self._funding = self._cross = self._lead_lag = self._triangular = self._bitso = None
+            return
         self._production   = production
         # Cross-exchange arb can be enabled in real mode independently
         cross_prod = production or cross_arb_real
