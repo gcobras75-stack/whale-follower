@@ -166,7 +166,7 @@ class MetaAgent:
         self._prev_regime:      Optional[Regime] = None
 
         self._eval_count:  int   = 0
-        self._last_weekly: float = 0.0
+        self._last_weekly: float = time.time()  # evitar análisis semanal en el primer ciclo
         self._last_snap:   Optional[MetaSnapshot] = None
 
         # Tomar control de strategy_manager
@@ -493,7 +493,7 @@ class MetaAgent:
         try:
             import aiohttp as _ah
             url = os.environ.get("SUPABASE_URL", "")
-            key = os.environ.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_KEY", "")
+            key = os.environ.get("SUPABASE_KEY", "")
             if not url or not key:
                 return
             ind = snap.indicators
@@ -533,7 +533,7 @@ class MetaAgent:
         try:
             import aiohttp as _ah
             url = os.environ.get("SUPABASE_URL", "")
-            key = os.environ.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_KEY", "")
+            key = os.environ.get("SUPABASE_KEY", "")
             if not url or not key:
                 return
 

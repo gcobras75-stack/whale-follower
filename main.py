@@ -693,7 +693,17 @@ async def trading_loop() -> None:
             allocation.preferred_exchange, _bybit_usdt, _okx_usdt,
         )
 
-        # 9. Ejecutar trades (features guardadas para ML record_outcome al cierre)
+        # 9. Ejecutar trades — gate Wyckoff por régimen + size_multiplier meta_agent
+        # meta_agent pausa wyckoff en LATERAL/BAJISTA/FEAR; reduce size en BAJISTA (0.5x)
+        if strat_mgr_mod and not strat_mgr_mod.is_active("wyckoff_spring"):
+            logger.debug(
+                "[main] Wyckoff spring pausado por meta_agent (régimen={})",
+                meta_agt.current_regime().value if meta_agt else "?",
+            )
+            continue
+
+        _size_mult = meta_agent_mod.size_multiplier if meta_agent_mod else 1.0
+
         for alloc in allocation.trades:
             signal_id = signal_id_for_signal if alloc.pair == signal.pair else str(uuid.uuid4())
 
@@ -704,7 +714,7 @@ async def trading_loop() -> None:
                 take_profit      = alloc.take_profit,
                 signal_id        = signal_id,
                 pair             = alloc.pair,
-                size_usd         = alloc.size_usd,
+                size_usd         = alloc.size_usd * _size_mult,
                 signal_features  = features if ml_model else None,
             )
             if paper:
