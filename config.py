@@ -105,3 +105,11 @@ ML_BLOCK_THRESHOLD: float = float(os.getenv("ML_BLOCK_THRESHOLD", "0.65"))
 # ── Reconnection back-off ─────────────────────────────────────────────────────
 BACKOFF_BASE: float = 1.0
 BACKOFF_MAX:  float = 60.0
+
+# ── Kill switch de emergencia ─────────────────────────────────────────────────
+# Pon STOP_BOT=1 en Railway Variables para detener el bot sin borrar el servicio
+STOP_BOT: bool = os.getenv("STOP_BOT", "0") == "1"
+
+# ── Control Bybit — bloqueado por Railway IPs (403) ─────────────────────────
+# NUNCA poner BYBIT_ORDERS_ENABLED=True mientras el bot corra en Railway
+BYBIT_ORDERS_ENABLED: bool = False  # hardcoded — inmune a env vars

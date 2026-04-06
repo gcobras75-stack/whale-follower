@@ -137,14 +137,10 @@ async def trading_loop() -> None:
         logger.error(f"[main] Import error: {exc}")
         return
 
-    # ── Arbitraje (DESHABILITADO — Railway bloqueado por Bybit) ────────────────
-    # arb_mod = _try_import("arb_engine")
-    # prod = config.PRODUCTION   # True = dinero real, False = papel
-    # cross_arb_real = getattr(config, "ENABLE_CROSS_ARB_REAL", False)
-    # arb_engine = arb_mod.ArbEngine(production=prod, cross_arb_real=cross_arb_real) if arb_mod else None
-    # _arb_ref = arb_engine
-    arb_engine = None
-    _arb_ref = None
+    # ── Arbitraje COMPLETAMENTE DESHABILITADO — Bybit bloqueado en Railway ──────
+    prod           = config.PRODUCTION       # requerido por estrategias OKX
+    arb_engine     = None
+    _arb_ref       = None
 
     # ── Estrategias avanzadas (tolerantes a fallos) ───────────────────────────
     mr_mod  = _try_import("mean_reversion")
@@ -296,7 +292,7 @@ async def trading_loop() -> None:
     ])
     thermo_active = sum([btc_dom is not None, liq_glob is not None, dxy_mon is not None])
     logger.info(f" Termometros: {thermo_active}/3 activos (dom/liq/dxy)")
-    logger.info(f" Arbitraje:  {'ACTIVO (5 estrategias)' if arb_engine else 'NO DISPONIBLE'}")
+    logger.info(" Arbitraje:  DESHABILITADO (Bybit bloqueado en Railway — solo OKX)")
     strats_active = sum([mean_rev is not None, grid_eng is not None,
                          ofi_eng is not None, mom_eng is not None, dn_eng is not None])
     logger.info(f" Estrategias avanzadas: {strats_active}/5 activas")
@@ -309,53 +305,33 @@ async def trading_loop() -> None:
     # ── Credential verification log ───────────────────────────────────────────
     logger.info("[config] Credenciales verificadas (ocultas por seguridad)")
 
-    # ── Balance real al inicio ────────────────────────────────────────────────
-    if config.PRODUCTION and config.BYBIT_API_KEY:
+    # ── Balance real al inicio (solo OKX — Bybit bloqueado en Railway) ─────────
+    if config.PRODUCTION and config.OKX_API_KEY and config.OKX_PASSPHRASE:
         try:
             import hmac as _hmac, hashlib as _hashlib
-            _ts  = str(int(__import__('time').time() * 1000))
-            _msg = f"{_ts}{config.BYBIT_API_KEY}5000accountType=UNIFIED&coin=USDT"
-            _sig = _hmac.new(config.BYBIT_API_SECRET.encode(), _msg.encode(), _hashlib.sha256).hexdigest()
-            _hdrs = {"X-BAPI-API-KEY": config.BYBIT_API_KEY, "X-BAPI-TIMESTAMP": _ts,
-                     "X-BAPI-SIGN": _sig, "X-BAPI-RECV-WINDOW": "5000", "User-Agent": "Mozilla/5.0", "Referer": "https://www.bybit.com"}
+            from datetime import datetime, timezone as _tz
+            import base64 as _b64
             import aiohttp as _aio
-            async with _exchange_semaphores["bybit"]:
+            _ots  = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            _path = "/api/v5/account/balance?ccy=USDT"
+            _osig = _b64.b64encode(_hmac.new(
+                config.OKX_SECRET.encode(), (_ots + "GET" + _path).encode(), _hashlib.sha256
+            ).digest()).decode()
+            _ohdrs = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": _osig,
+                      "OK-ACCESS-TIMESTAMP": _ots, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
+            async with _exchange_semaphores["okx"]:
                 async with _aio.ClientSession() as _s:
-                    async with _s.get(
-                        "https://api.bytick.com/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT",
-                        headers=_hdrs, timeout=_aio.ClientTimeout(total=8),
-                    ) as _r:
-                        _bd = await _r.json()
-                        _bybit_bal = 0.0
-                        if _bd.get("retCode") == 0:
-                            for _c in _bd["result"]["list"][0].get("coin", []):
-                                if _c.get("coin") == "USDT":
-                                    _bybit_bal = float(_c.get("walletBalance", 0))
-            _okx_bal = 0.0
-            if config.OKX_API_KEY and config.OKX_PASSPHRASE:
-                from datetime import datetime, timezone as _tz
-                import base64 as _b64
-                _ots = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-                _path = "/api/v5/account/balance?ccy=USDT"
-                _osig = _b64.b64encode(_hmac.new(
-                    config.OKX_SECRET.encode(), (_ots + "GET" + _path).encode(), _hashlib.sha256
-                ).digest()).decode()
-                _ohdrs = {"OK-ACCESS-KEY": config.OKX_API_KEY, "OK-ACCESS-SIGN": _osig,
-                          "OK-ACCESS-TIMESTAMP": _ots, "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE}
-                async with _exchange_semaphores["okx"]:
-                    async with _aio.ClientSession() as _s:
-                        async with _s.get(f"https://www.okx.com{_path}", headers=_ohdrs,
-                                           timeout=_aio.ClientTimeout(total=8)) as _r:
-                            _od = await _r.json()
-                            if _od.get("code") == "0":
-                                for _d in _od.get("data", [{}])[0].get("details", []):
-                                    if _d.get("ccy") == "USDT":
-                                        _okx_bal = float(_d.get("eq", 0))
-            _total_bal = _bybit_bal + _okx_bal
-            logger.info("[config] Balance REAL  — Bybit: ${:.2f} | OKX: ${:.2f} | Total: ${:.2f}",
-                        _bybit_bal, _okx_bal, _total_bal)
+                    async with _s.get(f"https://www.okx.com{_path}", headers=_ohdrs,
+                                       timeout=_aio.ClientTimeout(total=8)) as _r:
+                        _od = await _r.json()
+                        _okx_bal = 0.0
+                        if _od.get("code") == "0":
+                            for _d in _od.get("data", [{}])[0].get("details", []):
+                                if _d.get("ccy") == "USDT":
+                                    _okx_bal = float(_d.get("eq", 0))
+            logger.info("[config] Balance REAL OKX: ${:.2f} USDT", _okx_bal)
         except Exception as _exc:
-            logger.warning("[config] No se pudo obtener balance real al inicio: {}", _exc)
+            logger.warning("[config] No se pudo obtener balance OKX al inicio: {}", _exc)
 
     logger.info("=" * 60)
     logger.info(" Whale Follower Bot -- Sprint 6")
