@@ -359,7 +359,8 @@ class GridTradingEngine:
             level.fill_price = price
             sell_price = price * (1 + grid.spacing_pct)
             grid.levels.append(GridLevel(
-                price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+                price=sell_price, side="sell", size_usd=level.size_usd,
+                fill_price=price, filled=True,
             ))
             logger.info("[grid] {} COMPRA @ {:.4f} size=${:.0f} → venta programada @ {:.4f}",
                         pair, price, level.size_usd, sell_price)
@@ -598,9 +599,10 @@ class GridTradingEngine:
             level.order_id   = order_id
             sell_price = price * (1 + grid.spacing_pct)
             grid.levels.append(GridLevel(
-                price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+                price=sell_price, side="sell", size_usd=level.size_usd,
+                fill_price=price, filled=True,
             ))
-            logger.info("[grid] \U0001f7e2 REAL COMPRA {} @ {:.4f} -> venta programada @ {:.4f}",
+            logger.info("[grid] REAL COMPRA {} @ {:.4f} -> venta programada @ {:.4f}",
                         pair, price, sell_price)
         else:
             level.pending = False   # liberar para que pueda intentarse de nuevo

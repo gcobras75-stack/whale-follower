@@ -256,7 +256,8 @@ class OKXGridEngine:
             level.fill_ts    = time.time()
             sell_price = price * (1 + grid.spacing_pct)
             grid.levels.append(OKXLevel(
-                price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+                price=sell_price, side="sell", size_usd=level.size_usd,
+                fill_price=price, filled=True,
             ))
             logger.info("[okx_grid] {} COMPRA PAPEL @ {:.4f} → venta @ {:.4f}",
                         pair, price, sell_price)
@@ -270,7 +271,8 @@ class OKXGridEngine:
 
     def _record_sell(self, grid: OKXGridState, level: OKXLevel, price: float) -> None:
         pnl = level.size_usd * grid.spacing_pct - level.size_usd * _FEES_PCT * 2
-        level.filled     = True
+        level.filled     = False  # reset: previene re-venta en el siguiente tick
+        level.pending    = False
         level.fill_price = price
         level.fill_ts    = time.time()
         level.pnl        = pnl
@@ -282,6 +284,19 @@ class OKXGridEngine:
         ))
         logger.info("[okx_grid] {} VENTA @ {:.4f} pnl_ciclo=${:.3f} total=${:.4f}",
                     grid.pair, price, pnl, grid.pnl_total)
+        try:
+            import alerts as _alerts
+            _alerts.record_grid_cycle(pnl)
+            if self._production:
+                asyncio.create_task(_alerts.send_trade_alert("grid", {
+                    "pair":       grid.pair,
+                    "buy_price":  level.fill_price if level.fill_price else price * (1 - grid.spacing_pct),
+                    "sell_price": price,
+                    "pnl":        pnl,
+                    "pnl_total":  grid.pnl_total,
+                }))
+        except Exception:
+            pass
 
     # ── Real execution via OKX ────────────────────────────────────────────────
 
@@ -296,7 +311,8 @@ class OKXGridEngine:
                 level.order_id   = result.get("order_id", "")
                 sell_price = price * (1 + grid.spacing_pct)
                 grid.levels.append(OKXLevel(
-                    price=sell_price, side="sell", size_usd=level.size_usd, fill_price=price,
+                    price=sell_price, side="sell", size_usd=level.size_usd,
+                    fill_price=price, filled=True,
                 ))
                 logger.info("[okx_grid] 🟢 REAL BUY {} @ {:.4f} → sell @ {:.4f}",
                             pair, price, sell_price)
