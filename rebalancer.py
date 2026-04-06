@@ -24,6 +24,7 @@ import aiohttp
 from loguru import logger
 
 import config
+import alerts as _alerts
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _CHECK_INTERVAL_SECS  = 6 * 3600     # cada 6 horas
@@ -59,6 +60,7 @@ class CapitalRebalancer:
     def __init__(self) -> None:
         self._snap: RebalanceSnapshot = RebalanceSnapshot()
         self._executor = None   # referencia al BybitTestnetExecutor (opcional)
+        self._okx_exec = None   # OKXExecutor lazy — para get_total_balance_usd()
         logger.info(
             "[rebalancer] Iniciado | check={}h | target_bybit={:.0f}% | "
             "suggested_dev={:.0f}% | urgent_dev={:.0f}%",
@@ -210,35 +212,19 @@ class CapitalRebalancer:
             return None
 
     async def _fetch_okx(self) -> float:
+        """Retorna capital TOTAL de OKX: USDT + ETH×precio + SOL×precio + ..."""
         if not config.OKX_API_KEY or not config.OKX_SECRET or not config.OKX_PASSPHRASE:
             return 0.0
         try:
-            from datetime import datetime, timezone as _tz
-            ts   = datetime.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-            path = "/api/v5/account/balance?ccy=USDT"
-            sig  = base64.b64encode(
-                hmac.new(config.OKX_SECRET.encode(),
-                         (ts + "GET" + path).encode(), hashlib.sha256).digest()
-            ).decode()
-            headers = {
-                "OK-ACCESS-KEY":        config.OKX_API_KEY,
-                "OK-ACCESS-SIGN":       sig,
-                "OK-ACCESS-TIMESTAMP":  ts,
-                "OK-ACCESS-PASSPHRASE": config.OKX_PASSPHRASE,
-            }
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    f"https://www.okx.com{path}",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as r:
-                    data = await r.json()
-                    if data.get("code") == "0":
-                        for d in data.get("data", [{}])[0].get("details", []):
-                            if d.get("ccy") == "USDT":
-                                return float(d.get("eq", 0))
+            if self._okx_exec is None:
+                from okx_executor import OKXExecutor
+                self._okx_exec = OKXExecutor()
+            total, breakdown = await self._okx_exec.get_total_balance_usd()
+            if total > 0:
+                _alerts.set_capital(okx=total, okx_breakdown=breakdown)
+                return total
         except Exception as exc:
-            logger.warning("[rebalancer] OKX balance error: {}", exc)
+            logger.warning("[rebalancer] OKX total balance error: {}", exc)
         return 0.0
 
     # ── Dust Cleanup ──────────────────────────────────────────────────────────────

@@ -255,6 +255,103 @@ class OKXExecutor:
             logger.warning("[okx_exec] get_coin_balance({}) excepción: {}", coin, exc)
             return 0.0
 
+    async def get_total_balance_usd(self) -> tuple[float, dict]:
+        """
+        Retorna el capital TOTAL de OKX en USD incluyendo todos los coins.
+
+        Proceso:
+          1. GET /api/v5/account/balance  (sin filtro — todos los coins)
+          2. Para cada coin con qty > 0:
+             - USDT → valor directo desde eq
+             - ETH/SOL/BTC/etc → qty × precio actual (ticker)
+          3. Retorna (total_usd, breakdown_dict)
+
+        Ejemplo de retorno:
+          (87.43, {"USDT": 12.50, "ETH": 45.20, "SOL": 29.73})
+        """
+        if not self._enabled:
+            return 0.0, {}
+
+        breakdown: dict = {}
+        total_usd = 0.0
+
+        try:
+            async with aiohttp.ClientSession() as session:
+
+                # 1. Obtener todos los coins en cuenta trading
+                path_bal = "/api/v5/account/balance"
+                resp_bal = await session.get(
+                    _BASE_URL + path_bal,
+                    headers=_auth_headers("GET", path_bal),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                data_bal = await resp_bal.json()
+
+                if data_bal.get("code") != "0":
+                    logger.warning(
+                        "[okx_exec] get_total_balance_usd: code={} msg={}",
+                        data_bal.get("code"), data_bal.get("msg", ""),
+                    )
+                    return self._last_balance, {}
+
+                details = data_bal.get("data", [{}])[0].get("details", [])
+                if not details:
+                    return self._last_balance, {}
+
+                # Coins con saldo > 0 que NO son USDT
+                non_usdt: list[tuple[str, float]] = []
+
+                for d in details:
+                    ccy  = d.get("ccy", "")
+                    eq   = float(d.get("eq",   0) or 0)
+                    cash = float(d.get("cashBal", 0) or 0)
+                    qty  = eq or cash
+                    if qty <= 0:
+                        continue
+                    if ccy == "USDT":
+                        breakdown["USDT"] = round(qty, 2)
+                        total_usd += qty
+                    else:
+                        non_usdt.append((ccy, qty))
+
+                # 2. Obtener precios actuales para coins no-USDT
+                for ccy, qty in non_usdt:
+                    inst_id = f"{ccy}-USDT"
+                    path_tk = f"/api/v5/market/ticker?instId={inst_id}"
+                    try:
+                        resp_tk = await session.get(
+                            _BASE_URL + path_tk,
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        )
+                        data_tk = await resp_tk.json()
+                        if data_tk.get("code") == "0" and data_tk.get("data"):
+                            price = float(data_tk["data"][0].get("last", 0) or 0)
+                            if price > 0:
+                                usd_val = qty * price
+                                breakdown[ccy] = round(usd_val, 2)
+                                total_usd += usd_val
+                                logger.debug(
+                                    "[okx_exec] {} qty={:.6f} × ${:.2f} = ${:.2f}",
+                                    ccy, qty, price, usd_val,
+                                )
+                    except Exception as exc_tk:
+                        logger.debug("[okx_exec] ticker {} error: {}", inst_id, exc_tk)
+
+            total_usd = round(total_usd, 2)
+            self._last_balance    = total_usd
+            self._last_balance_ts = time.time()
+
+            parts = " + ".join(f"{c}=${v:.2f}" for c, v in breakdown.items())
+            logger.info(
+                "[okx_exec] Balance total OKX: ${:.2f} ({})",
+                total_usd, parts,
+            )
+            return total_usd, breakdown
+
+        except Exception as exc:
+            logger.warning("[okx_exec] get_total_balance_usd error: {}", exc)
+            return self._last_balance, {}
+
     # ── Market orders ───────────────────────────────────────────────────────
 
     async def market_order(

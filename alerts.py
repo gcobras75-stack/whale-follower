@@ -33,8 +33,9 @@ _stats: Dict[str, Any] = {
     "arb_sol_exec":      0,    # ejecutados SOLUSDT
     "arb_pnl":           0.0,  # P&L acumulado arb
     # Capital (se actualiza por llamada externa)
-    "capital_bybit":   0.0,
-    "capital_okx":     0.0,
+    "capital_bybit":       0.0,
+    "capital_okx":         0.0,
+    "capital_okx_breakdown": {},   # {"USDT": xx, "ETH": xx, "SOL": xx}
     # Bitso monitor
     "bitso_opportunities": 0,
     "bitso_spread_sum":    0.0,
@@ -160,12 +161,14 @@ def record_bitso_opportunity(spread_pct: float = 0.0) -> None:
     _stats["bitso_spread_sum"]     += spread_pct
     _stats["bitso_spread_count"]   += 1
 
-def set_capital(bybit: float = 0.0, okx: float = 0.0) -> None:
+def set_capital(bybit: float = 0.0, okx: float = 0.0, okx_breakdown: dict = None) -> None:
     """Actualizar capital conocido (llamar desde healthcheck o executor)."""
     if bybit > 0:
         _stats["capital_bybit"] = bybit
     if okx > 0:
         _stats["capital_okx"] = okx
+    if okx_breakdown:
+        _stats["capital_okx_breakdown"] = okx_breakdown
 
 # ── Supabase cliente (lazy) ────────────────────────────────────────────────────
 _supabase: Optional[Client] = None
@@ -525,7 +528,17 @@ async def _cmd_stats() -> None:
 
     # Capital: usar valor guardado o fallback a config
     cap_bybit = _stats["capital_bybit"] or config.REAL_CAPITAL
-    cap_okx   = _stats["capital_okx"]   or 51.0
+    cap_okx   = _stats["capital_okx"]   or 0.0
+
+    # Desglose OKX por coin
+    okx_bd    = _stats.get("capital_okx_breakdown", {})
+    if okx_bd:
+        okx_detail = " + ".join(f"{c}=${v:.0f}" for c, v in okx_bd.items())
+        cap_okx_str = f"~${cap_okx:.0f} ({okx_detail})"
+    elif cap_okx > 0:
+        cap_okx_str = f"~${cap_okx:.0f} (solo USDT visible)"
+    else:
+        cap_okx_str = "sin datos"
 
     # Bitso stats
     b_opps  = _stats["bitso_opportunities"]
@@ -559,7 +572,7 @@ async def _cmd_stats() -> None:
         f"PnL Arb real:         ${_stats['arb_pnl']:+.4f}\n"
         f"PnL Total sesion:     ${total_pnl:+.4f}\n"
         f"Capital Bybit:        ~${cap_bybit:.0f}\n"
-        f"Capital OKX:          ~${cap_okx:.0f}\n"
+        f"Capital OKX:          {cap_okx_str}\n"
         f"\nTermometros de mercado\n"
         f"----------------------\n"
         f"BTC Dominancia:       {dom_line}\n"
