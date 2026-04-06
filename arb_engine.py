@@ -110,12 +110,10 @@ class ArbEngine:
             logger.info("[arb_engine] DESHABILITADO (ARB_ENGINE_ENABLED=False) — no iniciando subtareas")
             return
         asyncio.create_task(self._triangular.startup_check(), name="cross_arb_startup")
-        await asyncio.gather(
-            self._funding.run(),
-            self._lead_lag.run(),
-            self._bitso.run(),
-            self._periodic_summary(),
-        )
+        tasks = [self._funding.run(), self._bitso.run(), self._periodic_summary()]
+        if self._lead_lag is not None:
+            tasks.append(self._lead_lag.run())
+        await asyncio.gather(*tasks)
 
     # ── Price routing ─────────────────────────────────────────────────────────
 
@@ -169,16 +167,20 @@ class ArbEngine:
         Llamar cuando el spring detector de BTC emite senal.
         Activa el lead-lag arb en altcoins.
         """
+        if not ARB_ENGINE_ENABLED or self._lead_lag is None:
+            return
         self._lead_lag.on_btc_spring(btc_price)
 
     # ── Snapshot ──────────────────────────────────────────────────────────────
 
     def summary(self) -> ArbSummary:
-        f  = self._funding.snapshot()
-        c  = self._cross.snapshot()
-        ll = self._lead_lag.snapshot()
-        t  = self._triangular.snapshot()
-        b  = self._bitso.snapshot()
+        if not ARB_ENGINE_ENABLED:
+            return ArbSummary()
+        f  = self._funding.snapshot()   if self._funding   is not None else None
+        c  = self._cross.snapshot()     if self._cross     is not None else None
+        ll = self._lead_lag.snapshot()  if self._lead_lag  is not None else None
+        t  = self._triangular.snapshot() if self._triangular is not None else None
+        b  = self._bitso.snapshot()     if self._bitso     is not None else None
 
         total_pnl = f.total_pnl_usd + c.pnl_total_usd + ll.pnl_total_usd + t.pnl_total_usd
 
