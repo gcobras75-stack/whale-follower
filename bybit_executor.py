@@ -28,6 +28,11 @@ from loguru import logger
 import config
 from leverage_manager import LeverageManager
 
+# ── BYBIT COMPLETAMENTE BLOQUEADO PARA ÓRDENES ────────────────────────────
+# Railway IPs bloqueadas por Bybit (HTTP 403). Hardcoded=True, inmune a env vars.
+# Bybit puede seguir como fuente de DATOS (WebSocket), pero NO ejecuta órdenes.
+BYBIT_ORDERS_BLOCKED: bool = True
+
 
 @dataclass
 class PaperTrade:
@@ -78,6 +83,32 @@ class BybitTestnetExecutor:
 
     def __init__(self) -> None:
         self._production = config.PRODUCTION
+
+        if BYBIT_ORDERS_BLOCKED:
+            # Órdenes bloqueadas — solo se mantiene capital para registro interno
+            self._BASE_URL   = self._PRODUCTION_URL
+            self._api_key    = ""
+            self._api_secret = ""
+            self._capital    = config.REAL_CAPITAL if config.PRODUCTION else config.PAPER_CAPITAL
+            self._trades: List[PaperTrade] = []
+            self._enabled    = False  # FORZADO — inmune a API keys
+            logger.warning(
+                "[executor] BYBIT BLOQUEADO (BYBIT_ORDERS_BLOCKED=True) — "
+                "sin órdenes, OKX sigue operando"
+            )
+            self._daily_loss_usd: float = 0.0
+            self._daily_reset_ts: float = time.time()
+            self._trade_history: List[tuple] = []
+            self._ml_model = None
+            max_lev = 1
+            self._leverage_mgr = LeverageManager(
+                initial_capital     = self._capital,
+                min_trades          = config.MIN_TRADES_FOR_LEVERAGE,
+                max_leverage        = max_lev,
+                warmup_win_rate_pct = config.LEVERAGE_WARMUP_WR,
+                warmup_samples      = config.LEVERAGE_WARMUP_SAMPLES,
+            )
+            return
 
         if self._production:
             self._BASE_URL   = self._PRODUCTION_URL
@@ -141,6 +172,8 @@ class BybitTestnetExecutor:
         Intenta accountType=UNIFIED primero; si retorna 0, intenta SPOT.
         Actualiza self._capital con el valor real encontrado.
         """
+        if BYBIT_ORDERS_BLOCKED:
+            return self._capital  # no llamar API Bybit — evita 403
         if not self._api_key or not self._api_secret:
             return self._capital
         try:
@@ -195,6 +228,8 @@ class BybitTestnetExecutor:
         Abre un nuevo trade. Devuelve PaperTrade o None si hubo error.
         size_usd: si se pasa, usa ese monto; si no, 1% del capital.
         """
+        if BYBIT_ORDERS_BLOCKED:  # ─ BLOQUEO TOTAL ─ hardcoded, inmune a cualquier config
+            return None
         if not self._enabled:
             return None
 
@@ -554,6 +589,8 @@ class BybitTestnetExecutor:
         Coloca orden MARKET SELL por coin_qty en Bybit Spot para cerrar posición LONG.
         Usa el balance real recién consultado — sin estimaciones.
         """
+        if BYBIT_ORDERS_BLOCKED:  # ─ BLOQUEO TOTAL ─
+            return False
         if not self._api_key or not self._api_secret:
             return False
         ts       = int(time.time() * 1000)
@@ -617,6 +654,8 @@ class BybitTestnetExecutor:
 
     async def _place_order(self, trade: PaperTrade) -> bool:
         """Envía orden MARKET a Bybit Testnet."""
+        if BYBIT_ORDERS_BLOCKED:  # ─ BLOQUEO TOTAL ─
+            return False
         if not self._api_key or not self._api_secret:
             return False
 
