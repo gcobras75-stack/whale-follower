@@ -41,6 +41,14 @@ _GRID_CONFIG: Dict[str, dict] = {
         "atr_mult":    2.0,
         "bb_period":   20,
     },
+    "DOGEUSDT": {
+        "levels":      4,
+        "capital_usd": 10.0,    # $10 OKX — $2.50/nivel
+        "min_spacing": 0.004,
+        "max_spacing": 0.030,
+        "atr_mult":    2.5,
+        "bb_period":   20,
+    },
 }
 
 _MIN_ORDER_OKX     = 1.0      # OKX SPOT mínimo ~$1 USD
