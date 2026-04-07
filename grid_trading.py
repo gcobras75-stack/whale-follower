@@ -129,6 +129,7 @@ class GridState:
     paused:         bool  = False
     pause_reason:   str   = ""
     paper_mode:     bool  = False   # True si nivel < minimo Bybit spot
+    trend_bearish:  bool  = False   # True cuando precio < MA20 → solo sell
     created_at:     float = field(default_factory=time.time)
     last_rebalance: float = field(default_factory=time.time)
 
@@ -354,6 +355,12 @@ class GridTradingEngine:
     # ── Level evaluation ──────────────────────────────────────────────────────
 
     def _evaluate_levels(self, grid: GridState, pair: str, price: float) -> None:
+        bearish = self._is_bearish(pair)
+        if bearish != grid.trend_bearish:
+            grid.trend_bearish = bearish
+            mode = "BAJISTA ⚠️ solo-sell" if bearish else "NEUTRAL ✅ buy+sell"
+            logger.info("[grid] {} tendencia cambió → {} (precio={:.2f} vs MA20={:.2f})",
+                        pair, mode, price, self._ma20(pair))
         for level in grid.levels:
             if level.pending:
                 continue   # esperando respuesta de Bybit API
@@ -362,7 +369,9 @@ class GridTradingEngine:
                     self._fill_sell(grid, level, price)
                 continue
             if level.side == "buy" and price <= level.price:
-                self._fill_buy(grid, level, price, pair)
+                if not bearish:
+                    self._fill_buy(grid, level, price, pair)
+                # En tendencia bajista: ignorar compras, no atrapar cuchillos
 
     def _fill_buy(self, grid: GridState, level: GridLevel, price: float, pair: str) -> None:
         if self._production:
@@ -401,6 +410,20 @@ class GridTradingEngine:
         else:
             spacing = cfg["min_spacing"]
         return spacing
+
+    def _is_bearish(self, pair: str) -> bool:
+        """True si precio actual < MA20 con margen 0.1% → tendencia bajista."""
+        prices = list(self._prices[pair])
+        if len(prices) < 20:
+            return False
+        ma20 = sum(prices[-20:]) / 20
+        return prices[-1] < ma20 * 0.999
+
+    def _ma20(self, pair: str) -> float:
+        prices = list(self._prices[pair])
+        if len(prices) < 20:
+            return 0.0
+        return sum(prices[-20:]) / 20
 
     def _bollinger(self, pair: str) -> Tuple[float, float, float]:
         """Retorna (upper, lower, mid) de Bollinger Bands."""

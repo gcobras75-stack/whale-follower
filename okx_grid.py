@@ -81,6 +81,7 @@ class OKXGridState:
     pnl_total:      float = 0.0
     cycles_done:    int   = 0
     paper_mode:     bool  = False
+    trend_bearish:  bool  = False   # True cuando precio < MA20 → solo sell
     paused:         bool  = False
     pause_reason:   str   = ""
     created_at:     float = field(default_factory=time.time)
@@ -254,6 +255,12 @@ class OKXGridEngine:
     # ── Level evaluation ──────────────────────────────────────────────────────
 
     def _evaluate_levels(self, grid: OKXGridState, pair: str, price: float) -> None:
+        bearish = self._is_bearish(pair)
+        if bearish != grid.trend_bearish:
+            grid.trend_bearish = bearish
+            mode = "BAJISTA ⚠️ solo-sell" if bearish else "NEUTRAL ✅ buy+sell"
+            logger.info("[okx_grid] {} tendencia → {} (precio={:.4f} vs MA20={:.4f})",
+                        pair, mode, price, self._ma20(pair))
         for level in grid.levels:
             if level.pending:
                 continue
@@ -262,7 +269,9 @@ class OKXGridEngine:
                     self._fill_sell(grid, level, price)
                 continue
             if level.side == "buy" and price <= level.price:
-                self._fill_buy(grid, level, price, pair)
+                if not bearish:
+                    self._fill_buy(grid, level, price, pair)
+                # En tendencia bajista: ignorar compras, no atrapar cuchillos
 
     def _fill_buy(self, grid: OKXGridState, level: OKXLevel,
                   price: float, pair: str) -> None:
@@ -364,6 +373,20 @@ class OKXGridEngine:
             level.pending = False
 
     # ── Utils ─────────────────────────────────────────────────────────────────
+
+    def _is_bearish(self, pair: str) -> bool:
+        """True si precio actual < MA20 con margen 0.1% → tendencia bajista."""
+        prices = list(self._prices[pair])
+        if len(prices) < 20:
+            return False
+        ma20 = sum(prices[-20:]) / 20
+        return prices[-1] < ma20 * 0.999
+
+    def _ma20(self, pair: str) -> float:
+        prices = list(self._prices[pair])
+        if len(prices) < 20:
+            return 0.0
+        return sum(prices[-20:]) / 20
 
     def _calc_spacing(self, pair: str, cfg: dict) -> float:
         """Spacing dinámico: 50% del ancho BB actual, floor = min_spacing (OKX fees 0.2%)."""
