@@ -84,8 +84,10 @@ class OKXGridState:
     trend_bearish:  bool  = False   # True cuando precio < MA20 → solo sell
     paused:         bool  = False
     pause_reason:   str   = ""
-    created_at:     float = field(default_factory=time.time)
-    last_rebalance: float = field(default_factory=time.time)
+    created_at:          float = field(default_factory=time.time)
+    last_rebalance:      float = field(default_factory=time.time)
+    consecutive_errors:  int   = 0    # fallos seguidos → auto-papel al llegar a 3
+    last_order_ts:       float = 0.0  # timestamp última orden real (rate-limit guard)
 
 
 class OKXGridEngine:
@@ -332,8 +334,15 @@ class OKXGridEngine:
     async def _handle_buy_real(self, grid: OKXGridState, level: OKXLevel,
                                 price: float, pair: str) -> None:
         try:
+            # Rate-limit guard: mínimo 1s entre órdenes reales por par
+            elapsed = time.time() - grid.last_order_ts
+            if elapsed < 1.0:
+                await asyncio.sleep(1.0 - elapsed)
+
             result = await self._okx_exec.market_order(pair, "buy", level.size_usd, price)
             if result:
+                grid.consecutive_errors = 0
+                grid.last_order_ts      = time.time()
                 level.filled     = True
                 level.fill_price = price
                 level.fill_ts    = time.time()
@@ -343,12 +352,19 @@ class OKXGridEngine:
                     price=sell_price, side="sell", size_usd=level.size_usd,
                     fill_price=price, filled=True,
                 ))
-                logger.info("[okx_grid] 🟢 REAL BUY {} @ {:.4f} → sell @ {:.4f}",
+                logger.info("[okx_grid] \U0001f7e2 REAL BUY {} @ {:.4f} \u2192 sell @ {:.4f}",
                             pair, price, sell_price)
-                await self._alert(f"🟢 [OKX GRID] BUY {pair} @ {price:.4f} → sell @ {sell_price:.4f} | ${level.size_usd:.0f}")
+                await self._alert(f"\U0001f7e2 [OKX GRID] BUY {pair} @ {price:.4f} \u2192 sell @ {sell_price:.4f} | ${level.size_usd:.0f}")
             else:
-                logger.error("[okx_grid] ❌ BUY FAILED {} @ {:.4f}", pair, price)
+                grid.consecutive_errors += 1
+                logger.error("[okx_grid] \u274c BUY FAILED {} @ {:.4f} (fallo {})",
+                             pair, price, grid.consecutive_errors)
+                if grid.consecutive_errors >= 3:
+                    grid.paper_mode  = True
+                    grid.pause_reason = f"3 fallos seguidos \u2192 PAPEL autom\u00e1tico"
+                    logger.warning("[okx_grid] {} \u2192 PAPEL autom\u00e1tico (3 errores consecutivos)", pair)
         except Exception as exc:
+            grid.consecutive_errors += 1
             logger.error("[okx_grid] _handle_buy_real error: {}", exc)
         finally:
             level.pending = False
@@ -356,23 +372,35 @@ class OKXGridEngine:
     async def _handle_sell_real(self, grid: OKXGridState, level: OKXLevel,
                                  price: float) -> None:
         try:
+            # Rate-limit guard: mínimo 1s entre órdenes reales por par
+            elapsed = time.time() - grid.last_order_ts
+            if elapsed < 1.0:
+                await asyncio.sleep(1.0 - elapsed)
+
             result = await self._okx_exec.market_order(grid.pair, "sell", level.size_usd, price)
             if result:
+                grid.consecutive_errors = 0
+                grid.last_order_ts      = time.time()
                 level.order_id = result.get("order_id", "")
                 self._record_sell(grid, level, price)
-                logger.info("[okx_grid] 🟢 REAL SELL {} @ {:.4f}", grid.pair, price)
+                logger.info("[okx_grid] \U0001f7e2 REAL SELL {} @ {:.4f}", grid.pair, price)
                 await self._alert(
-                    f"🟢 [OKX GRID] SELL {grid.pair} @ {price:.4f} "
+                    f"\U0001f7e2 [OKX GRID] SELL {grid.pair} @ {price:.4f} "
                     f"pnl=${level.pnl:.3f} total=${grid.pnl_total:.3f}"
                 )
             else:
-                logger.error("[okx_grid] ❌ SELL FAILED {} @ {:.4f}", grid.pair, price)
+                grid.consecutive_errors += 1
+                logger.error("[okx_grid] \u274c SELL FAILED {} @ {:.4f} (fallo {})",
+                             grid.pair, price, grid.consecutive_errors)
+                if grid.consecutive_errors >= 3:
+                    grid.paper_mode  = True
+                    grid.pause_reason = f"3 fallos seguidos \u2192 PAPEL autom\u00e1tico"
+                    logger.warning("[okx_grid] {} \u2192 PAPEL autom\u00e1tico (3 errores consecutivos)", grid.pair)
         except Exception as exc:
+            grid.consecutive_errors += 1
             logger.error("[okx_grid] _handle_sell_real error: {}", exc)
         finally:
             level.pending = False
-
-    # ── Utils ─────────────────────────────────────────────────────────────────
 
     def _is_bearish(self, pair: str) -> bool:
         """True si precio actual cayó >1% bajo el centro del grid → tendencia bajista."""

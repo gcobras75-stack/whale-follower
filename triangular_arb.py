@@ -490,7 +490,7 @@ class TriangularArb:
         from bybit_utils import place_spot_order
         try:
             bybit_result, okx_result = await asyncio.gather(
-                place_spot_order(pair, bybit_side, _qty, caller="triangular_arb"),
+                place_spot_order(pair, bybit_side, _qty, caller="triangular_arb", price=buy_price),
                 self._okx_spot_order(okx_symbol, okx_side, _qty, size_usd=size_usd),
                 return_exceptions=True,
             )

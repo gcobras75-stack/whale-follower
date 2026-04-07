@@ -80,7 +80,9 @@ class FuturesGrid:
     paused:         bool  = False
     paper_mode:     bool  = True
     trend_bearish:  bool  = False   # True cuando precio < MA20 → solo sell
-    last_rebalance: float = field(default_factory=time.time)
+    last_rebalance:      float = field(default_factory=time.time)
+    consecutive_errors:  int   = 0    # fallos seguidos → auto-papel al llegar a 3
+    last_order_ts:       float = 0.0  # rate-limit guard (mín 1s entre órdenes)
 
 
 class OKXFuturesGrid:
@@ -293,6 +295,11 @@ class OKXFuturesGrid:
     async def _handle_buy_real(self, grid: FuturesGrid, level: FuturesLevel,
                                 price: float, pair: str) -> None:
         try:
+            # Rate-limit guard: mínimo 1s entre órdenes reales por par
+            elapsed = time.time() - grid.last_order_ts
+            if elapsed < 1.0:
+                await asyncio.sleep(1.0 - elapsed)
+
             cfg         = _FUTURES_CONFIG[pair]
             ct_val      = cfg["ct_val"]
             n_contracts = max(1, round(level.size_usd / (price * ct_val)))
@@ -300,6 +307,8 @@ class OKXFuturesGrid:
                 grid.inst_id, "buy", n_contracts, price
             )
             if result:
+                grid.consecutive_errors = 0
+                grid.last_order_ts      = time.time()
                 level.filled     = True
                 level.fill_price = price
                 level.fill_ts    = time.time()
@@ -311,8 +320,15 @@ class OKXFuturesGrid:
                 logger.info("[okx_fut] 🟢 REAL BUY {} @ {:.4f} contracts={}", pair, price, n_contracts)
                 await self._alert(f"🟢 [OKX SWAP] BUY {pair} @ {price:.4f} → sell @ {sell_price:.4f}")
             else:
-                logger.error("[okx_fut] ❌ BUY FAILED {} @ {:.4f}", pair, price)
+                grid.consecutive_errors += 1
+                logger.error("[okx_fut] ❌ BUY FAILED {} @ {:.4f} (fallo {})",
+                             pair, price, grid.consecutive_errors)
+                if grid.consecutive_errors >= 3:
+                    grid.paper_mode  = True
+                    grid.pause_reason = "3 fallos seguidos → PAPEL automático"
+                    logger.warning("[okx_fut] {} → PAPEL automático (3 errores consecutivos)", pair)
         except Exception as exc:
+            grid.consecutive_errors += 1
             logger.error("[okx_fut] _handle_buy_real error: {}", exc)
         finally:
             level.pending = False
@@ -320,6 +336,11 @@ class OKXFuturesGrid:
     async def _handle_sell_real(self, grid: FuturesGrid, level: FuturesLevel,
                                  price: float) -> None:
         try:
+            # Rate-limit guard: mínimo 1s entre órdenes reales por par
+            elapsed = time.time() - grid.last_order_ts
+            if elapsed < 1.0:
+                await asyncio.sleep(1.0 - elapsed)
+
             cfg         = _FUTURES_CONFIG[grid.pair]
             ct_val      = cfg["ct_val"]
             n_contracts = max(1, round(level.size_usd / (price * ct_val)))
@@ -327,11 +348,20 @@ class OKXFuturesGrid:
                 grid.inst_id, "sell", n_contracts, price
             )
             if result:
+                grid.consecutive_errors = 0
+                grid.last_order_ts      = time.time()
                 self._record_sell(grid, level, price)
                 logger.info("[okx_fut] 🟢 REAL SELL {} @ {:.4f}", grid.pair, price)
             else:
-                logger.error("[okx_fut] ❌ SELL FAILED {} @ {:.4f}", grid.pair, price)
+                grid.consecutive_errors += 1
+                logger.error("[okx_fut] ❌ SELL FAILED {} @ {:.4f} (fallo {})",
+                             grid.pair, price, grid.consecutive_errors)
+                if grid.consecutive_errors >= 3:
+                    grid.paper_mode  = True
+                    grid.pause_reason = "3 fallos seguidos → PAPEL automático"
+                    logger.warning("[okx_fut] {} → PAPEL automático (3 errores consecutivos)", grid.pair)
         except Exception as exc:
+            grid.consecutive_errors += 1
             logger.error("[okx_fut] _handle_sell_real error: {}", exc)
         finally:
             level.pending = False
