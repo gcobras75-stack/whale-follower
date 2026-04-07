@@ -28,7 +28,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "ETHUSDT": {
         "levels":      4,
         "capital_usd": 25.0,    # $25 OKX — $6.25/nivel
-        "min_spacing": 0.008,
+        "min_spacing": 0.004,
         "max_spacing": 0.018,
         "atr_mult":    1.5,
         "bb_period":   20,
@@ -36,7 +36,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "SOLUSDT": {
         "levels":      4,
         "capital_usd": 20.0,    # $20 OKX — $5/nivel
-        "min_spacing": 0.010,
+        "min_spacing": 0.004,
         "max_spacing": 0.022,
         "atr_mult":    2.0,
         "bb_period":   20,

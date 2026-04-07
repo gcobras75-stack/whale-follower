@@ -48,7 +48,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
         "levels":        4,         # reducido para capital real ($30)
         "capital_usd":   30.0,      # $30 total — $7.50 por nivel
-        "min_spacing":   0.008,
+        "min_spacing":   0.004,
         "max_spacing":   0.015,
         "atr_mult":      1.5,
         "bb_period":     20,
@@ -57,7 +57,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "ETHUSDT": {
         "levels":        2,         # 2 niveles para capital real ($25 → $12.50/nivel > min Bybit)
         "capital_usd":   25.0,      # $25 total — $12.50 por nivel
-        "min_spacing":   0.010,
+        "min_spacing":   0.004,
         "max_spacing":   0.020,
         "atr_mult":      2.0,
         "bb_period":     20,
@@ -66,7 +66,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "SOLUSDT": {
         "levels":        2,         # reducido para capital real ($20)
         "capital_usd":   20.0,      # $20 total — $10 por nivel
-        "min_spacing":   0.012,
+        "min_spacing":   0.004,
         "max_spacing":   0.025,
         "atr_mult":      2.5,
         "bb_period":     20,
