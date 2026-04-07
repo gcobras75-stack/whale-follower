@@ -46,8 +46,8 @@ from bybit_utils import place_spot_order as _bybit_ws_order
 # ── Config por par ────────────────────────────────────────────────────────────
 _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
-        "levels":        4,         # reducido para capital real ($30)
-        "capital_usd":   30.0,      # $30 total — $7.50 por nivel
+        "levels":        2,         # 2 niveles → $30/2=$15 por nivel > $11 mínimo Bybit
+        "capital_usd":   30.0,      # $30 total — $15 por nivel
         "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
         "max_spacing":   0.015,
         "atr_mult":      1.5,
@@ -88,11 +88,11 @@ _MIN_QTY: Dict[str, float] = {
     "SOLUSDT": 0.5,    # Bybit spot SOLUSDT minimo real = 0.5 SOL ~ $67
 }
 
-# Minimo en USD por orden (derivado de _MIN_QTY * precio referencia)
+# Minimo en USD por orden (basado en _MIN_ORDER_QTY de bybit_utils)
 _MIN_ORDER_USD: Dict[str, float] = {
-    "BTCUSDT": 5.0,    # 0.000048 BTC * $84k ~ $4  → redondeamos a $5
-    "ETHUSDT": 11.0,   # 0.005 ETH    * $2100 ~ $10.50 → redondeamos a $11
-    "SOLUSDT": 67.0,   # 0.5 SOL      * $134 ~ $67
+    "BTCUSDT": 11.0,   # 0.000149 BTC * $68k ~ $10.20 → redondeamos a $11
+    "ETHUSDT": 22.0,   # 0.01 ETH     * $2100 ~ $21   → redondeamos a $22
+    "SOLUSDT": 67.0,   # 0.5 SOL      * $134  ~ $67
 }
 
 _FEES_PCT             = 0.0002    # 0.02% por lado (maker/taker Bybit)
@@ -598,9 +598,17 @@ class GridTradingEngine:
             self._bybit_balance = max(0, self._bybit_balance - size_usd)
             return order_id
 
-        ret_msg = result.get("retMsg", "sin respuesta") if result else "sin respuesta"
+        ret_msg  = result.get("retMsg", "sin respuesta") if result else "sin respuesta"
+        ret_code = result.get("retCode", 0) if result else 0
         logger.error("[grid] \u274c ORDER FALLIDA {} {} — {}", side, pair, ret_msg)
         await self._alert_order_error(pair, side, size_usd, ret_msg)
+        # retCode 170140 = "Order value exceeded lower limit" → pasar a papel
+        if ret_code == 170140 or "lower limit" in ret_msg.lower():
+            grid = self._grids.get(pair)
+            if grid and not grid.paper_mode:
+                grid.paper_mode   = True
+                grid.pause_reason = "mínimo Bybit no alcanzado → modo PAPEL"
+                logger.warning("[grid] {} → PAPEL automático (retCode=170140 — orden < mínimo)", pair)
         return None
 
     async def _handle_buy(self, grid: GridState, level: GridLevel,
@@ -645,7 +653,7 @@ class GridTradingEngine:
             logger.info("[grid] REAL COMPRA {} @ {:.4f} -> venta programada @ {:.4f}",
                         pair, price, sell_price)
         else:
-            level.pending = False   # liberar para que pueda intentarse de nuevo
+            level.pending = False   # liberar para siguiente tick
 
     async def _handle_sell(self, grid: GridState, level: GridLevel, price: float) -> None:
         """Ejecuta venta en Bybit SPOT (o papel si grid.paper_mode)."""

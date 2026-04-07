@@ -307,8 +307,8 @@ async def _place_order_via_ws(
 # Mínimo por par en Bybit SPOT (retCode=170140 si se viola)
 _MIN_ORDER_USD  = 10.0
 _MIN_ORDER_QTY: dict = {
-    "BTCUSDT": 0.000149,
-    "ETHUSDT": 0.005,
+    "BTCUSDT": 0.000149,   # $10.20 a $68k
+    "ETHUSDT": 0.01,       # $21 a $2100 (Bybit elevó mínimo en 2025)
     "SOLUSDT": 0.125,
 }
 
@@ -333,7 +333,7 @@ async def place_spot_order(
         logger.error("[{}] place_spot_order: keys vacías", caller)
         return {}
 
-    # ── Validar mínimo $10 USD (evita retCode=170140) ─────────────────────────
+    # ── Validar mínimo en USD (evita retCode=170140) ─────────────────────────
     if price > 0:
         qty_usd = qty * price
         if qty_usd < _MIN_ORDER_USD:
@@ -342,14 +342,14 @@ async def place_spot_order(
                 "[{}] Ajustando {} {} al mínimo ${:.0f}: qty={:.6f} (era ${:.2f})",
                 caller, symbol, side, _MIN_ORDER_USD, qty, qty_usd,
             )
-    else:
-        min_qty = _MIN_ORDER_QTY.get(symbol, 0.001)
-        if qty < min_qty:
-            logger.info(
-                "[{}] Ajustando {} qty al mínimo: {:.6f} → {:.6f}",
-                caller, symbol, qty, min_qty,
-            )
-            qty = round(min_qty, 6)
+    # ── Siempre verificar mínimo qty (el ajuste USD puede no alcanzar el mínimo) ─
+    min_qty = _MIN_ORDER_QTY.get(symbol, 0.001)
+    if qty < min_qty:
+        logger.info(
+            "[{}] Ajustando {} qty al mínimo qty: {:.6f} → {:.6f} (~${:.2f})",
+            caller, symbol, qty, min_qty, min_qty * price,
+        )
+        qty = round(min_qty, 6)
 
     # ── Cancelar si valor < $5 (absoluto — no enviar ni con ajuste) ────────────
     if price > 0 and qty * price < 5.0:
