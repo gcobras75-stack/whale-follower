@@ -50,9 +50,26 @@ _stats: Dict[str, Any] = {
         "wyckoff":        0.0,
         "arb":            0.0,
     },
+    # Contadores de trades por estrategia: {strat: {"total": 0, "wins": 0, "losses": 0}}
+    "trades_by_strategy": {
+        "grid":           {"total": 0, "wins": 0, "losses": 0},
+        "okx_grid":       {"total": 0, "wins": 0, "losses": 0},
+        "mean_reversion": {"total": 0, "wins": 0, "losses": 0},
+        "ofi":            {"total": 0, "wins": 0, "losses": 0},
+        "delta_neutral":  {"total": 0, "wins": 0, "losses": 0},
+        "wyckoff":        {"total": 0, "wins": 0, "losses": 0},
+        "arb":            {"total": 0, "wins": 0, "losses": 0},
+    },
+    # Historial de PnL para gráficos (últimas 24h, una entrada por hora)
+    "pnl_hourly": [],          # lista de floats, se agrega cada hora
+    "pnl_hourly_ts": [],       # timestamps correspondientes
+    "pnl_session_curve": [],   # todos los P&L acumulados en orden para curva de equity
+    # Top trades para el reporte
+    "top_trades": [],          # lista de dicts {strategy, pnl, pair, ts}
     # Drawdown tracking
     "capital_peak":      0.0,
     "drawdown_alerted":  False,   # para no spamear alertas
+    "max_drawdown_pct":  0.0,     # máximo drawdown histórico de la sesión
     # Auto-report
     "last_auto_report":  time.time(),
 }
@@ -71,11 +88,44 @@ _thermometers: Dict[str, Any] = {
 
 # ── Stats public API ──────────────────────────────────────────────────
 
-def record_strategy_pnl(strategy: str, pnl: float) -> None:
-    """Registrar P&L por estrategia. Actualiza position_sizer si hay capital."""
+def record_strategy_pnl(strategy: str, pnl: float, pair: str = "") -> None:
+    """Registrar P&L por estrategia. Actualiza contadores de wins/losses e historial."""
     _stats["pnl_by_strategy"][strategy] = (
         _stats["pnl_by_strategy"].get(strategy, 0.0) + pnl
     )
+    # Win/Loss counter
+    t = _stats["trades_by_strategy"].setdefault(
+        strategy, {"total": 0, "wins": 0, "losses": 0}
+    )
+    t["total"] += 1
+    if pnl > 0:
+        t["wins"] += 1
+    elif pnl < 0:
+        t["losses"] += 1
+    # Equity curve (P&L acumulado)
+    prev = _stats["pnl_session_curve"][-1] if _stats["pnl_session_curve"] else 0.0
+    _stats["pnl_session_curve"].append(round(prev + pnl, 4))
+    if len(_stats["pnl_session_curve"]) > 500:
+        _stats["pnl_session_curve"] = _stats["pnl_session_curve"][-500:]
+    # Top trades (guardar los 20 mejores y 20 peores)
+    _stats["top_trades"].append({
+        "strategy": strategy, "pnl": round(pnl, 4),
+        "pair": pair or strategy.upper(), "ts": time.time(),
+    })
+    if len(_stats["top_trades"]) > 200:
+        _stats["top_trades"] = _stats["top_trades"][-200:]
+    # Hourly bucket
+    now = time.time()
+    ts_list  = _stats["pnl_hourly_ts"]
+    pnl_list = _stats["pnl_hourly"]
+    if ts_list and now - ts_list[-1] < 3600:
+        pnl_list[-1] = round(pnl_list[-1] + pnl, 4)
+    else:
+        ts_list.append(now)
+        pnl_list.append(round(pnl, 4))
+        if len(ts_list) > 24:
+            ts_list.pop(0)
+            pnl_list.pop(0)
 
 def check_drawdown() -> float:
     """Calcula drawdown actual y emite alerta Telegram si supera umbral."""
@@ -90,6 +140,8 @@ def check_drawdown() -> float:
     if peak <= 0:
         return 0.0
     dd_pct = (peak - cap) / peak * 100
+    if dd_pct > _stats["max_drawdown_pct"]:
+        _stats["max_drawdown_pct"] = round(dd_pct, 2)
     if dd_pct >= 5.0 and not _stats["drawdown_alerted"]:
         _stats["drawdown_alerted"] = True
         asyncio.ensure_future(_send_drawdown_alert(dd_pct, cap, peak))
@@ -638,6 +690,8 @@ async def handle_telegram_commands(executor: Any) -> None:
                     await _cmd_status()
                 elif text == "/stats":
                     await _cmd_stats()
+                elif text in ("/report", "/analytics"):
+                    await _cmd_report()
                 elif text == "/last":
                     await _cmd_last()
                 elif text == "/trades":
@@ -776,6 +830,154 @@ async def _cmd_stats() -> None:
         f"DXY:                  {dxy_line}\n"
         f"\nUptime:               {h}h {m}m\n"
     )
+
+
+async def _cmd_report() -> None:
+    """Reporte avanzado /report con métricas, gráficos de texto y top trades."""
+    import math
+
+    def _color_pnl(pnl: float) -> str:
+        if pnl > 0:   return f"🟢 +${pnl:.4f}"
+        if pnl < 0:   return f"🔴 ${pnl:.4f}"
+        return f"⚪ $0.0000"
+
+    def _bar(value: float, max_val: float, width: int = 12) -> str:
+        if max_val == 0:
+            return "⬜" * width
+        ratio = min(abs(value) / abs(max_val), 1.0)
+        filled = max(1, int(ratio * width)) if value != 0 else 0
+        empty  = width - filled
+        tile   = "🟩" if value >= 0 else "🟥"
+        return tile * filled + "⬜" * empty
+
+    uptime    = int(time.time() - _stats["start_time"])
+    h, m      = divmod(uptime // 60, 60)
+    total_cap = (_stats["capital_bybit"] or 0) + (_stats["capital_okx"] or 0)
+    pnl_strat = _stats["pnl_by_strategy"]
+    trades_st = _stats["trades_by_strategy"]
+    total_pnl = sum(pnl_strat.values())
+    roi_pct   = (total_pnl / total_cap * 100) if total_cap > 0 else 0.0
+
+    # ── Métricas globales ────────────────────────────────────────────────────
+    total_trades  = sum(v["total"]  for v in trades_st.values())
+    total_wins    = sum(v["wins"]   for v in trades_st.values())
+    total_losses  = sum(v["losses"] for v in trades_st.values())
+    win_rate      = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
+
+    # Profit Factor = suma ganancias / suma pérdidas
+    gross_profit = sum(t["pnl"] for t in _stats["top_trades"] if t["pnl"] > 0)
+    gross_loss   = abs(sum(t["pnl"] for t in _stats["top_trades"] if t["pnl"] < 0))
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+
+    # Sharpe simplificado sobre equity curve
+    curve = _stats["pnl_session_curve"]
+    if len(curve) >= 2:
+        returns = [curve[i] - curve[i-1] for i in range(1, len(curve))]
+        avg_r   = sum(returns) / len(returns)
+        std_r   = math.sqrt(sum((r - avg_r)**2 for r in returns) / len(returns)) if len(returns) > 1 else 0
+        sharpe  = (avg_r / std_r * math.sqrt(len(returns))) if std_r > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    max_dd  = _stats["max_drawdown_pct"]
+    curr_dd = check_drawdown()
+
+    # ── Tabla por estrategia ─────────────────────────────────────────────────
+    max_abs_pnl = max((abs(v) for v in pnl_strat.values()), default=1.0) or 1.0
+    strat_lines = ""
+    for strat, pnl in pnl_strat.items():
+        td   = trades_st.get(strat, {"total": 0, "wins": 0, "losses": 0})
+        tot  = td["total"]
+        if tot == 0 and pnl == 0.0:
+            continue
+        wr   = (td["wins"] / tot * 100) if tot > 0 else 0.0
+        bar  = _bar(pnl, max_abs_pnl, width=10)
+        wr_e = "🟢" if wr >= 55 else ("🟡" if wr >= 45 else "🔴")
+        strat_lines += (
+            f"\n{strat.upper()[:13]:<13}\n"
+            f"  Trades: {tot} ({td['wins']}✓/{td['losses']}✗)  WR:{wr_e}{wr:.0f}%\n"
+            f"  PnL: {_color_pnl(pnl)}\n"
+            f"  {bar}\n"
+        )
+    if not strat_lines:
+        strat_lines = "\n  (sin operaciones completadas aun)\n"
+
+    # ── Gráfico hourly ───────────────────────────────────────────────────────
+    hourly  = _stats["pnl_hourly"]
+    h_ts    = _stats["pnl_hourly_ts"]
+    max_h   = max((abs(v) for v in hourly), default=1.0) or 1.0
+    hourly_chart = ""
+    for i, (ts, pnl_h) in enumerate(zip(h_ts, hourly)):
+        label = time.strftime("%H:%M", time.localtime(ts))
+        bar   = _bar(pnl_h, max_h, width=8)
+        hourly_chart += f"\n{label} {bar} {_color_pnl(pnl_h)}"
+    if not hourly_chart:
+        hourly_chart = "\n  (sin datos horarios aun)"
+
+    # ── Top 3 wins y losses ──────────────────────────────────────────────────
+    all_trades  = _stats["top_trades"]
+    top_wins    = sorted(all_trades, key=lambda x: x["pnl"], reverse=True)[:3]
+    top_losses  = sorted(all_trades, key=lambda x: x["pnl"])[:3]
+
+    win_lines  = "\n".join(
+        f"  {i+1}. {t['strategy']}: 🟢 +${t['pnl']:.4f} ({t['pair']})"
+        for i, t in enumerate(top_wins)
+    ) or "  (ninguna)"
+
+    loss_lines = "\n".join(
+        f"  {i+1}. {t['strategy']}: 🔴 ${t['pnl']:.4f} ({t['pair']})"
+        for i, t in enumerate(top_losses)
+    ) or "  (ninguna)"
+
+    # ── Recomendación ────────────────────────────────────────────────────────
+    if win_rate > 60 and profit_factor > 1.5:
+        rec = "✅ Excelente. Considera aumentar capital gradualmente."
+    elif win_rate > 50 and profit_factor > 1.0:
+        rec = "📈 Rendimiento positivo. Mantén la estrategia actual."
+    elif max_dd > 15:
+        rec = "⚠️ Drawdown elevado. Reduce tamaño de posiciones."
+    elif total_trades == 0:
+        rec = "📊 Sin trades aun. El bot está escaneando el mercado."
+    else:
+        rec = "📊 Mercado lateral. Espera señales más claras."
+
+    pf_str = f"{profit_factor:.2f}" if profit_factor != float("inf") else "∞"
+
+    report = (
+        f"📊 REPORTE ANALYTICS\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏱ Uptime: {h}h {m}m\n"
+        f"📅 {time.strftime('%Y-%m-%d %H:%M', time.localtime())} CST\n"
+        f"\n📈 RESUMEN GENERAL\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Capital Total:  ${total_cap:.0f}\n"
+        f"PnL Total:      {_color_pnl(total_pnl)}\n"
+        f"ROI sesion:     {roi_pct:+.2f}%\n"
+        f"\n📊 RENDIMIENTO POR ESTRATEGIA\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+        f"{strat_lines}"
+        f"\n📐 METRICAS AVANZADAS\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total Trades:   {total_trades} ({total_wins}✓ / {total_losses}✗)\n"
+        f"Win Rate:       {'🟢' if win_rate>=55 else '🔴'} {win_rate:.1f}%\n"
+        f"Profit Factor:  {pf_str}\n"
+        f"Sharpe Ratio:   {sharpe:.2f}\n"
+        f"Drawdown Max:   🔴 {max_dd:.1f}%\n"
+        f"Drawdown Act:   {curr_dd:.1f}%\n"
+        f"\n📉 EVOLUCION HORARIA\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+        f"{hourly_chart}\n"
+        f"\n🏆 MEJORES TRADES\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{win_lines}\n"
+        f"\n💀 PEORES TRADES\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{loss_lines}\n"
+        f"\n💡 RECOMENDACION\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{rec}"
+    )
+    await _reply(report)
 
 
 async def _cmd_last() -> None:
