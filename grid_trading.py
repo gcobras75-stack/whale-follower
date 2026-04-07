@@ -220,15 +220,16 @@ class GridTradingEngine:
                 )
             elif time.time() - self._out_of_range_since[pair] >= _REBALANCE_DELAY_SECS:
                 grid.paused = True
-                grid.pause_reason = f"precio fuera de rango BB x{_PAUSE_SIGMA}σ (>{_REBALANCE_DELAY_SECS}s)"
+                grid.pause_reason = f"precio fuera de rango BB x{_PAUSE_SIGMA}\u03c3 (>{_REBALANCE_DELAY_SECS}s)"
                 self._out_of_range_since.pop(pair, None)
                 logger.warning("[grid] {} PAUSADO: {}", pair, grid.pause_reason)
-            return
+                return
+            # Grace period: NO hacer return — evaluar niveles igual
+        else:
+            # Precio volvio al rango — limpiar timer de out-of-range
+            self._out_of_range_since.pop(pair, None)
 
-        # Precio volvio al rango — limpiar timer de out-of-range
-        self._out_of_range_since.pop(pair, None)
-
-        # Evaluar niveles del grid
+        # Evaluar niveles del grid (incluso durante grace period fuera de BB)
         self._evaluate_levels(grid, pair, price)
 
     def snapshot(self) -> GridSnapshot:
