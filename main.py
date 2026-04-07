@@ -164,6 +164,16 @@ async def trading_loop() -> None:
     )
     if okx_grid_eng:
         logger.info("[main] OKX Grid Engine iniciado ✅ (independiente de Bybit)")
+
+    # OKX Futures Grid — perpetuos USDT-M, fees 0.02% maker
+    okx_fut_mod = _try_import("okx_futures_grid")
+    okx_fut_eng = (
+        okx_fut_mod.OKXFuturesGrid(production=prod)
+        if okx_fut_mod
+        else None
+    )
+    if okx_fut_eng:
+        logger.info("[main] OKX Futures Grid iniciado ✅ (fees 0.02% maker)")
     ofi_eng   = ofi_mod.OFIEngine(production=prod)             if ofi_mod  else None
     mom_eng   = mom_mod.MomentumScalingEngine(production=prod) if mom_mod else None
     dn_eng    = dn_mod.DeltaNeutralEngine(production=prod)     if dn_mod  else None
@@ -422,6 +432,8 @@ async def trading_loop() -> None:
             grid_eng.on_price(trade.pair, trade.price)
         if okx_grid_eng:
             okx_grid_eng.on_price(trade.pair, trade.price)
+        if okx_fut_eng:
+            okx_fut_eng.on_price(trade.pair, trade.price)
         if ofi_eng and (not strat_mgr or strat_mgr_mod.is_active("ofi")):
             ofi_eng.on_trade_volume(trade.pair, trade.quantity)
             ofi_eng.on_price(trade.pair, trade.price)

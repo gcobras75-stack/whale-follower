@@ -48,7 +48,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
         "levels":        4,         # reducido para capital real ($30)
         "capital_usd":   30.0,      # $30 total — $7.50 por nivel
-        "min_spacing":   0.004,
+        "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
         "max_spacing":   0.015,
         "atr_mult":      1.5,
         "bb_period":     20,
@@ -57,7 +57,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "ETHUSDT": {
         "levels":        2,         # 2 niveles para capital real ($25 → $12.50/nivel > min Bybit)
         "capital_usd":   25.0,      # $25 total — $12.50 por nivel
-        "min_spacing":   0.004,
+        "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
         "max_spacing":   0.020,
         "atr_mult":      2.0,
         "bb_period":     20,
@@ -66,7 +66,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "SOLUSDT": {
         "levels":        2,         # reducido para capital real ($20)
         "capital_usd":   20.0,      # $20 total — $10 por nivel
-        "min_spacing":   0.004,
+        "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
         "max_spacing":   0.025,
         "atr_mult":      2.5,
         "bb_period":     20,
@@ -123,6 +123,7 @@ class GridState:
     spacing_pct:    float
     levels:         List[GridLevel] = field(default_factory=list)
     capital_used:   float = 0.0
+    capital_usd:    float = 0.0     # capital activo (crece con compounding)
     pnl_total:      float = 0.0
     cycles_done:    int   = 0
     paused:         bool  = False
@@ -306,6 +307,7 @@ class GridTradingEngine:
             spacing_pct  = spacing,
             levels       = levels,
             paper_mode   = paper,
+            capital_usd  = cfg["capital_usd"],
         )
         logger.info(
             "[grid] {} inicializado: centro={:.2f} spacing={:.3f}% niveles={} modo={}",
@@ -315,12 +317,24 @@ class GridTradingEngine:
         asyncio.create_task(self._alert_init(pair, center, spacing, n, paper))
 
     def _rebalance_grid(self, grid: GridState, pair: str, price: float) -> None:
-        """Recentrar el grid en el precio actual con spacing recalculado."""
+        """Recentrar el grid en el precio actual con spacing recalculado y compounding."""
         cfg     = _GRID_CONFIG[pair]
         spacing = self._calc_spacing(pair, cfg)
         n       = cfg["levels"]
-        cap_per_level = cfg["capital_usd"] / n
 
+        # Compounding: reinvertir 50% de profits acumulados (max +50% del capital base)
+        base_capital = cfg["capital_usd"]
+        if grid.pnl_total > 0:
+            compound_add = min(grid.pnl_total * 0.5, base_capital * 0.5)
+            new_capital  = base_capital + compound_add
+            if abs(new_capital - grid.capital_usd) >= 0.01:
+                logger.info("[grid] {} compounding: ${:.2f} → ${:.2f} (profit=${:.2f})",
+                            pair, grid.capital_usd, new_capital, grid.pnl_total)
+            grid.capital_usd = new_capital
+        elif grid.capital_usd <= 0:
+            grid.capital_usd = base_capital
+
+        cap_per_level = grid.capital_usd / n
         old_pnl = grid.pnl_total
         levels  = []
         for i in range(1, n // 2 + 1):
@@ -332,10 +346,10 @@ class GridTradingEngine:
         grid.spacing_pct    = spacing
         grid.levels         = levels
         grid.last_rebalance = time.time()
-        grid.pnl_total      = old_pnl   # preservar P&L acumulado
+        grid.pnl_total      = old_pnl
 
-        logger.info("[grid] {} rebalanceado: nuevo centro={:.2f} spacing={:.3f}%",
-                    pair, price, spacing * 100)
+        logger.info("[grid] {} rebalanceado: centro={:.2f} spacing={:.3f}% capital=${:.2f}",
+                    pair, price, spacing * 100, grid.capital_usd)
 
     # ── Level evaluation ──────────────────────────────────────────────────────
 
@@ -376,16 +390,17 @@ class GridTradingEngine:
     # ── ATR y Bollinger ───────────────────────────────────────────────────────
 
     def _calc_spacing(self, pair: str, cfg: dict) -> float:
-        """Spacing = ATR(14) * multiplicador, dentro de [min, max]."""
+        """Spacing dinámico: 50% del ancho BB actual, floor = min_spacing."""
         prices = list(self._prices[pair])
-        if len(prices) < 15:
+        if len(prices) < cfg["bb_period"] + 5:
             return cfg["min_spacing"]
-
-        # ATR aproximado con precios de cierre (ticks)
-        changes = [abs(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, 15)]
-        atr_pct = sum(changes) / len(changes)
-        spacing = atr_pct * cfg["atr_mult"]
-        return max(cfg["min_spacing"], min(cfg["max_spacing"], spacing))
+        bb_upper, bb_lower, bb_mean = self._bollinger(pair)
+        if bb_mean > 0:
+            bb_width_pct = (bb_upper - bb_lower) / bb_mean
+            spacing = max(cfg["min_spacing"], min(cfg["max_spacing"], bb_width_pct * 0.5))
+        else:
+            spacing = cfg["min_spacing"]
+        return spacing
 
     def _bollinger(self, pair: str) -> Tuple[float, float, float]:
         """Retorna (upper, lower, mid) de Bollinger Bands."""

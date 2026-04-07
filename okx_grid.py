@@ -28,7 +28,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     "ETHUSDT": {
         "levels":      4,
         "capital_usd": 25.0,    # $25 OKX — $6.25/nivel
-        "min_spacing": 0.004,
+        "min_spacing": 0.003,   # 0.3% — OKX fees 0.2% → neto 0.1%
         "max_spacing": 0.018,
         "atr_mult":    1.5,
         "bb_period":   20,
@@ -36,15 +36,15 @@ _GRID_CONFIG: Dict[str, dict] = {
     "SOLUSDT": {
         "levels":      4,
         "capital_usd": 20.0,    # $20 OKX — $5/nivel
-        "min_spacing": 0.004,
+        "min_spacing": 0.003,   # 0.3% — OKX fees 0.2% → neto 0.1%
         "max_spacing": 0.022,
         "atr_mult":    2.0,
         "bb_period":   20,
     },
     "DOGEUSDT": {
         "levels":      4,
-        "capital_usd": 10.0,    # $10 OKX — $2.50/nivel
-        "min_spacing": 0.004,
+        "capital_usd": 20.0,    # $20 OKX — $5/nivel (más volatilidad = más ciclos)
+        "min_spacing": 0.003,   # 0.3% — OKX fees 0.2% → neto 0.1%
         "max_spacing": 0.030,
         "atr_mult":    2.5,
         "bb_period":   20,
@@ -219,9 +219,20 @@ class OKXGridEngine:
         )
 
     def _rebalance_grid(self, grid: OKXGridState, pair: str, price: float) -> None:
-        cfg         = _GRID_CONFIG[pair]
-        spacing     = self._calc_spacing(pair, cfg)
-        n           = cfg["levels"]
+        cfg     = _GRID_CONFIG[pair]
+        spacing = self._calc_spacing(pair, cfg)
+        n       = cfg["levels"]
+
+        # Compounding: reinvertir 50% de profits acumulados (max +50% del capital base)
+        base_capital = cfg["capital_usd"]
+        if grid.pnl_total > 0:
+            compound_add    = min(grid.pnl_total * 0.5, base_capital * 0.5)
+            new_capital     = base_capital + compound_add
+            if abs(new_capital - grid.capital_usd) >= 0.01:
+                logger.info("[okx_grid] {} compounding: ${:.2f} → ${:.2f} (profit=${:.2f})",
+                            pair, grid.capital_usd, new_capital, grid.pnl_total)
+            grid.capital_usd = new_capital
+
         cap_per_lvl = grid.capital_usd / n
         old_pnl     = grid.pnl_total
 
@@ -237,8 +248,8 @@ class OKXGridEngine:
         grid.pnl_total      = old_pnl
         grid.last_rebalance = time.time()
 
-        logger.info("[okx_grid] {} rebalanceado: centro={:.2f} spacing={:.2f}%",
-                    pair, price, spacing * 100)
+        logger.info("[okx_grid] {} rebalanceado: centro={:.2f} spacing={:.2f}% capital=${:.2f}",
+                    pair, price, spacing * 100, grid.capital_usd)
 
     # ── Level evaluation ──────────────────────────────────────────────────────
 
@@ -355,13 +366,20 @@ class OKXGridEngine:
     # ── Utils ─────────────────────────────────────────────────────────────────
 
     def _calc_spacing(self, pair: str, cfg: dict) -> float:
+        """Spacing dinámico: 50% del ancho BB actual, floor = min_spacing (OKX fees 0.2%)."""
         prices = list(self._prices[pair])
-        if len(prices) < 15:
+        if len(prices) < cfg["bb_period"] + 5:
             return cfg["min_spacing"]
-        changes = [abs(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, 15)]
-        atr_pct = sum(changes) / len(changes)
-        spacing = atr_pct * cfg["atr_mult"]
-        return max(cfg["min_spacing"], min(cfg["max_spacing"], spacing))
+        prices_slice = prices[-cfg["bb_period"]:]
+        mid      = sum(prices_slice) / len(prices_slice)
+        variance = sum((p - mid) ** 2 for p in prices_slice) / len(prices_slice)
+        std      = variance ** 0.5
+        if mid > 0:
+            bb_width_pct = (4 * std) / mid   # bb_std=2 → upper-lower = 4*std
+            spacing = max(cfg["min_spacing"], min(cfg["max_spacing"], bb_width_pct * 0.5))
+        else:
+            spacing = cfg["min_spacing"]
+        return spacing
 
     def _check_circuit_breaker(self, grid: OKXGridState) -> bool:
         if grid.capital_usd > 0 and grid.pnl_total < -(grid.capital_usd * _CIRCUIT_BREAKER):
