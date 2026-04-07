@@ -367,7 +367,9 @@ class MeanReversionEngine:
         asyncio.create_task(db_writer.save_mr_open(trade))
 
     def _add_tramo(self, trade: MRTrade, price: float, tramo_num: int) -> None:
-        size = _BASE_SIZE_USD * _TRAMO_SIZES[tramo_num - 1]
+        is_real = self._production and not self._paper_mode
+        base = (self._real_capital_usd * _REAL_SIZE_PCT if is_real else _BASE_SIZE_USD)
+        size = base * _TRAMO_SIZES[tramo_num - 1]
         # Precio promedio ponderado
         total_cost   = trade.avg_entry * trade.total_size + price * size
         trade.total_size += size
@@ -415,7 +417,8 @@ class MeanReversionEngine:
             return
         trade.status     = "closed"
         trade.exit_price = exit_price
-        pnl_pct          = (exit_price - trade.avg_entry) / trade.avg_entry
+        fees_pct         = 0.0006   # 0.03% entrada + 0.03% salida (Bybit maker spot)
+        pnl_pct          = (exit_price - trade.avg_entry) / trade.avg_entry - fees_pct
         trade.pnl_usd    = trade.size_usd * pnl_pct
 
         logger.info(
