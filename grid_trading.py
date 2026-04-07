@@ -412,18 +412,19 @@ class GridTradingEngine:
         return spacing
 
     def _is_bearish(self, pair: str) -> bool:
-        """True si precio actual < MA20 con margen 0.1% → tendencia bajista."""
-        prices = list(self._prices[pair])
-        if len(prices) < 20:
+        """True si precio actual cayó >1% bajo el centro del grid → tendencia bajista.
+        Usa center_price como referencia porque MA20 de ticks ≈ precio actual (inutil)."""
+        grid = self._grids.get(pair)
+        if grid is None:
             return False
-        ma20 = sum(prices[-20:]) / 20
-        return prices[-1] < ma20 * 0.999
+        prices = list(self._prices[pair])
+        if not prices:
+            return False
+        return prices[-1] < grid.center_price * 0.990
 
     def _ma20(self, pair: str) -> float:
-        prices = list(self._prices[pair])
-        if len(prices) < 20:
-            return 0.0
-        return sum(prices[-20:]) / 20
+        grid = self._grids.get(pair)
+        return grid.center_price if grid else 0.0
 
     def _bollinger(self, pair: str) -> Tuple[float, float, float]:
         """Retorna (upper, lower, mid) de Bollinger Bands."""

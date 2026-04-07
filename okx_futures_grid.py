@@ -386,18 +386,18 @@ class OKXFuturesGrid:
     # ── Utils ──────────────────────────────────────────────────────────────────
 
     def _is_bearish(self, pair: str) -> bool:
-        """True si precio actual < MA20 con margen 0.1% → tendencia bajista."""
-        prices = list(self._prices[pair])
-        if len(prices) < 20:
+        """True si precio actual cayó >1% bajo el centro del grid → tendencia bajista."""
+        grid = self._grids.get(pair)
+        if grid is None:
             return False
-        ma20 = sum(prices[-20:]) / 20
-        return prices[-1] < ma20 * 0.999
+        prices = list(self._prices[pair])
+        if not prices:
+            return False
+        return prices[-1] < grid.center_price * 0.990
 
     def _ma20(self, pair: str) -> float:
-        prices = list(self._prices[pair])
-        if len(prices) < 20:
-            return 0.0
-        return sum(prices[-20:]) / 20
+        grid = self._grids.get(pair)
+        return grid.center_price if grid else 0.0
 
     def _calc_spacing(self, pair: str, cfg: dict) -> float:
         """Spacing dinámico: 50% del BB_width, floor = min_spacing."""
