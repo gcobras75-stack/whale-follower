@@ -662,7 +662,24 @@ async def handle_telegram_commands(executor: Any) -> None:
     executor: instancia de BybitTestnetExecutor para /trades
     """
     offset = 0
-    url    = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/getUpdates"
+    token  = config.TELEGRAM_BOT_TOKEN
+    url    = f"https://api.telegram.org/bot{token}/getUpdates"
+
+    # Eliminar webhook activo antes de iniciar polling (si hay webhook, getUpdates falla)
+    try:
+        async with aiohttp.ClientSession() as _s:
+            r = await _s.get(
+                f"https://api.telegram.org/bot{token}/deleteWebhook",
+                params={"drop_pending_updates": "false"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await r.json()
+            if data.get("result"):
+                logger.info("[telegram_cmd] Webhook eliminado ✅ — polling activo")
+            else:
+                logger.debug("[telegram_cmd] deleteWebhook: {}", data)
+    except Exception as exc:
+        logger.warning("[telegram_cmd] No se pudo eliminar webhook: {}", exc)
 
     while True:
         try:
