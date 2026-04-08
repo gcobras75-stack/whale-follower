@@ -5,6 +5,4 @@ dockerfilePath = "Dockerfile"
 [deploy]
 restartPolicyType       = "always"
 restartPolicyMaxRetries = 10
-healthcheckPath         = "/health"
-healthcheckTimeout      = 60
 region                  = "asia-southeast1"
