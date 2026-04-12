@@ -776,8 +776,10 @@ async def trading_loop() -> None:
         # 9. Ejecutar trades — gate Wyckoff por régimen + size_multiplier meta_agent
         # meta_agent pausa wyckoff en LATERAL/BAJISTA/FEAR; reduce size en BAJISTA (0.5x)
         if strat_mgr_mod and not strat_mgr_mod.is_active("wyckoff_spring"):
-            logger.debug(
-                "[main] Wyckoff spring pausado por meta_agent (régimen={})",
+            logger.info(
+                "[main] {} Wyckoff spring PAUSADO por meta_agent (régimen={}) — "
+                "trade y alerta Telegram cancelados",
+                signal.pair,
                 meta_agt.current_regime().value if meta_agt else "?",
             )
             continue

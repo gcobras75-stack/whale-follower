@@ -349,7 +349,7 @@ class MetaAgent:
                 "range_trader":   True,
                 "cross_arb":      True,
                 "momentum":       False,
-                "wyckoff_spring": False,
+                "wyckoff_spring": True,   # activo — umbrales adaptativos lo filtran
                 "lead_lag":       False,
                 "mean_reversion": True,
                 "ofi":            True,
@@ -389,7 +389,7 @@ class MetaAgent:
                 "range_trader":   False,
                 "cross_arb":      True,   # funciona en cualquier mercado
                 "momentum":       False,
-                "wyckoff_spring": False,
+                "wyckoff_spring": True,   # activo — miedo = mejor zona para springs
                 "lead_lag":       False,
                 "mean_reversion": True,   # pánico = oportunidad de reversión
                 "ofi":            False,
