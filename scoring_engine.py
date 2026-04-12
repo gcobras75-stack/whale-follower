@@ -356,19 +356,32 @@ class ScoringEngine:
         raw = (bd.primary_pts + bd.volume_pts +
                bd.context_pts + bd.structure_pts + ext.options_pts)
 
-        # Aplicar Fear & Greed multiplier (0.8 o 1.2)
-        raw_adj = raw * ext.fear_greed_multiplier
+        # Fear & Greed multiplier — con excepción para zona Wyckoff en LATERAL.
+        # F&G 10-25 en LATERAL = miedo extremo = exactamente cuando los springs
+        # Wyckoff son más rentables. No penalizar con ×0.8.
+        fg_mult = ext.fear_greed_multiplier
+        regime  = spring_data.get("regime", "UNKNOWN")
+        fg_val  = ext.fear_greed_value
+        if fg_mult < 1.0 and regime == "LATERAL" and 10 <= fg_val <= 25:
+            fg_mult = 1.0
+            logger.info(
+                "[scoring] F&G={} en LATERAL → multiplicador neutral (zona Wyckoff)",
+                fg_val,
+            )
+        raw_adj = raw * fg_mult
 
         # Capa 12 — DXY Macro: si el dólar sube fuerte, reducir score Long
         if ext.dxy_strong_up:
             raw_adj *= 0.85
-            logger.info(
-                "[scoring] DXY alcista → 0.85x Long score ({:.1f} → {:.1f})",
-                raw_adj / 0.85, raw_adj,
-            )
 
         # Aplicar session multiplier (max +20%)
-        final = raw_adj * min(context.session_multiplier, 1.2)
+        session_mult = min(context.session_multiplier, 1.2)
+        final = raw_adj * session_mult
+
+        logger.info(
+            "[scoring] raw={} fg_mult={:.2f} session_mult={:.2f} final={:.0f}",
+            raw, fg_mult, session_mult, final,
+        )
 
         bd.total = min(int(final), 100)
         return bd.total, bd
