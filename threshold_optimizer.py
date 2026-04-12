@@ -29,8 +29,16 @@ import config
 
 _THRESHOLD_MIN       = 35
 _THRESHOLD_MAX       = 80
-_MAX_ADJ_PER_SESSION = 5
+_MAX_ADJ_PER_SESSION = 3     # máximo ±3 pts por ciclo (era 5)
 _MIN_TRADES_TO_ADJUST = 5
+
+# Límites por régimen — evita que el optimizer suba demasiado en lateral
+_REGIME_MAX: dict = {
+    "LATERAL":       65,
+    "TRENDING_UP":   75,
+    "TRENDING_DOWN": 80,
+    "HIGH_VOL":      80,
+}
 _INTERVAL_SECS       = 6 * 3600   # cada 6 horas
 
 _REGIMES = ["LATERAL", "TRENDING_UP", "TRENDING_DOWN", "HIGH_VOL"]
@@ -154,9 +162,18 @@ class ThresholdOptimizer:
             if adj == 0:
                 continue
 
+            # Sin trades reales → solo permitir BAJAR (no subir)
+            if total < _MIN_TRADES_TO_ADJUST and adj > 0:
+                logger.info(
+                    "[optimizer] {} ignorando subida (+{}) — solo {} trades (min {})",
+                    regime, adj, total, _MIN_TRADES_TO_ADJUST,
+                )
+                continue
+
             # Aplicar límites de seguridad
             adj = max(-_MAX_ADJ_PER_SESSION, min(_MAX_ADJ_PER_SESSION, adj))
-            new = max(_THRESHOLD_MIN, min(_THRESHOLD_MAX, old + adj))
+            regime_max = _REGIME_MAX.get(regime, _THRESHOLD_MAX)
+            new = max(_THRESHOLD_MIN, min(regime_max, old + adj))
 
             if new == old:
                 continue

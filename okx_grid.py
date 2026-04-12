@@ -57,7 +57,7 @@ _FEES_PCT          = 0.001    # 0.1% OKX taker fee
 # ── Reserva de capital para Wyckoff ──────────────────────────────────────────
 # El grid NO debe consumir todo el USDT de OKX. Reservar para trades Wyckoff.
 _OKX_GRID_MAX_CAPITAL  = 300.0    # máximo $300 para grid total
-_OKX_WYCKOFF_RESERVE   = 100.0    # mínimo $100 reservados para Wyckoff executor
+_OKX_WYCKOFF_RESERVE   = 50.0     # mínimo $50 reservados para Wyckoff executor
 _PRICE_HISTORY     = 100
 _CIRCUIT_BREAKER   = 0.04     # suspender si pierde >4% del capital asignado
 _REBALANCE_HOURS   = 6        # recentrar grid cada 6h
