@@ -114,13 +114,18 @@ class CapitalRebalancer:
 
         bybit_bal = bybit_raw
 
-        # Si bybit=0 pero okx>0 → posible lectura incorrecta de subcuenta, no alertar
+        # Si bybit=0 pero okx>0 → posible lectura incorrecta de subcuenta
+        # Aun así actualizar capital en alerts para que OKX se refleje
         if bybit_bal == 0.0 and okx_bal > 5.0:
             logger.warning(
                 "[rebalancer] Bybit=$0 con OKX=${:.2f} — posible subcuenta incorrecta, "
-                "omitiendo alerta hasta proxima verificacion",
+                "omitiendo alerta rebalanceo pero actualizando capital",
                 okx_bal,
             )
+            try:
+                _alerts.set_capital(bybit=0.0, okx=okx_bal)
+            except Exception:
+                pass
             return
 
         total = bybit_bal + okx_bal
@@ -158,57 +163,26 @@ class CapitalRebalancer:
             total, status,
         )
 
+        # Actualizar capital en alerts para que el reporte muestre ambos balances
+        try:
+            _alerts.set_capital(bybit=bybit_bal, okx=okx_bal)
+        except Exception:
+            pass
+
         if status in ("suggested", "urgent"):
             await self._alert(self._snap)
 
     async def _fetch_bybit(self) -> Optional[float]:
         """
-        Lee balance USDT en Bybit.
-        Intenta accountType=UNIFIED primero; si retorna 0, intenta SPOT.
-        Retorna None si hubo error de conexion (no confundir con balance=0 valido).
+        Lee balance USDT en Bybit delegando a bybit_utils.fetch_usdt_balance().
+        Retorna None si hubo error de conexión (no confundir con balance=0 válido).
         """
-        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            return 0.0
+        from bybit_utils import fetch_usdt_balance
         try:
-            for acct_type in ("UNIFIED", "SPOT"):
-                query = f"accountType={acct_type}&coin=USDT"
-                ts    = str(int(time.time() * 1000))
-                msg   = f"{ts}{config.BYBIT_API_KEY}5000{query}"
-                sig   = hmac.new(config.BYBIT_API_SECRET.encode(),
-                                 msg.encode(), hashlib.sha256).hexdigest()
-                headers = {
-                    "X-BAPI-API-KEY":     config.BYBIT_API_KEY,
-                    "X-BAPI-TIMESTAMP":   ts,
-                    "X-BAPI-SIGN":        sig,
-                    "X-BAPI-RECV-WINDOW": "5000",
-                    "User-Agent":         "Mozilla/5.0",
-                    "Referer":            "https://www.bybit.com",
-                }
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(
-                        f"https://api.bytick.com/v5/account/wallet-balance?{query}",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=8),
-                    ) as r:
-                        if r.status == 403:
-                            logger.info(
-                                "[rebalancer] Bybit balance REST bloqueado (403) → usando REAL_CAPITAL=${:.2f}",
-                                config.REAL_CAPITAL,
-                            )
-                            return config.REAL_CAPITAL
-                        data = await r.json()
-                        if data.get("retCode") == 0:
-                            for c in data["result"]["list"][0].get("coin", []):
-                                if c.get("coin") == "USDT":
-                                    bal = float(c.get("walletBalance", 0))
-                                    if bal > 0:
-                                        logger.info("[bybit] Balance {}=${:.2f} ✅", acct_type, bal)
-                                        return bal
-                            logger.info("[bybit] Balance {}=$0 → intentando siguiente tipo", acct_type)
-            logger.warning("[bybit] Balance UNIFIED=$0 y SPOT=$0 — cuenta vacia o subcuenta incorrecta")
-            return 0.0
+            bal = await fetch_usdt_balance(caller="rebalancer")
+            return bal
         except Exception as exc:
-            logger.warning("[rebalancer] Bybit balance error de conexion: {}", exc)
+            logger.warning("[rebalancer] Bybit balance error de conexión: {}", exc)
             return None
 
     async def _fetch_okx(self) -> float:
@@ -221,7 +195,6 @@ class CapitalRebalancer:
                 self._okx_exec = OKXExecutor()
             total, breakdown = await self._okx_exec.get_total_balance_usd()
             if total > 0:
-                _alerts.set_capital(okx=total, okx_breakdown=breakdown)
                 return total
         except Exception as exc:
             logger.warning("[rebalancer] OKX total balance error: {}", exc)

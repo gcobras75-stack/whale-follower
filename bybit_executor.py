@@ -166,8 +166,7 @@ class BybitTestnetExecutor:
 
     async def fetch_real_balance(self) -> float:
         """
-        Lee balance USDT real desde Bybit API.
-        Intenta accountType=UNIFIED primero; si retorna 0, intenta SPOT.
+        Lee balance USDT real desde Bybit API via bybit_utils centralizado.
         Actualiza self._capital con el valor real encontrado.
         """
         if config.BYBIT_ORDERS_BLOCKED:
@@ -175,38 +174,11 @@ class BybitTestnetExecutor:
         if not self._api_key or not self._api_secret:
             return self._capital
         try:
-            async with aiohttp.ClientSession() as s:
-                for acct_type in ("UNIFIED", "SPOT"):
-                    query = f"accountType={acct_type}&coin=USDT"
-                    ts    = str(int(time.time() * 1000))
-                    msg   = f"{ts}{self._api_key}5000{query}"
-                    sig   = hmac.new(
-                        self._api_secret.encode(), msg.encode(), hashlib.sha256
-                    ).hexdigest()
-                    headers = {
-                        "X-BAPI-API-KEY":     self._api_key,
-                        "X-BAPI-TIMESTAMP":   ts,
-                        "X-BAPI-SIGN":        sig,
-                        "X-BAPI-RECV-WINDOW": "5000",
-                        "User-Agent":         "Mozilla/5.0",
-                        "Referer":            "https://www.bybit.com",
-                    }
-                    async with s.get(
-                        f"https://api.bytick.com/v5/account/wallet-balance?{query}",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=8),
-                    ) as r:
-                        data = await r.json()
-                        if data.get("retCode") == 0:
-                            for c in data["result"]["list"][0].get("coin", []):
-                                if c.get("coin") == "USDT":
-                                    bal = float(c.get("walletBalance", 0))
-                                    if bal > 0:
-                                        logger.info("[bybit] Balance {}=${:.2f} ✅", acct_type, bal)
-                                        self._capital = bal
-                                        return bal
-                            logger.info("[bybit] Balance {}=$0 → intentando siguiente tipo", acct_type)
-            logger.warning("[bybit] Balance UNIFIED=$0 y SPOT=$0 — subcuenta incorrecta?")
+            from bybit_utils import fetch_usdt_balance
+            bal = await fetch_usdt_balance(caller="executor")
+            if bal > 0:
+                self._capital = bal
+            return self._capital
         except Exception as exc:
             logger.warning("[executor] fetch_real_balance error: {}", exc)
         return self._capital
@@ -541,46 +513,10 @@ class BybitTestnetExecutor:
     async def _fetch_coin_balance(self, coin: str) -> float:
         """
         Obtiene el balance disponible de un coin específico en Bybit (ej. BTC, SOL).
-        Prueba UNIFIED y luego SPOT. Retorna 0.0 si no se encuentra.
+        Delega a bybit_utils centralizado.
         """
-        if not self._api_key or not self._api_secret:
-            return 0.0
-        try:
-            for acct_type in ("UNIFIED", "SPOT"):
-                query   = f"accountType={acct_type}&coin={coin}"
-                ts      = str(int(time.time() * 1000))
-                msg     = f"{ts}{self._api_key}5000{query}"
-                sig     = hmac.new(
-                    self._api_secret.encode(), msg.encode(), hashlib.sha256
-                ).hexdigest()
-                headers = {
-                    "X-BAPI-API-KEY":     self._api_key,
-                    "X-BAPI-TIMESTAMP":   ts,
-                    "X-BAPI-SIGN":        sig,
-                    "X-BAPI-RECV-WINDOW": "5000",
-                    "User-Agent":         "Mozilla/5.0",
-                    "Referer":            "https://www.bybit.com",
-                }
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(
-                        f"https://api.bytick.com/v5/account/wallet-balance?{query}",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=8),
-                    ) as r:
-                        data = await r.json()
-                        if data.get("retCode") == 0:
-                            for c in data["result"]["list"][0].get("coin", []):
-                                if c.get("coin") == coin:
-                                    bal = float(c.get("walletBalance", 0))
-                                    if bal > 0:
-                                        logger.info(
-                                            "[executor] Balance real {} {}={:.6f}",
-                                            acct_type, coin, bal,
-                                        )
-                                        return bal
-        except Exception as exc:
-            logger.warning("[executor] _fetch_coin_balance({}) error: {}", coin, exc)
-        return 0.0
+        from bybit_utils import get_bybit_coin_balance
+        return await get_bybit_coin_balance(coin, caller="executor")
 
     async def _place_close_order(self, pair: str, coin_qty: float) -> bool:
         """
