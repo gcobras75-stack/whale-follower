@@ -921,6 +921,12 @@ async def trading_loop() -> None:
 
                     # Si falló → buscar par alternativo más barato
                     if not okx_result:
+                        logger.info(
+                            "[main] OKX {} falló — buscando par alternativo (size=${:.0f}, "
+                            "precios disponibles: {})",
+                            exec_pair, final_size,
+                            [p for p in _latest_prices if _latest_prices[p] > 0][:6],
+                        )
                         alt = _okx_wyckoff.find_affordable_pair(
                             final_size, _latest_prices, original_pair=exec_pair)
                         if alt and alt in _latest_prices:
@@ -937,6 +943,10 @@ async def trading_loop() -> None:
                                     timeout=10.0)
                             except Exception as exc:
                                 logger.error("[main] OKX alt {} error: {}", alt, exc)
+                        else:
+                            logger.warning(
+                                "[main] OKX find_affordable_pair retornó None — "
+                                "ningún par cabe en ${:.0f}", final_size)
 
                     if okx_result:
                         logger.info(

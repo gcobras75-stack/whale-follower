@@ -217,12 +217,16 @@ class ContextEngine:
                 # Puntos según sesión
                 if mult >= 2.0:
                     ctx.session_pts = 5
-                elif mult >= 1.5:
-                    ctx.session_pts = 4
                 elif mult >= 1.3:
-                    ctx.session_pts = 3
+                    ctx.session_pts = 4
+                elif mult >= 1.0:
+                    ctx.session_pts = 2
                 else:
-                    ctx.session_pts = 0   # Asia = sesión débil
+                    ctx.session_pts = 0
+                logger.debug(
+                    "[session] UTC_hour={} session={} mult={:.1f} pts={}",
+                    utc_hour, name, mult, ctx.session_pts,
+                )
                 return
 
         # Fuera de todos los rangos (poco probable)
