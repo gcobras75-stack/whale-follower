@@ -240,6 +240,16 @@ async def trading_loop() -> None:
         except Exception as exc:
             logger.warning("[main] OKX executor no disponible: {}", exc)
 
+    # MEXC executor como segundo fallback
+    _mexc_wyckoff = None
+    if config.MEXC_API_KEY and config.MEXC_API_SECRET:
+        try:
+            from mexc_executor import MEXCExecutor
+            _mexc_wyckoff = MEXCExecutor()
+            logger.info("[main] MEXC executor disponible como segundo fallback")
+        except Exception as exc:
+            logger.warning("[main] MEXC executor no disponible: {}", exc)
+
     range_trader = (range_mod.RangeTrader(executor, regime_det, production=prod)
                     if range_mod and regime_det else None)
 
@@ -941,9 +951,56 @@ async def trading_loop() -> None:
                             "tp":       alloc.take_profit,
                             "size_usd": final_size,
                         }))
+                    elif _mexc_wyckoff and _mexc_wyckoff.enabled:
+                        # Tercer fallback: MEXC
+                        logger.info("[main] OKX agotado — intentando MEXC")
+                        mexc_pair  = alloc.pair
+                        mexc_price = alloc.entry_price
+                        try:
+                            mexc_result = await asyncio.wait_for(
+                                _mexc_wyckoff.market_order(
+                                    pair=mexc_pair, side="buy",
+                                    size_usd=final_size, price_hint=mexc_price),
+                                timeout=10.0)
+                        except Exception as exc:
+                            mexc_result = None
+                            logger.warning("[main] MEXC {} error: {}", mexc_pair, exc)
+
+                        # Si falló, buscar par alternativo en MEXC
+                        if not mexc_result:
+                            alt = _mexc_wyckoff.find_affordable_pair(
+                                final_size, _latest_prices, original_pair=mexc_pair)
+                            if alt and alt in _latest_prices:
+                                mexc_pair  = alt
+                                mexc_price = _latest_prices[alt]
+                                try:
+                                    mexc_result = await asyncio.wait_for(
+                                        _mexc_wyckoff.market_order(
+                                            pair=alt, side="buy",
+                                            size_usd=final_size, price_hint=mexc_price),
+                                        timeout=10.0)
+                                except Exception as exc:
+                                    logger.error("[main] MEXC alt {} error: {}", alt, exc)
+
+                        if mexc_result:
+                            logger.info("[main] Trade MEXC {} ${:.2f} OK orderId={}",
+                                        mexc_pair, final_size,
+                                        mexc_result.get("orderId", "?"))
+                            asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                                "pair":     mexc_pair,
+                                "score":    new_score,
+                                "entry":    mexc_price,
+                                "sl":       alloc.stop_loss,
+                                "tp":       alloc.take_profit,
+                                "size_usd": final_size,
+                            }))
+                        else:
+                            logger.error(
+                                "[main] Todos los exchanges agotados para ${:.0f}",
+                                final_size)
                     else:
                         logger.error(
-                            "[main] OKX fallback agotado — ningún par operable con ${:.0f}",
+                            "[main] OKX fallback agotado, MEXC no disponible — ${:.0f}",
                             final_size)
 
         if dashboard:
