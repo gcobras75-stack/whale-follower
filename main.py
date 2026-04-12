@@ -961,7 +961,12 @@ async def _log_server_ip() -> None:
                 async with s.get(url, timeout=_aiohttp.ClientTimeout(total=6)) as r:
                     text = await r.text()
                     ip   = text.strip().strip('"').replace('{"ip":"', '').replace('"}', '')
-                    logger.info("[startup] 🌍 IP pública del servidor: {}", ip)
+                    logger.info("[startup] IP pública del servidor: {}", ip)
+                    logger.warning(
+                        "[startup] Railway cambia IP en cada deploy. "
+                        "Bybit API debe estar en modo 'No IP restriction' "
+                        "(solo firma HMAC)."
+                    )
                     break
         except Exception:
             continue
