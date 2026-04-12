@@ -329,7 +329,7 @@ class CapitalRebalancer:
             }
             async with aiohttp.ClientSession() as s:
                 async with s.get(
-                    f"https://api.bytick.com/v5/account/wallet-balance?{query}",
+                    f"https://api.bybit.com/v5/account/wallet-balance?{query}",
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as r:
@@ -386,7 +386,7 @@ class CapitalRebalancer:
     async def _ticker_price_bybit(self, coin: str) -> float:
         """Precio actual de un coin en Bybit (endpoint público, sin auth)."""
         try:
-            url = f"https://api.bytick.com/v5/market/tickers?category=spot&symbol={coin}USDT"
+            url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={coin}USDT"
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
                     data = await r.json()
@@ -440,7 +440,7 @@ class CapitalRebalancer:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
-                    "https://api.bytick.com/v5/order/create",
+                    "https://api.bybit.com/v5/order/create",
                     headers=headers,
                     data=body_str,
                     timeout=aiohttp.ClientTimeout(total=10),

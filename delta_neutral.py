@@ -66,7 +66,7 @@ _FUNDING_POLL_SECS    = 300     # consultar funding cada 5 min
 
 # URLs funding rate
 _BYBIT_FUNDING_URL = (
-    "https://api.bytick.com/v5/market/tickers"
+    "https://api.bybit.com/v5/market/tickers"
     "?category=linear&symbol=BTCUSDT"
 )
 _OKX_FUNDING_URL = (

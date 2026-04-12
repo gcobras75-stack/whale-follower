@@ -288,7 +288,7 @@ class CrossExchangeArb:
             logger.error("[cross_arb] OKX executor init ERROR: {}", exc)
             self._okx_exec = None
 
-        # Bybit — via aiohttp directo a api.bytick.com (sin pybit SDK)
+        # Bybit — via aiohttp directo a api.bybit.com (sin pybit SDK)
         if config.BYBIT_API_KEY and config.BYBIT_API_SECRET:
             self._bybit_ready = True
             logger.info("[cross_arb] Bybit keys OK ✅ (key={}****)", config.BYBIT_API_KEY[:4])

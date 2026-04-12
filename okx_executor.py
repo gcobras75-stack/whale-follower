@@ -33,9 +33,12 @@ _BASE_URL = "https://www.okx.com"
 
 # Map from bot pair names to OKX SPOT instId
 _PAIR_TO_INST: Dict[str, str] = {
-    "BTCUSDT": "BTC-USDT",
-    "ETHUSDT": "ETH-USDT",
-    "SOLUSDT": "SOL-USDT",
+    "BTCUSDT":  "BTC-USDT",
+    "ETHUSDT":  "ETH-USDT",
+    "SOLUSDT":  "SOL-USDT",
+    "BNBUSDT":  "BNB-USDT",
+    "DOGEUSDT": "DOGE-USDT",
+    "XRPUSDT":  "XRP-USDT",
 }
 
 _MIN_SPOT_USD = 1.0   # OKX spot minimum ~$1 USD

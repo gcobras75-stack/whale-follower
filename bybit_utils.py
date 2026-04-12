@@ -19,7 +19,7 @@ from loguru import logger
 
 import config
 
-_BYBIT_BASE   = "https://api.bytick.com"
+_BYBIT_BASE   = "https://api.bybit.com"
 _RECV_WINDOW  = "20000"
 _BYBIT_HEADERS_EXTRA = {
     "User-Agent": "Mozilla/5.0",
@@ -28,7 +28,6 @@ _BYBIT_HEADERS_EXTRA = {
 
 # Endpoints de órdenes a probar en secuencia (el primero que funcione se cachea)
 _ORDER_ENDPOINTS = [
-    "https://api.bytick.com/v5/order/create",
     "https://api.bybit.com/v5/order/create",
     "https://api.bybit.nl/v5/order/create",
     "https://api2.bybit.com/v5/order/create",

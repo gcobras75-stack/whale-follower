@@ -77,7 +77,7 @@ class BybitTestnetExecutor:
     """
 
     _TESTNET_URL    = "https://api-testnet.bybit.com"
-    _PRODUCTION_URL = "https://api.bytick.com"   # global endpoint, evita bloqueo por IP
+    _PRODUCTION_URL = "https://api.bybit.com"
 
     def __init__(self) -> None:
         self._production = config.PRODUCTION

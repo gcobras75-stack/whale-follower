@@ -341,12 +341,7 @@ async def send_trade_alert(trade_type: str, data: dict) -> None:
         else:
             return
 
-        async with aiohttp.ClientSession() as s:
-            await s.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": msg},
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+        await _send_telegram(msg, priority="critical")
     except Exception as exc:
         logger.warning("[alerts] send_trade_alert error: {}", exc)
 
@@ -508,26 +503,59 @@ async def dispatch(
     )
 
 
-async def _send_telegram(text: str) -> None:
+# ── Telegram rate limiter ─────────────────────────────────────────────────────
+# Máximo 20 mensajes por hora. Si se excede, solo logueamos.
+_tg_rate_window:  List[float] = []
+_TG_MAX_PER_HOUR = 20
+_tg_retry_after:  float = 0.0   # timestamp hasta el que estamos bloqueados por 429
+
+
+async def _send_telegram(text: str, priority: str = "normal") -> None:
+    """Envía mensaje a Telegram con rate limiting.
+
+    priority:
+      "critical" — siempre enviar (circuit breaker, drawdown, señales Wyckoff)
+      "normal"   — sujeto a rate limit (reportes, status)
+    """
+    global _tg_retry_after
+
+    now = time.time()
+
+    # Respetar 429 retry_after
+    if now < _tg_retry_after:
+        logger.debug("[telegram] Rate-limited hasta {:.0f}s más", _tg_retry_after - now)
+        return
+
+    # Rate limit: max 20/hora (excepto críticos)
+    if priority != "critical":
+        _tg_rate_window[:] = [t for t in _tg_rate_window if now - t < 3600]
+        if len(_tg_rate_window) >= _TG_MAX_PER_HOUR:
+            logger.warning("[telegram] Rate limit alcanzado ({}/h) — mensaje omitido", _TG_MAX_PER_HOUR)
+            return
+
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    # Enviar sin parse_mode para evitar errores con caracteres especiales
-    # de Markdown (*, _, [, ]) en datos dinámicos.
     payload = {
-        "chat_id":    config.TELEGRAM_CHAT_ID,
-        "text":       text,
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "text":    text,
     }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                if resp.status != 200:
+                if resp.status == 429:
+                    body = await resp.json()
+                    retry_secs = body.get("parameters", {}).get("retry_after", 60)
+                    _tg_retry_after = now + retry_secs
+                    logger.warning("[telegram] 429 rate limit: esperar {}s", retry_secs)
+                elif resp.status != 200:
                     body = await resp.text()
                     logger.error("[telegram] HTTP {}: {}", resp.status, body)
                 else:
+                    _tg_rate_window.append(now)
                     logger.success("[telegram] Alerta enviada.")
     except Exception as exc:
-        logger.error(f"[telegram] Error: {exc}")
+        logger.error("[telegram] Error: {}", exc)
 
 
 async def send_system_message(text: str) -> None:

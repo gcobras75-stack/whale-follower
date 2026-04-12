@@ -38,7 +38,7 @@ _FUNDING_INTERVAL   = 8 * 3600  # cada 8 horas
 _MIN_CAPITAL_USD    = 300.0   # capital minimo para operar en real
 _REAL_SIZE_PCT      = 0.15    # 15% del capital real por pata
 _BYBIT_FUNDING_URL  = (
-    "https://api.bytick.com/v5/market/funding/history"
+    "https://api.bybit.com/v5/market/funding/history"
     "?category=linear&symbol=BTCUSDT&limit=1"
 )
 _SYMBOLS = ["BTCUSDT", "ETHUSDT"]

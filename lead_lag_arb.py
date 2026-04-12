@@ -330,7 +330,7 @@ class LeadLagArb:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
-                    "https://api.bytick.com/v5/order/create",
+                    "https://api.bybit.com/v5/order/create",
                     headers=headers, data=body_str,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
@@ -380,7 +380,7 @@ class LeadLagArb:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
-                    "https://api.bytick.com/v5/order/create",
+                    "https://api.bybit.com/v5/order/create",
                     headers=headers, data=body_str,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
