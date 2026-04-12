@@ -108,12 +108,19 @@ class OKXExecutor:
             result  = await okx.market_order("ETHUSDT", "buy", 50.0, price_hint=1800.0)
     """
 
+    # Modos de cuenta OKX
+    _ACCT_MODES = {1: "Simple", 2: "Single-currency margin", 3: "Multi-currency margin", 4: "Portfolio margin"}
+    # Simple (1) NO soporta SWAP — requiere al menos Single-currency (2)
+    _SWAP_OK_MODES = {2, 3, 4}
+
     def __init__(self) -> None:
         self._enabled = bool(
             config.OKX_API_KEY and config.OKX_SECRET and config.OKX_PASSPHRASE
         )
         self._last_balance: float = 0.0
         self._last_balance_ts: float = 0.0
+        self._acct_level: int = 0       # 0=desconocido, 1-4=modos OKX
+        self._acct_checked: bool = False
 
         if self._enabled:
             logger.info("[okx_exec] OKX executor initialized (real credentials)")
@@ -407,6 +414,53 @@ class OKXExecutor:
         except Exception as exc:
             logger.warning("[okx_exec] _ensure_leverage error: {}", exc)
 
+    # ── Account mode check ────────────────────────────────────────────────
+
+    async def _check_account_mode(self) -> bool:
+        """Verifica modo de cuenta OKX. Retorna True si soporta SWAP."""
+        if self._acct_checked:
+            return self._acct_level in self._SWAP_OK_MODES
+        try:
+            path = "/api/v5/account/config"
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    _BASE_URL + path,
+                    headers=_auth_headers("GET", path),
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+                data = await resp.json()
+            self._acct_checked = True
+            if data.get("code") == "0" and data.get("data"):
+                self._acct_level = int(data["data"][0].get("acctLv", 0))
+                mode_name = self._ACCT_MODES.get(self._acct_level, "desconocido")
+                if self._acct_level in self._SWAP_OK_MODES:
+                    logger.info("[okx_exec] Modo cuenta: {} ({}) — SWAP OK",
+                                self._acct_level, mode_name)
+                    return True
+                else:
+                    logger.error(
+                        "[okx_exec] Modo cuenta: {} ({}) — SWAP NO SOPORTADO. "
+                        "Cambiar a Single-currency margin en OKX app.",
+                        self._acct_level, mode_name)
+                    # Alerta Telegram
+                    try:
+                        import alerts
+                        await alerts._send_telegram(
+                            f"OKX modo {mode_name} (acctLv={self._acct_level}) "
+                            f"NO soporta SWAP.\n"
+                            f"Cambiar a Single-currency margin en OKX app → "
+                            f"Trade → Settings → Account mode.",
+                            priority="critical",
+                        )
+                    except Exception:
+                        pass
+                    return False
+            else:
+                logger.warning("[okx_exec] account/config error: {}", data.get("msg"))
+        except Exception as exc:
+            logger.warning("[okx_exec] _check_account_mode error: {}", exc)
+        return True  # asumir OK si falla la verificación
+
     # ── Market orders ───────────────────────────────────────────────────────
 
     async def market_order(
@@ -430,6 +484,10 @@ class OKXExecutor:
         """
         if not self._enabled:
             logger.warning("[okx_exec] market_order: executor disabled")
+            return None
+
+        # Verificar modo de cuenta antes de la primera orden
+        if not await self._check_account_mode():
             return None
 
         inst_id = _PAIR_TO_INST.get(pair)
