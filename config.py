@@ -55,10 +55,10 @@ SPRING_PARAMS: dict = {
         "score_min":   75,       # alto para evitar longs contra tendencia
     },
     "LATERAL": {
-        "drop_pct":    0.0015,   # 0.15% — ajustado al mercado actual
-        "bounce_pct":  0.0010,   # 0.10%
-        "vol_mult":    1.20,
-        "score_min":   55,       # más permisivo en lateral predecible
+        "drop_pct":    0.0013,   # 0.130% (observado ~0.133-0.187%)
+        "bounce_pct":  0.0009,   # 0.090% (observado ~0.094-0.109%)
+        "vol_mult":    1.10,     # 1.10x  (observado ~1.12-1.35x)
+        "score_min":   55,
     },
     "HIGH_VOL": {
         "drop_pct":    0.0050,   # 0.50% — muy estricto en caos
