@@ -43,30 +43,44 @@ import config
 import db_writer
 from bybit_utils import place_spot_order as _bybit_ws_order
 
+# ── Mínimos reales de Bybit (USD por orden) ───────────────────────────────────
+# Fuente: límites oficiales perpetuos USDT. Si la orden cae debajo de estos
+# valores Bybit devuelve retCode 170140 "Order value exceeded lower limit".
+BYBIT_MIN_ORDER: Dict[str, float] = {
+    "BTCUSDT": 100.0,
+    "ETHUSDT":  20.0,
+    "SOLUSDT":  10.0,
+}
+
 # ── Config por par ────────────────────────────────────────────────────────────
+# Capital total disponible ≈ $90.
+#   ETHUSDT: $40   (2 niveles × $20)
+#   SOLUSDT: $30   (3 niveles × $10)
+#   BTCUSDT: $0    (requiere $300 mín — desactivado)
+#   Reserva: $20   (Wyckoff Spring)
 _GRID_CONFIG: Dict[str, dict] = {
     "BTCUSDT": {
-        "levels":        2,         # 2 niveles → $30/2=$15 por nivel > $11 mínimo Bybit
-        "capital_usd":   30.0,      # $30 total — $15 por nivel
-        "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
+        "levels":        2,         # overridden por plan dinámico
+        "capital_usd":   0.0,       # desactivado: capital < $300 (mín 3×)
+        "min_spacing":   0.002,
         "max_spacing":   0.015,
         "atr_mult":      1.5,
         "bb_period":     20,
         "bb_std":        2.0,
     },
     "ETHUSDT": {
-        "levels":        2,         # 2 niveles para capital real ($25 → $12.50/nivel > min Bybit)
-        "capital_usd":   25.0,      # $25 total — $12.50 por nivel
-        "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
+        "levels":        2,
+        "capital_usd":   40.0,      # 2 niveles × $20 mínimo Bybit
+        "min_spacing":   0.002,
         "max_spacing":   0.020,
         "atr_mult":      2.0,
         "bb_period":     20,
         "bb_std":        2.0,
     },
     "SOLUSDT": {
-        "levels":        2,         # reducido para capital real ($20)
-        "capital_usd":   20.0,      # $20 total — $10 por nivel
-        "min_spacing":   0.002,     # 0.2% — Bybit fees 0.04% → neto 0.16%
+        "levels":        3,
+        "capital_usd":   30.0,      # 3 niveles × $10 mínimo Bybit
+        "min_spacing":   0.002,
         "max_spacing":   0.025,
         "atr_mult":      2.5,
         "bb_period":     20,
@@ -164,15 +178,56 @@ class GridTradingEngine:
         self._balance_ts:        float = 0.0
         self._failed_sells: list = []   # (grid, level, price) tuples to retry
 
+        # ── Plan dinámico: calcula niveles por par basado en capital y mínimos ──
+        # Si capital_par < min_order × 3 → par desactivado (capital insuficiente).
+        # Si no → niveles = clamp(int(capital / min_order), 2, 5)
+        self._plan: Dict[str, dict] = {}
+        for pair, cfg in _GRID_CONFIG.items():
+            cap       = float(cfg["capital_usd"])
+            min_order = BYBIT_MIN_ORDER.get(pair, 10.0)
+            if cap < min_order * 3:
+                self._plan[pair] = {
+                    "enabled":    False,
+                    "capital":    cap,
+                    "min_needed": min_order * 3,
+                    "min_order":  min_order,
+                }
+                logger.warning(
+                    "[grid] {} DESACTIVADO: capital=${:.0f} < mínimo 3×={:.0f}",
+                    pair, cap, min_order * 3,
+                )
+            else:
+                n = int(cap / min_order)
+                n = max(2, min(n, 5))
+                self._plan[pair] = {
+                    "enabled":        True,
+                    "capital":        cap,
+                    "levels":         n,
+                    "size_per_level": cap / n,
+                    "min_order":      min_order,
+                }
+                logger.info(
+                    "[grid] {} plan: {} niveles × ${:.2f} = ${:.0f}",
+                    pair, n, cap / n, cap,
+                )
+
         mode = "REAL" if production else "PAPEL"
-        logger.info("[grid] Iniciado en modo {} | pares={} | max_exposure=${}",
-                    mode, list(_GRID_CONFIG.keys()),
-                    sum(c["capital_usd"] for c in _GRID_CONFIG.values()))
+        logger.info("[grid] Iniciado en modo {} | pares activos={} | max_exposure=${:.0f}",
+                    mode,
+                    [p for p, pl in self._plan.items() if pl["enabled"]],
+                    sum(pl["capital"] for pl in self._plan.values() if pl["enabled"]))
+
+        # Una sola alerta de arranque a Telegram con el plan consolidado
+        asyncio.create_task(self._alert_grid_startup())
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def on_price(self, pair: str, price: float) -> None:
         if pair not in _GRID_CONFIG:
+            return
+
+        # Par desactivado por capital insuficiente → ignorar por completo
+        if not self._plan.get(pair, {}).get("enabled", False):
             return
 
         self._prices[pair].append(price)
@@ -265,9 +320,11 @@ class GridTradingEngine:
 
     def _init_grid(self, pair: str, center: float) -> None:
         cfg     = _GRID_CONFIG[pair]
+        plan    = self._plan[pair]
         spacing = self._calc_spacing(pair, cfg)
-        n       = cfg["levels"]
-        cap_per_level = cfg["capital_usd"] / n
+        n       = plan["levels"]
+        cap_total     = plan["capital"]
+        cap_per_level = plan["size_per_level"]
 
         levels = []
         # Niveles de COMPRA: por debajo del precio actual
@@ -279,8 +336,8 @@ class GridTradingEngine:
             lvl_price = center * (1 + spacing * i)
             levels.append(GridLevel(price=lvl_price, side="sell", size_usd=cap_per_level))
 
-        # Verificar si el nivel supera el minimo de Bybit spot
-        min_usd   = _MIN_ORDER_USD.get(pair, 5.0)
+        # Verificar si el nivel supera el mínimo real de Bybit (BYBIT_MIN_ORDER)
+        min_usd   = BYBIT_MIN_ORDER.get(pair, _MIN_ORDER_USD.get(pair, 5.0))
         meets_min = cap_per_level >= min_usd
         paper     = (not self._production) or (not meets_min) or config.BYBIT_ORDERS_BLOCKED
 
@@ -308,23 +365,25 @@ class GridTradingEngine:
             spacing_pct  = spacing,
             levels       = levels,
             paper_mode   = paper,
-            capital_usd  = cfg["capital_usd"],
+            capital_usd  = cap_total,
         )
         logger.info(
             "[grid] {} inicializado: centro={:.2f} spacing={:.3f}% niveles={} modo={}",
             pair, center, spacing * 100, n,
             "PAPEL" if paper else "REAL",
         )
-        asyncio.create_task(self._alert_init(pair, center, spacing, n, paper))
+        # Ya NO se envía alerta por par — existe una única alerta de arranque
+        # (_alert_grid_startup) que se dispara desde __init__.
 
     def _rebalance_grid(self, grid: GridState, pair: str, price: float) -> None:
         """Recentrar el grid en el precio actual con spacing recalculado y compounding."""
         cfg     = _GRID_CONFIG[pair]
+        plan    = self._plan[pair]
         spacing = self._calc_spacing(pair, cfg)
-        n       = cfg["levels"]
+        n       = plan["levels"]
 
         # Compounding: reinvertir 50% de profits acumulados (max +50% del capital base)
-        base_capital = cfg["capital_usd"]
+        base_capital = plan["capital"]
         if grid.pnl_total > 0:
             compound_add = min(grid.pnl_total * 0.5, base_capital * 0.5)
             new_capital  = base_capital + compound_add
@@ -583,6 +642,16 @@ class GridTradingEngine:
             logger.error("[grid] {} precio invalido: {}", pair, price)
             return None
 
+        # Guardrail: nunca enviar una orden por debajo del mínimo real de Bybit.
+        # Evita el rechazo 170140 y su cascada de alertas spam.
+        min_size = BYBIT_MIN_ORDER.get(pair, 10.0)
+        if size_usd < min_size:
+            logger.warning(
+                "[grid] Orden cancelada (pre-send): {} {} ${:.2f} < mínimo ${:.0f}",
+                side, pair, size_usd, min_size,
+            )
+            return None
+
         qty = round(size_usd / price, 6)
         min_qty = _MIN_QTY.get(pair, 0.001)
         if qty < min_qty:
@@ -600,8 +669,9 @@ class GridTradingEngine:
 
         ret_msg  = result.get("retMsg", "sin respuesta") if result else "sin respuesta"
         ret_code = result.get("retCode", 0) if result else 0
-        logger.error("[grid] \u274c ORDER FALLIDA {} {} — {}", side, pair, ret_msg)
-        await self._alert_order_error(pair, side, size_usd, ret_msg)
+        # Solo log a Railway — no spamear Telegram en cada orden rechazada.
+        logger.error("[grid] \u274c ORDER FALLIDA {} {} ${:.2f} — code={} msg={}",
+                     side, pair, size_usd, ret_code, ret_msg)
         # retCode 170140 = "Order value exceeded lower limit" → pasar a papel
         if ret_code == 170140 or "lower limit" in ret_msg.lower():
             grid = self._grids.get(pair)
@@ -671,46 +741,28 @@ class GridTradingEngine:
                          grid.pair, price)
             self._failed_sells.append((grid, level, price))
 
-    async def _alert_order_error(self, pair: str, side: str,
-                                  size_usd: float, msg: str) -> None:
-        """Envia error de orden rechazada a Telegram."""
-        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
-        alert = (
-            f"\u274c [GRID] ORDER RECHAZADA\n"
-            f"Par: {pair} | Lado: {side} | Size: ${size_usd:.0f}\n"
-            f"Error: {msg}"
-        )
-        try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                             json={"chat_id": chat_id, "text": alert},
-                             timeout=aiohttp.ClientTimeout(total=10))
-        except Exception:
-            pass
-
     # ── Telegram ──────────────────────────────────────────────────────────────
 
-    async def _alert_init(self, pair: str, center: float, spacing: float,
-                           levels: int, paper: bool = True) -> None:
+    async def _alert_grid_startup(self) -> None:
+        """Única alerta de arranque del Grid — resume plan de todos los pares."""
         token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         if not token or not chat_id:
             return
-        cfg      = _GRID_CONFIG[pair]
-        min_usd  = _MIN_ORDER_USD.get(pair, 5.0)
-        lvl_size = cfg["capital_usd"] / levels
-        mode_icon = "\u274c papel" if paper else "\u2705 real"
-        msg = (
-            f"\U0001f4ca [GRID] Iniciado {pair}\n"
-            f"Centro: ${center:,.2f}\n"
-            f"Spacing: {spacing*100:.3f}% (ATR adaptativo)\n"
-            f"Niveles: {levels} | Capital: ${cfg['capital_usd']:,.0f}\n"
-            f"Minimo Bybit: ${min_usd:.0f} | Nivel: ${lvl_size:.2f} {mode_icon}\n"
-            f"Ganancia est./ciclo: ${cfg['capital_usd']/levels*(spacing-0.0004):.3f}"
-        )
+
+        lines = ["\u2705 [GRID] Iniciado"]
+        for pair, plan in self._plan.items():
+            short = pair.replace("USDT", "")
+            if plan["enabled"]:
+                lines.append(
+                    f"{short}: {plan['levels']} niveles | ${plan['size_per_level']:.0f} por nivel"
+                )
+            else:
+                lines.append(
+                    f"{short}: desactivado (min ${plan['min_needed']:.0f} | disp ${plan['capital']:.0f})"
+                )
+        msg = "\n".join(lines)
+
         try:
             async with aiohttp.ClientSession() as s:
                 await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
