@@ -62,9 +62,9 @@ _CT_VAL: Dict[str, float] = {
 }
 
 _MIN_ORDER_USD      = 1.0    # OKX perpetuos mínimo ~$1
-_WYCKOFF_RESERVE    = 50.0   # reservar para Wyckoff / buffer
-_MAX_ORDER_FRACTION = 0.30   # máximo 30% del margen libre por trade
-_MIN_MARGIN_FREE    = 15.0   # margen libre mínimo para operar
+_WYCKOFF_RESERVE    = 5.0    # buffer mínimo (availBal ya descuenta posiciones)
+_MAX_ORDER_FRACTION = 0.50   # máximo 50% del disponible por trade
+_MIN_MARGIN_FREE    = 8.0    # necesitamos al menos $8 para operar
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -143,7 +143,7 @@ class OKXExecutor:
             return 0.0
 
         def _extract_usdt(data: dict, in_details: bool) -> float:
-            """Lee cashBal > eq > availBal del primer entry USDT."""
+            """Lee availBal (margen disponible real, descontando posiciones abiertas)."""
             if in_details:
                 entries = data.get("data", [{}])[0].get("details", [])
             else:
@@ -153,9 +153,11 @@ class OKXExecutor:
                     cash  = float(d.get("cashBal",  0) or 0)
                     eq    = float(d.get("eq",       0) or 0)
                     avail = float(d.get("availBal", 0) or 0)
-                    bal   = cash or eq or avail
-                    logger.debug("[okx_exec] USDT cashBal={:.4f} eq={:.4f} availBal={:.4f} -> {:.4f}",
-                                 cash, eq, avail, bal)
+                    # Priorizar availBal — es lo que OKX permite usar para nuevas órdenes
+                    bal = avail if avail > 0 else (cash or eq)
+                    logger.info(
+                        "[okx_exec] USDT cashBal={:.2f} eq={:.2f} availBal={:.2f} → usando={:.2f}",
+                        cash, eq, avail, bal)
                     return bal
             return 0.0
 
