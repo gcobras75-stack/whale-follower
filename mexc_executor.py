@@ -54,10 +54,12 @@ _MAX_ORDER_FRACTION = 0.30
 _MIN_MARGIN_FREE    = 10.0
 
 
-def _make_headers(api_key: str, secret: str) -> Dict[str, str]:
+def _make_headers(api_key: str, secret: str, body: str = "") -> Dict[str, str]:
+    """MEXC Futures auth. Signature = HMAC-SHA256(api_key + timestamp + body)."""
     ts = str(int(time.time() * 1000))
+    sign_payload = api_key + ts + body
     sign = hmac.new(
-        secret.encode(), (api_key + ts).encode(), hashlib.sha256
+        secret.encode(), sign_payload.encode(), hashlib.sha256
     ).hexdigest()
     return {
         "ApiKey":       api_key,
@@ -71,9 +73,6 @@ class MEXCExecutor:
     """MEXC Futures executor — isolated margin, leverage 1x."""
 
     def __init__(self) -> None:
-        self._api_key = config.GATE_API_KEY if hasattr(config, "MEXC_API_KEY") and config.MEXC_API_KEY else getattr(config, "MEXC_API_KEY", "")
-        self._secret  = config.GATE_API_SECRET if hasattr(config, "MEXC_API_SECRET") and config.MEXC_API_SECRET else getattr(config, "MEXC_API_SECRET", "")
-        # Use dedicated MEXC vars
         self._api_key = getattr(config, "MEXC_API_KEY", "")
         self._secret  = getattr(config, "MEXC_API_SECRET", "")
         self._enabled = bool(self._api_key and self._secret)
@@ -121,13 +120,13 @@ class MEXCExecutor:
         if symbol in self._leverage_set:
             return
         try:
-            headers = _make_headers(self._api_key, self._secret)
             body = json.dumps({
                 "symbol":      symbol,
                 "leverage":    1,
-                "openType":    2,    # 1=isolated, 2=cross — MEXC requiere probar
+                "openType":    1,    # 1=isolated
                 "positionType": 1,   # 1=one-way
             })
+            headers = _make_headers(self._api_key, self._secret, body)
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     f"{_BASE_URL}/api/v1/private/position/change_leverage",
@@ -202,7 +201,7 @@ class MEXCExecutor:
         })
 
         try:
-            headers = _make_headers(self._api_key, self._secret)
+            headers = _make_headers(self._api_key, self._secret, body)
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     f"{_BASE_URL}/api/v1/private/order/submit",
