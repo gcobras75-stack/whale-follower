@@ -61,7 +61,10 @@ _CT_VAL: Dict[str, float] = {
     "LINK-USDT-SWAP": 1.0,     # 1 contrato = 1 LINK
 }
 
-_MIN_ORDER_USD = 1.0   # OKX perpetuos mínimo ~$1
+_MIN_ORDER_USD      = 1.0    # OKX perpetuos mínimo ~$1
+_WYCKOFF_RESERVE    = 50.0   # reservar para Wyckoff / buffer
+_MAX_ORDER_FRACTION = 0.30   # máximo 30% del margen libre por trade
+_MIN_MARGIN_FREE    = 15.0   # margen libre mínimo para operar
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -500,11 +503,34 @@ class OKXExecutor:
             logger.warning("[okx_exec] unknown pair: {}", pair)
             return None
 
-        if size_usd < _MIN_ORDER_USD:
+        # ── Sizing dinámico basado en balance real ────────────────────────────
+        try:
+            bal = await asyncio.wait_for(self.get_balance(), timeout=5.0)
+        except Exception:
+            bal = self._last_balance
+
+        margen_libre = bal - _WYCKOFF_RESERVE
+        if margen_libre < _MIN_MARGIN_FREE:
             logger.warning(
-                "[okx_exec] size_usd=${:.2f} below minimum ${:.0f} — skip",
-                size_usd, _MIN_ORDER_USD,
+                "[okx_exec] Margen insuficiente: bal=${:.0f} - reserva=${:.0f} = "
+                "libre=${:.0f} < min=${:.0f} — trade cancelado",
+                bal, _WYCKOFF_RESERVE, margen_libre, _MIN_MARGIN_FREE,
             )
+            return None
+
+        # Techo dinámico: 15% del capital total, mínimo $50
+        max_order = max(50.0, bal * 0.15)
+        size_requested = size_usd
+        size_usd = min(size_usd, margen_libre * _MAX_ORDER_FRACTION, max_order)
+        size_usd = max(size_usd, 10.0)
+
+        logger.info(
+            "[okx_exec] Sizing: solicitado=${:.0f} libre=${:.0f} "
+            "techo=${:.0f} final=${:.0f}",
+            size_requested, margen_libre, max_order, size_usd,
+        )
+
+        if size_usd < _MIN_ORDER_USD:
             return None
 
         path = "/api/v5/trade/order"
