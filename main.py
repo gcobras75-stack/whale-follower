@@ -336,6 +336,17 @@ async def trading_loop() -> None:
         except Exception as exc:
             logger.warning("[main] learning mode announce failed: {}", exc)
 
+    # ── Threshold Optimizer (auto-ajuste cada 6h) ────────────────────────────
+    try:
+        from threshold_optimizer import get_optimizer
+        thr_optimizer = get_optimizer()
+        await thr_optimizer.load_from_supabase()
+        asyncio.create_task(thr_optimizer.run_loop())
+        logger.info("[main] ThresholdOptimizer activo (ajuste cada 6h)")
+    except Exception as exc:
+        thr_optimizer = None
+        logger.warning("[main] ThresholdOptimizer no disponible: {}", exc)
+
     # ── Banner ────────────────────────────────────────────────────────────────
     active_layers = sum([
         cvd_combined is not None, liq_map is not None,
@@ -653,15 +664,20 @@ async def trading_loop() -> None:
             except Exception as exc:
                 logger.warning("[main] could not save signal features: {}", exc)
 
-        # Threshold dinámico: usa score_min de SPRING_PARAMS por régimen directamente
+        # Threshold dinámico: optimizer (auto-ajustado) > SPRING_PARAMS (default)
         regime_label = regime_det.regime(signal.pair).value if regime_det else "LATERAL"
         if regime_label == "UNKNOWN":
             regime_label = "LATERAL"
-        regime_params = config.SPRING_PARAMS.get(regime_label, config.SPRING_PARAMS["LATERAL"])
-        effective_threshold = regime_params["score_min"]
+        if thr_optimizer:
+            effective_threshold = thr_optimizer.get_threshold(regime_label)
+            thr_optimizer.record_signal_detected()
+        else:
+            regime_params = config.SPRING_PARAMS.get(regime_label, config.SPRING_PARAMS["LATERAL"])
+            effective_threshold = regime_params["score_min"]
         logger.info(
-            "[main] {} threshold={} (régimen={})",
+            "[main] {} threshold={} (régimen={} src={})",
             signal.pair, effective_threshold, regime_label,
+            "optimizer" if thr_optimizer else "SPRING_PARAMS",
         )
 
         if new_score < effective_threshold:
@@ -679,6 +695,8 @@ async def trading_loop() -> None:
             continue
 
         _signal_count += 1
+        if thr_optimizer:
+            thr_optimizer.record_signal_executed()
         logger.info(
             f"[main] *** SIGNAL #{_signal_count} {signal.pair} "
             f"score={new_score} entry={signal.entry_price:.2f} "
