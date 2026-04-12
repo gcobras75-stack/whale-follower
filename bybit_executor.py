@@ -586,13 +586,32 @@ class BybitTestnetExecutor:
             hashlib.sha256,
         ).hexdigest()
 
+    # Mínimos reales de Bybit por par (USD). Órdenes debajo de estos
+    # valores son rechazadas con retCode 170140.
+    _BYBIT_MIN_ORDER_USD = {
+        "BTCUSDT": 100.0,
+        "ETHUSDT":  20.0,
+        "SOLUSDT":  10.0,
+        "BNBUSDT":  10.0,
+        "DOGEUSDT":  5.0,
+    }
+
     async def _place_order(self, trade: PaperTrade) -> bool:
-        """Envía orden MARKET a Bybit Testnet."""
+        """Envía orden MARKET a Bybit."""
         if config.BYBIT_ORDERS_BLOCKED:  # ─ BLOQUEO TOTAL ─
             return False
         if not self._api_key or not self._api_secret:
             return False
         if not trade.pair or trade.size_contracts <= 0:
+            return False
+
+        # Guardrail: no enviar órdenes debajo del mínimo de Bybit
+        min_usd = self._BYBIT_MIN_ORDER_USD.get(trade.pair, 10.0)
+        if trade.size_usd < min_usd:
+            logger.warning(
+                "[executor] Orden cancelada (pre-send): {} ${:.2f} < mínimo ${:.0f}",
+                trade.pair, trade.size_usd, min_usd,
+            )
             return False
 
         ts = int(time.time() * 1000)
