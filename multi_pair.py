@@ -60,6 +60,12 @@ class MultiPairMonitor:
         self._scorer = ScoringEngine()
         self._btc_spring_ts: float = 0.0
         self._regime_det = regime_detector   # MarketRegimeDetector (o None)
+        if regime_detector is None:
+            logger.warning(
+                "MultiPairMonitor: regime_detector=None — umbrales usarán LATERAL por defecto"
+            )
+        else:
+            logger.info("MultiPairMonitor: regime_detector conectado ✅")
 
         for pair in target_pairs:
             self._states[pair] = PairState(
@@ -100,9 +106,12 @@ class MultiPairMonitor:
         )
 
         # Obtener régimen actual del par para umbrales adaptativos
-        regime_str = "UNKNOWN"
+        regime_str = "LATERAL"   # default seguro (no "UNKNOWN")
         if self._regime_det is not None:
-            regime_str = self._regime_det.regime(pair).value
+            r = self._regime_det.regime(pair).value
+            # Si el detector aún no tiene suficientes datos, devuelve UNKNOWN.
+            # En ese caso usar LATERAL como fallback conservador.
+            regime_str = r if r != "UNKNOWN" else "LATERAL"
 
         # Feed spring detector con régimen → umbrales adaptativos
         spring_data: Optional[Dict] = state.spring.feed(

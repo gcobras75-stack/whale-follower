@@ -70,14 +70,19 @@ class SpringDetector:
     def __init__(self) -> None:
         self._window:   Deque[PricePoint] = deque()
         self._vol_tracker                  = VolumeTracker()
-        self._baseline: Deque[Tuple[float, float]] = deque()
+
+        # Baseline de volumen: guarda snapshots del volumen-por-minuto cada 60s.
+        # Se necesitan ≥ _BASELINE_MIN_SAMPLES para que el baseline sea confiable.
+        self._vol_snapshots: Deque[float]  = deque(maxlen=30)   # últimos 30 minutos
+        self._last_vol_snapshot_ts: float  = 0.0
+        _BASELINE_SNAPSHOT_INTERVAL        = 60.0   # una muestra cada 60s
+        self._baseline_snapshot_interval   = _BASELINE_SNAPSHOT_INTERVAL
+        self._BASELINE_MIN_SAMPLES         = 5      # mínimo 5 minutos de datos
 
         self._last_signal_ts:  float = 0.0
         self._cooldown_secs:   float = 30.0
 
-        # ── Telemetría temporal (para diagnosticar 101h sin señal) ────────────
-        # Log throttled cada N segundos con el "mejor intento" visto en ese
-        # intervalo — muestra drop/bounce máximos y qué condición se queda corta.
+        # ── Telemetría temporal ───────────────────────────────────────────────
         self._telemetry_interval_secs: float = 30.0
         self._last_telemetry_ts:       float = 0.0
         self._best_drop_pct:           float = 0.0
@@ -157,16 +162,36 @@ class SpringDetector:
         bounce_intensity = min(bounce_pct / (bounce_thr * 2), 1.0)
 
         # Condición C: CVD sube mientras precio baja (divergencia)
+        # cvd_at_high = CVD en el momento del precio más alto de la ventana,
+        # NO drop_window[0] que es simplemente el punto más antiguo.
         if len(drop_window) >= 2:
-            cvd_at_high = drop_window[0].cvd
+            high_point  = max(drop_window, key=lambda p: p.price)
+            cvd_at_high = high_point.cvd
             cond_c      = (cvd_now > cvd_at_high) and cond_a
+            if cond_a:
+                logger.debug(
+                    "[spring] CVD check: cvd_now={:.2f} cvd_at_high={:.2f} "
+                    "diff={:+.2f} cond_c={}",
+                    cvd_now, cvd_at_high, cvd_now - cvd_at_high, cond_c,
+                )
         else:
+            cvd_at_high = cvd_now
             cond_c = False
+
+        # ── Snapshot de volumen-por-minuto para baseline ────────────────────
+        # Cada 60s guardamos el volumen total del último minuto como una muestra.
+        # vol_ratio = vol_actual / promedio_de_esas_muestras.
+        if now - self._last_vol_snapshot_ts >= self._baseline_snapshot_interval:
+            self._vol_snapshots.append(self._vol_tracker.total_last_minute(now))
+            self._last_vol_snapshot_ts = now
 
         # Condición D: volumen combinado > vol_thr × promedio
         recent_vol    = self._vol_tracker.total_last_minute(now)
         baseline_avg  = self._baseline_avg()
-        vol_ratio     = (recent_vol / baseline_avg) if baseline_avg > 0 else 0.0
+        if baseline_avg > 0 and len(self._vol_snapshots) >= self._BASELINE_MIN_SAMPLES:
+            vol_ratio = recent_vol / baseline_avg
+        else:
+            vol_ratio = 1.0   # no calcular hasta tener baseline real (≥5 min)
         cond_d        = vol_ratio >= vol_thr
 
         # ── Telemetría temporal ───────────────────────────────────────────────
@@ -198,10 +223,16 @@ class SpringDetector:
             if self._best_bounce_pct >= bounce_thr:  proxy_score += 12
             if self._best_vol_ratio  >= vol_thr:     proxy_score += 8
 
+            baseline_status = (
+                f"ready({len(self._vol_snapshots)})"
+                if len(self._vol_snapshots) >= self._BASELINE_MIN_SAMPLES
+                else f"warmup({len(self._vol_snapshots)}/{self._BASELINE_MIN_SAMPLES})"
+            )
             logger.info(
                 "[spring] Vela analizada | régimen={} | evals={} | proxy_score={} | "
                 "best: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | "
-                "umbrales: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | faltó: {}",
+                "umbrales: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | "
+                "vol_baseline={} | faltó: {}",
                 regime, self._eval_count, proxy_score,
                 self._best_drop_pct * 100,
                 self._best_bounce_pct * 100,
@@ -209,6 +240,7 @@ class SpringDetector:
                 drop_thr * 100,
                 bounce_thr * 100,
                 vol_thr,
+                baseline_status,
                 ", ".join(missing),
             )
             # Reset del intervalo
@@ -255,12 +287,13 @@ class SpringDetector:
             self._window.popleft()
 
     def _update_baseline(self, volume: float, ts: float) -> None:
-        self._baseline.append((ts, volume))
-        cutoff = ts - 60.0
-        while self._baseline and self._baseline[0][0] < cutoff:
-            self._baseline.popleft()
+        # Legacy — ya no se usa para cálculo de vol_ratio.
+        # El VolumeTracker acumula volumen por exchange y
+        # _vol_snapshots guarda muestras de volumen-por-minuto cada 60s.
+        pass
 
     def _baseline_avg(self) -> float:
-        if not self._baseline:
+        """Promedio de volumen-por-minuto de los últimos 30 snapshots."""
+        if not self._vol_snapshots:
             return 0.0
-        return sum(v for _, v in self._baseline) / max(len(self._baseline), 1)
+        return sum(self._vol_snapshots) / len(self._vol_snapshots)
