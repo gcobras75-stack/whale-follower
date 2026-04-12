@@ -737,22 +737,44 @@ async def _cmd_status() -> None:
     uptime = int(time.time() - _stats["start_time"])
     h, m   = divmod(uptime // 60, 60)
 
+    # Threshold real: optimizer > SPRING_PARAMS > fallback
     score_min = config.SIGNAL_SCORE_THRESHOLD
+    regime_label = "LATERAL"
     try:
-        from learning_manager import get_manager
-        score_min = int(get_manager().get_threshold())
+        from threshold_optimizer import get_optimizer
+        opt = get_optimizer()
+        score_min = opt.get_threshold(regime_label)
+    except Exception:
+        score_min = config.SPRING_PARAMS.get(regime_label, {}).get("score_min", score_min)
+
+    # Señales de Supabase (sobrevive reinicios)
+    signals_db = _stats["signals_total"]   # in-memory como fallback
+    trades_db  = 0
+    try:
+        from db_writer import _client, _run
+        from datetime import datetime, timezone as _tz
+        today_start = datetime.now(_tz.utc).replace(hour=0, minute=0, second=0).isoformat()
+        result = await _run(
+            lambda: _client().table("paper_trades")
+            .select("id", count="exact")
+            .gte("created_at", today_start)
+            .execute()
+        )
+        if result:
+            trades_db = result.count if hasattr(result, "count") and result.count else len(result.data or [])
     except Exception:
         pass
+    signals_display = max(signals_db, trades_db)
 
     await _reply(
         f"Estado del bot\n"
         f"--------------\n"
-        f"Par: {config.TRADING_PAIR}\n"
+        f"Pares: {', '.join(config.TRADING_PAIRS)}\n"
         f"Uptime: {h}h {m}m\n"
-        f"Señales detectadas: {_stats['signals_total']}\n"
-        f"Alta confianza (80+): {_stats['signals_high']}\n"
-        f"Score minimo: {score_min}\n"
-        f"Exchanges: Binance/Bybit/OKX activos"
+        f"Señales detectadas: {signals_display}\n"
+        f"Trades hoy (Supabase): {trades_db}\n"
+        f"Score minimo: {score_min} ({regime_label})\n"
+        f"Exchanges: Kraken/Bybit/OKX activos"
     )
 
 
