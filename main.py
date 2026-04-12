@@ -786,6 +786,14 @@ async def trading_loop() -> None:
 
         _size_mult = meta_agent_mod.size_multiplier if meta_agent_mod else 1.0
 
+        if not allocation.trades:
+            logger.warning(
+                "[main] {} SIGNAL score={} pasó threshold pero allocation vacío — "
+                "capital_disponible=${:.2f} open_trades={}",
+                signal.pair, new_score,
+                executor.available_capital(), executor.open_count(),
+            )
+
         for alloc in allocation.trades:
             signal_id = signal_id_for_signal if alloc.pair == signal.pair else str(uuid.uuid4())
 

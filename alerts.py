@@ -510,10 +510,11 @@ async def dispatch(
 
 async def _send_telegram(text: str) -> None:
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+    # Enviar sin parse_mode para evitar errores con caracteres especiales
+    # de Markdown (*, _, [, ]) en datos dinámicos.
     payload = {
         "chat_id":    config.TELEGRAM_CHAT_ID,
         "text":       text,
-        "parse_mode": "Markdown",
     }
     try:
         async with aiohttp.ClientSession() as session:
@@ -522,7 +523,7 @@ async def _send_telegram(text: str) -> None:
             ) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(f"[telegram] HTTP {resp.status}: {body}")
+                    logger.error("[telegram] HTTP {}: {}", resp.status, body)
                 else:
                     logger.success("[telegram] Alerta enviada.")
     except Exception as exc:
