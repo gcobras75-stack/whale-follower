@@ -1,5 +1,5 @@
 """
-bybit_utils.py — Utilidades compartidas para llamadas a Bybit API (aiohttp directo a api.bytick.com).
+bybit_utils.py — Utilidades compartidas para llamadas a Bybit API (aiohttp directo a api.bybit.com).
 Sin dependencia de pybit SDK para evitar problemas de compatibilidad de versiones.
 
 Centraliza la lógica de fetch de balance para evitar duplicación

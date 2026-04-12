@@ -266,6 +266,10 @@ class BybitTestnetExecutor:
                 min_qty_pref = _MIN_QTY.get(pair, 0.01)
                 size_usd = max(size_usd, min_qty_pref * entry_price * 0.1)
 
+        # Clamp size_usd a mínimo/máximo configurado
+        size_usd = max(config.MIN_TRADE_SIZE_USD, size_usd)
+        size_usd = min(config.MAX_TRADE_SIZE_USD, size_usd)
+
         size_contracts = round(size_usd / entry_price, 3)
         size_contracts = max(size_contracts, 0.001)
 

@@ -736,50 +736,23 @@ class GridTradingEngine:
             pass
 
     async def _alert_cycle(self, grid: GridState, exit_price: float, pnl: float) -> None:
-        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
+        """Ciclos de grid → solo log Railway (no Telegram, genera spam)."""
         buy_price = exit_price * (1 - grid.spacing_pct)
-        if self._production:
-            msg = (
-                f"\U0001f7e2 GRID CICLO COMPLETADO\n"
-                f"Par: {grid.pair}\n"
-                f"Compra:  ${buy_price:,.4f}\n"
-                f"Venta:   ${exit_price:,.4f}\n"
-                f"PnL:     +${pnl:.4f}\n"
-                f"PnL total: ${grid.pnl_total:.4f} | Ciclos: {grid.cycles_done}"
-            )
-        else:
-            msg = (
-                f"\u2705 [GRID] Ciclo completado {grid.pair}\n"
-                f"Salida: ${exit_price:,.4f}\n"
-                f"P&L ciclo: +${pnl:.4f}\n"
-                f"P&L total: ${grid.pnl_total:.4f} | Ciclos: {grid.cycles_done}"
-            )
-        try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                             json={"chat_id": chat_id, "text": msg},
-                             timeout=aiohttp.ClientTimeout(total=10))
-        except Exception:
-            pass
+        logger.info(
+            "[grid] Ciclo {} | buy={:.4f} sell={:.4f} pnl={:+.4f} total={:+.4f} ciclos={}",
+            grid.pair, buy_price, exit_price, pnl, grid.pnl_total, grid.cycles_done,
+        )
 
     async def _alert_circuit_breaker(self, grid: GridState) -> None:
-        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
-        msg = (
-            f"🚨 [GRID] CIRCUIT BREAKER {grid.pair}\n"
-            f"{grid.pause_reason}\n"
-            f"P&L acumulado: ${grid.pnl_total:.4f}\n"
-            f"Grid suspendido hasta recuperacion de rango"
-        )
+        """Circuit breaker → Telegram (crítico)."""
         try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                             json={"chat_id": chat_id, "text": msg},
-                             timeout=aiohttp.ClientTimeout(total=10))
+            import alerts as _alerts
+            await _alerts._send_telegram(
+                f"🚨 [GRID] CIRCUIT BREAKER {grid.pair}\n"
+                f"{grid.pause_reason}\n"
+                f"P&L acumulado: ${grid.pnl_total:.4f}\n"
+                f"Grid suspendido hasta recuperacion de rango",
+                priority="critical",
+            )
         except Exception:
             pass

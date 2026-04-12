@@ -807,6 +807,8 @@ async def trading_loop() -> None:
         for alloc in allocation.trades:
             signal_id = signal_id_for_signal if alloc.pair == signal.pair else str(uuid.uuid4())
             final_size = alloc.size_usd * _size_mult
+            final_size = max(config.MIN_TRADE_SIZE_USD, final_size)
+            final_size = min(config.MAX_TRADE_SIZE_USD, final_size)
 
             paper = await executor.open_trade(
                 signal_score     = alloc.signal_score,
