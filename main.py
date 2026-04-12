@@ -373,6 +373,17 @@ async def trading_loop() -> None:
         thr_optimizer = None
         logger.warning("[main] ThresholdOptimizer no disponible: {}", exc)
 
+    # ── Auto-Healer (monitoreo 24/7 + auto-corrección) ──────────────────────
+    _healer = None
+    try:
+        from auto_healer import get_healer
+        _healer = get_healer()
+        _healer._refs["okx_wyckoff"] = _okx_wyckoff
+        asyncio.create_task(_healer.run_loop())
+        logger.info("[main] AutoHealer activo (check cada 5min)")
+    except Exception as exc:
+        logger.warning("[main] AutoHealer no disponible: {}", exc)
+
     # ── Banner ────────────────────────────────────────────────────────────────
     active_layers = sum([
         cvd_combined is not None, liq_map is not None,
@@ -723,6 +734,11 @@ async def trading_loop() -> None:
                 regime=regime_label,
                 features=features if ml_model else None,
             )
+
+        # Healer hooks
+        if _healer:
+            _healer.on_spring_eval()
+            _healer.on_ctx_score(new_bd.context_pts)
 
         if new_score < effective_threshold:
             logger.info(
