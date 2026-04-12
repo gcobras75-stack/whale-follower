@@ -542,6 +542,15 @@ class OKXExecutor:
             logger.warning("[okx_exec] need valid price_hint (got {})", price_hint)
             return None
         usd_per_contract = ct_val * price_hint
+
+        # Si 1 contrato cuesta más que el size disponible → no se puede operar este par
+        if usd_per_contract > size_usd:
+            logger.warning(
+                "[okx_exec] {} contrato=${:.0f} > size=${:.0f} — par demasiado caro, saltando",
+                inst_id, usd_per_contract, size_usd,
+            )
+            return None
+
         n_contracts = max(1, int(size_usd / usd_per_contract))
 
         body_dict = {

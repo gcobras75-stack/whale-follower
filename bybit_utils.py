@@ -91,9 +91,12 @@ async def fetch_usdt_balance(caller: str = "bybit") -> float:
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
                     if r.status == 403:
-                        logger.info(
-                            "[{}] Bybit balance REST bloqueado (403) → usando REAL_CAPITAL=${:.2f}",
-                            caller, config.REAL_CAPITAL,
+                        body_text = await r.text()
+                        logger.warning(
+                            "[{}] Bybit 403 | URL={} | type={} | body={}",
+                            caller, url,
+                            r.headers.get("content-type", "?"),
+                            body_text[:200],
                         )
                         return config.REAL_CAPITAL
                     if r.status != 200:

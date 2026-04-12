@@ -657,6 +657,21 @@ class BybitTestnetExecutor:
                         data=body_str,
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
+                        if resp.status == 403:
+                            body_text = await resp.text()
+                            logger.error(
+                                "[executor] Bybit 403 Forbidden | URL={} | "
+                                "content-type={} | body={}",
+                                f"{self._BASE_URL}/v5/order/create",
+                                resp.headers.get("content-type", "?"),
+                                body_text[:300],
+                            )
+                            try:
+                                from auto_healer import get_healer
+                                get_healer().on_bybit_403()
+                            except Exception:
+                                pass
+                            return False
                         data = await resp.json()
                         ret_code = data.get("retCode", -1)
                         if ret_code == 0:
