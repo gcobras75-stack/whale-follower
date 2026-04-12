@@ -876,7 +876,7 @@ async def trading_loop() -> None:
                     f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
                 )
             elif _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
-                # Fallback a OKX — verificar que hay USDT suficiente
+                # Fallback a OKX — verificar balance + par alternativo si contrato es caro
                 try:
                     _okx_bal = await asyncio.wait_for(
                         _okx_wyckoff.get_balance(), timeout=5.0)
@@ -888,40 +888,59 @@ async def trading_loop() -> None:
                         "[main] OKX sin USDT suficiente (${:.0f}) — Wyckoff cancelado",
                         _okx_bal)
                 else:
+                    # Intentar par original primero; si contrato muy caro → buscar alternativo
+                    exec_pair  = alloc.pair
+                    exec_price = alloc.entry_price
+                    okx_result = None
+
                     logger.info(
                         "[main] Bybit rechazó {} ${:.2f} — OKX fallback (bal=${:.0f})",
-                        alloc.pair, final_size, _okx_bal)
+                        exec_pair, final_size, _okx_bal)
                     try:
                         okx_result = await asyncio.wait_for(
                             _okx_wyckoff.market_order(
-                                pair=alloc.pair,
-                                side="buy",
-                                size_usd=final_size,
-                                price_hint=alloc.entry_price,
-                            ),
-                            timeout=10.0,
-                        )
-                        if okx_result:
-                            logger.info(
-                                "[main] Trade OKX {} ${:.2f} OK orderId={}",
-                                alloc.pair, final_size,
-                                okx_result.get("orderId", "?"))
-                            asyncio.create_task(alerts.send_trade_alert("wyckoff", {
-                                "pair":     alloc.pair,
-                                "score":    new_score,
-                                "entry":    alloc.entry_price,
-                                "sl":       alloc.stop_loss,
-                                "tp":       alloc.take_profit,
-                                "size_usd": final_size,
-                            }))
-                        else:
-                            logger.error(
-                                "[main] OKX fallback también falló para {} ${:.2f}",
-                                alloc.pair, final_size)
-                    except asyncio.TimeoutError:
-                        logger.error("[main] OKX fallback timeout {} ${:.2f}", alloc.pair, final_size)
+                                pair=exec_pair, side="buy",
+                                size_usd=final_size, price_hint=exec_price),
+                            timeout=10.0)
                     except Exception as exc:
-                        logger.error("[main] OKX fallback error: {}", exc)
+                        logger.warning("[main] OKX {} error: {}", exec_pair, exc)
+
+                    # Si falló → buscar par alternativo más barato
+                    if not okx_result:
+                        alt = _okx_wyckoff.find_affordable_pair(
+                            final_size, _latest_prices, original_pair=exec_pair)
+                        if alt and alt in _latest_prices:
+                            exec_pair  = alt
+                            exec_price = _latest_prices[alt]
+                            logger.info(
+                                "[main] Par alternativo: {} (contrato cabe en ${:.0f})",
+                                alt, final_size)
+                            try:
+                                okx_result = await asyncio.wait_for(
+                                    _okx_wyckoff.market_order(
+                                        pair=alt, side="buy",
+                                        size_usd=final_size, price_hint=exec_price),
+                                    timeout=10.0)
+                            except Exception as exc:
+                                logger.error("[main] OKX alt {} error: {}", alt, exc)
+
+                    if okx_result:
+                        logger.info(
+                            "[main] Trade OKX {} ${:.2f} OK orderId={}",
+                            exec_pair, final_size,
+                            okx_result.get("orderId", "?"))
+                        asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                            "pair":     exec_pair,
+                            "score":    new_score,
+                            "entry":    exec_price,
+                            "sl":       alloc.stop_loss,
+                            "tp":       alloc.take_profit,
+                            "size_usd": final_size,
+                        }))
+                    else:
+                        logger.error(
+                            "[main] OKX fallback agotado — ningún par operable con ${:.0f}",
+                            final_size)
 
         if dashboard:
             dashboard.record_signal(new_score, operated=bool(allocation.trades), blocked_by_ml=False)

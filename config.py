@@ -122,6 +122,10 @@ OKX_SECRET:        str  = os.getenv("OKX_SECRET",        "")
 OKX_PASSPHRASE:    str  = os.getenv("OKX_PASSPHRASE",    "")
 ENABLE_CROSS_ARB_REAL: bool = False  # deshabilitado — ver ENABLE_CROSS_ARB env var
 ENABLE_LEAD_LAG_ARB:  bool = False  # deshabilitado — requiere Bybit
+
+# ── Gate.io (futuro fallback cuando Bybit 403 persiste) ─────────────────────
+GATE_API_KEY:    str = os.getenv("GATE_API_KEY",    "")
+GATE_API_SECRET: str = os.getenv("GATE_API_SECRET", "")
 CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    "50"))
 CROSS_ARB_MAX_SIZE:        float = float(os.getenv("CROSS_ARB_MAX_SIZE",        "25"))
 BYBIT_ORDER_ENDPOINT:      str   = os.getenv("BYBIT_ORDER_ENDPOINT", "")

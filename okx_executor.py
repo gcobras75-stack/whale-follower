@@ -469,6 +469,31 @@ class OKXExecutor:
             logger.warning("[okx_exec] _check_account_mode error: {}", exc)
         return True  # asumir OK si falla la verificación
 
+    # ── Par alternativo ────────────────────────────────────────────────────
+
+    def find_affordable_pair(self, size_usd: float, prices: Dict[str, float],
+                             original_pair: str = "") -> Optional[str]:
+        """Encuentra un par cuyo contrato cueste <= size_usd.
+        Retorna el par bot-name (ej "LINKUSDT") o None.
+        Prioriza pares con mayor liquidez (más cercanos al original).
+        """
+        candidates = []
+        for pair, inst_id in _PAIR_TO_INST.items():
+            if pair == original_pair:
+                continue
+            price = prices.get(pair, 0)
+            if price <= 0:
+                continue
+            ct_val = _CT_VAL.get(inst_id, 1.0)
+            usd_per_ct = ct_val * price
+            if usd_per_ct <= size_usd:
+                candidates.append((pair, usd_per_ct))
+        if not candidates:
+            return None
+        # Preferir el contrato más grande que quepa (máxima exposición)
+        candidates.sort(key=lambda x: -x[1])
+        return candidates[0][0]
+
     # ── Market orders ───────────────────────────────────────────────────────
 
     async def market_order(
