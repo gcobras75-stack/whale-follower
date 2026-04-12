@@ -26,10 +26,11 @@ from loguru import logger
 
 _SESSION_WINDOWS = [
     # (nombre, utc_hour_start, utc_hour_end, multiplier)
+    # Nota: usa UTC — funciona en cualquier servidor (Railway, Contabo, etc.)
     ("overlap",  13, 16, 2.0),   # máxima liquidez — evaluar primero
     ("new_york", 14, 21, 1.5),
     ("london",    3, 12, 1.3),
-    ("asia",     21, 27, 0.7),   # 27 = 3 del día siguiente
+    ("asia",     21, 27, 0.9),   # crypto opera 24/7, Asia no penalizar tanto
 ]
 
 
@@ -225,5 +226,5 @@ class ContextEngine:
 
         # Fuera de todos los rangos (poco probable)
         ctx.session_name       = "off_hours"
-        ctx.session_multiplier = 0.8
+        ctx.session_multiplier = 0.9
         ctx.session_pts        = 0
