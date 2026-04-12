@@ -121,6 +121,7 @@ class OKXExecutor:
         self._last_balance_ts: float = 0.0
         self._acct_level: int = 0       # 0=desconocido, 1-4=modos OKX
         self._acct_checked: bool = False
+        self._pos_mode: str = "net_mode"  # "net_mode" o "long_short_mode"
 
         if self._enabled:
             logger.info("[okx_exec] OKX executor initialized (real credentials)")
@@ -431,11 +432,15 @@ class OKXExecutor:
                 data = await resp.json()
             self._acct_checked = True
             if data.get("code") == "0" and data.get("data"):
-                self._acct_level = int(data["data"][0].get("acctLv", 0))
+                cfg = data["data"][0]
+                self._acct_level = int(cfg.get("acctLv", 0))
+                self._pos_mode   = cfg.get("posMode", "net_mode")
                 mode_name = self._ACCT_MODES.get(self._acct_level, "desconocido")
+                logger.info(
+                    "[okx_exec] Cuenta: acctLv={} ({}) posMode={}",
+                    self._acct_level, mode_name, self._pos_mode,
+                )
                 if self._acct_level in self._SWAP_OK_MODES:
-                    logger.info("[okx_exec] Modo cuenta: {} ({}) — SWAP OK",
-                                self._acct_level, mode_name)
                     return True
                 else:
                     logger.error(
@@ -515,23 +520,21 @@ class OKXExecutor:
 
         body_dict = {
             "instId":  inst_id,
-            "tdMode":  "cross",       # margen cruzado (usa todo el balance unificado)
+            "tdMode":  "cross",
             "side":    _side,
             "ordType": "market",
             "sz":      str(n_contracts),
         }
-        # Para SWAP compras = "long", ventas = "short"
-        if _side == "buy":
-            body_dict["posSide"] = "long"
-        else:
-            body_dict["posSide"] = "short"
+        # posSide solo en long_short_mode. En net_mode causa error.
+        if self._pos_mode == "long_short_mode":
+            body_dict["posSide"] = "long" if _side == "buy" else "short"
 
         body = json.dumps(body_dict)
 
         usd_approx = n_contracts * usd_per_contract
         logger.info(
-            "[okx_exec] SWAP {} {} {} contratos ≈${:.0f}",
-            _side.upper(), inst_id, n_contracts, usd_approx,
+            "[okx_exec] SWAP orden: {} | posMode={}",
+            body_dict, self._pos_mode,
         )
 
         try:
