@@ -31,20 +31,36 @@ import config
 # ── OKX API ────────────────────────────────────────────────────────────────────
 _BASE_URL = "https://www.okx.com"
 
-# Map from bot pair names to OKX SPOT instId
+# Map from bot pair names to OKX instId
+# SWAP (perpetuos USDT-M) — usa margen del Trading Unificado ($399 disponible)
+# SPOT desactivado — solo $4 USDT libre en spot.
 _PAIR_TO_INST: Dict[str, str] = {
-    "BTCUSDT":  "BTC-USDT",
-    "ETHUSDT":  "ETH-USDT",
-    "SOLUSDT":  "SOL-USDT",
-    "BNBUSDT":  "BNB-USDT",
-    "DOGEUSDT": "DOGE-USDT",
-    "XRPUSDT":  "XRP-USDT",
-    "ADAUSDT":  "ADA-USDT",
-    "AVAXUSDT": "AVAX-USDT",
-    "LINKUSDT": "LINK-USDT",
+    "BTCUSDT":  "BTC-USDT-SWAP",
+    "ETHUSDT":  "ETH-USDT-SWAP",
+    "SOLUSDT":  "SOL-USDT-SWAP",
+    "BNBUSDT":  "BNB-USDT-SWAP",
+    "DOGEUSDT": "DOGE-USDT-SWAP",
+    "XRPUSDT":  "XRP-USDT-SWAP",
+    "ADAUSDT":  "ADA-USDT-SWAP",
+    "AVAXUSDT": "AVAX-USDT-SWAP",
+    "LINKUSDT": "LINK-USDT-SWAP",
 }
 
-_MIN_SPOT_USD = 1.0   # OKX spot minimum ~$1 USD
+# Valor por contrato en OKX perpetuos (ctVal en USD o base coin)
+# OKX USDT-M swaps: ctVal está en la moneda base (ej: 0.01 ETH por contrato)
+_CT_VAL: Dict[str, float] = {
+    "BTC-USDT-SWAP":  0.01,    # 1 contrato = 0.01 BTC
+    "ETH-USDT-SWAP":  0.1,     # 1 contrato = 0.1 ETH
+    "SOL-USDT-SWAP":  1.0,     # 1 contrato = 1 SOL
+    "BNB-USDT-SWAP":  0.1,     # 1 contrato = 0.1 BNB
+    "DOGE-USDT-SWAP": 100.0,   # 1 contrato = 100 DOGE
+    "XRP-USDT-SWAP":  100.0,   # 1 contrato = 100 XRP
+    "ADA-USDT-SWAP":  100.0,   # 1 contrato = 100 ADA
+    "AVAX-USDT-SWAP": 1.0,     # 1 contrato = 1 AVAX
+    "LINK-USDT-SWAP": 1.0,     # 1 contrato = 1 LINK
+}
+
+_MIN_ORDER_USD = 1.0   # OKX perpetuos mínimo ~$1
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -388,39 +404,36 @@ class OKXExecutor:
             logger.warning("[okx_exec] unknown pair: {}", pair)
             return None
 
-        if size_usd < _MIN_SPOT_USD:
+        if size_usd < _MIN_ORDER_USD:
             logger.warning(
-                "[okx_exec] size_usd=${:.2f} below SPOT minimum ${:.0f} — skip",
-                size_usd, _MIN_SPOT_USD,
+                "[okx_exec] size_usd=${:.2f} below minimum ${:.0f} — skip",
+                size_usd, _MIN_ORDER_USD,
             )
             return None
 
         path = "/api/v5/trade/order"
         _side = side.lower()
 
+        # SWAP (perpetuos): sz = número de contratos, tdMode = "cross"
+        ct_val = _CT_VAL.get(inst_id, 1.0)
+        if price_hint <= 0:
+            logger.warning("[okx_exec] need valid price_hint (got {})", price_hint)
+            return None
+        usd_per_contract = ct_val * price_hint
+        n_contracts = max(1, int(size_usd / usd_per_contract))
+
+        body_dict = {
+            "instId":  inst_id,
+            "tdMode":  "cross",       # margen cruzado (usa todo el balance unificado)
+            "side":    _side,
+            "ordType": "market",
+            "sz":      str(n_contracts),
+        }
+        # Para SWAP compras = "long", ventas = "short"
         if _side == "buy":
-            # Buy: sz in quote currency (USDT)
-            body_dict = {
-                "instId":  inst_id,
-                "tdMode":  "cash",
-                "side":    "buy",
-                "ordType": "market",
-                "sz":      str(round(size_usd, 4)),
-                "tgtCcy":  "quote_ccy",
-            }
+            body_dict["posSide"] = "long"
         else:
-            # Sell: sz in base currency
-            if price_hint <= 0:
-                logger.warning("[okx_exec] need valid price_hint for sell (got {})", price_hint)
-                return None
-            base_qty = round(size_usd / price_hint, 6)
-            body_dict = {
-                "instId":  inst_id,
-                "tdMode":  "cash",
-                "side":    "sell",
-                "ordType": "market",
-                "sz":      str(base_qty),
-            }
+            body_dict["posSide"] = "short"
 
         body = json.dumps(body_dict)
 

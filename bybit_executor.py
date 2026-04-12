@@ -547,7 +547,7 @@ class BybitTestnetExecutor:
             "X-BAPI-API-KEY":     self._api_key,
             "X-BAPI-TIMESTAMP":   str(ts),
             "X-BAPI-SIGN":        signature,
-            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-RECV-WINDOW": self._RECV_WINDOW,
             "Content-Type":       "application/json",
             "User-Agent":         "Mozilla/5.0",
             "Referer":            "https://www.bybit.com",
@@ -580,11 +580,13 @@ class BybitTestnetExecutor:
 
     # ── Bybit Testnet API ─────────────────────────────────────────────────────
 
+    _RECV_WINDOW = "20000"
+
     def _sign(self, body_str: str, timestamp: int) -> str:
         """Genera firma HMAC-SHA256 para Bybit v5 POST.
         Formato: timestamp + api_key + recv_window + body
         """
-        payload = f"{timestamp}{self._api_key}5000{body_str}"
+        payload = f"{timestamp}{self._api_key}{self._RECV_WINDOW}{body_str}"
         return hmac.new(
             self._api_secret.encode("utf-8"),
             payload.encode("utf-8"),
@@ -639,7 +641,7 @@ class BybitTestnetExecutor:
             "X-BAPI-API-KEY":     self._api_key,
             "X-BAPI-TIMESTAMP":   str(ts),
             "X-BAPI-SIGN":        signature,
-            "X-BAPI-RECV-WINDOW": "5000",
+            "X-BAPI-RECV-WINDOW": self._RECV_WINDOW,
             "Content-Type":       "application/json",
             "User-Agent":         "Mozilla/5.0",
             "Referer":            "https://www.bybit.com",
