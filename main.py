@@ -535,6 +535,25 @@ async def trading_loop() -> None:
             ext.vol_hist_ratio = vol_ratio
             ext.vol_hist_pts  = vol_pts
 
+        # ── Diagnóstico ExtendedContext ──────────────────────────────────────
+        logger.info(
+            "[main] ExtCtx: cvd_all={} cvd_2={} vel={:.2f} | "
+            "ob={:.2f} ob_fav={} | corr={} | fg={} fg_block={} | "
+            "liq={} liq_pts={} | onchain={} | vol_unusual={} | "
+            "news_block={} | iv_spike={} | modules: cvd={} ob={} corr={} fg={} liq={} oc={}",
+            ext.cvd_all_positive, ext.cvd_two_positive, ext.cvd_weighted_vel,
+            ext.ob_imbalance, ext.ob_favorable,
+            ext.btc_eth_signal,
+            ext.fear_greed_value, ext.fear_greed_block_long,
+            ext.liq_zone_active, ext.liq_extra_pts,
+            ext.onchain_signal,
+            ext.vol_unusual,
+            ext.news_blocked,
+            ext.options_iv_spike,
+            bool(cvd_combined), bool(orderbook), bool(correlation),
+            bool(fear_greed), bool(liq_map), bool(onchain),
+        )
+
         # 5. Re-score la senal con ExtendedContext
         from scoring_engine import ScoringEngine
         scorer = ScoringEngine()
@@ -634,15 +653,16 @@ async def trading_loop() -> None:
             except Exception as exc:
                 logger.warning("[main] could not save signal features: {}", exc)
 
-        # Threshold dinámico ajustado por régimen de mercado
-        regime_adj = regime_det.threshold_adjustment(signal.pair) if regime_det else 0
-        base_threshold = get_manager().get_threshold() if get_manager else config.SIGNAL_SCORE_THRESHOLD
-        effective_threshold = int(base_threshold) + regime_adj
-        if regime_adj != 0:
-            logger.debug(
-                f"[main] {signal.pair} regime_adj={regime_adj:+d} "
-                f"threshold={base_threshold}→{effective_threshold}"
-            )
+        # Threshold dinámico: usa score_min de SPRING_PARAMS por régimen directamente
+        regime_label = regime_det.regime(signal.pair).value if regime_det else "LATERAL"
+        if regime_label == "UNKNOWN":
+            regime_label = "LATERAL"
+        regime_params = config.SPRING_PARAMS.get(regime_label, config.SPRING_PARAMS["LATERAL"])
+        effective_threshold = regime_params["score_min"]
+        logger.info(
+            "[main] {} threshold={} (régimen={})",
+            signal.pair, effective_threshold, regime_label,
+        )
 
         if new_score < effective_threshold:
             logger.info(
@@ -659,7 +679,6 @@ async def trading_loop() -> None:
             continue
 
         _signal_count += 1
-        regime_label = regime_det.regime(signal.pair).value if regime_det else "UNKNOWN"
         logger.info(
             f"[main] *** SIGNAL #{_signal_count} {signal.pair} "
             f"score={new_score} entry={signal.entry_price:.2f} "

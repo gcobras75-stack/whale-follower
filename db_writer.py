@@ -76,7 +76,7 @@ async def save_signal_features(
     row = {
         "signal_id":    signal_id,
         "pair":         pair,
-        "signal_score": int(signal_score),
+        "score":        int(signal_score),
         "features":     features,
         "timestamp":    _ts(timestamp),
     }
