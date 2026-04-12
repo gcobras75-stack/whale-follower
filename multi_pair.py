@@ -53,11 +53,13 @@ class MultiPairMonitor:
     # Minimum seconds between signals for the same pair to avoid spam.
     _SIGNAL_COOLDOWN_SECS: float = 30.0
 
-    def __init__(self, pairs: Optional[List[str]] = None) -> None:
+    def __init__(self, pairs: Optional[List[str]] = None,
+                 regime_detector=None) -> None:
         target_pairs = pairs if pairs is not None else config.TRADING_PAIRS
         self._states: Dict[str, PairState] = {}
         self._scorer = ScoringEngine()
         self._btc_spring_ts: float = 0.0
+        self._regime_det = regime_detector   # MarketRegimeDetector (o None)
 
         for pair in target_pairs:
             self._states[pair] = PairState(
@@ -97,8 +99,15 @@ class MultiPairMonitor:
             side=trade.side, quantity=trade.quantity, timestamp=trade.timestamp
         )
 
-        # Feed spring detector
-        spring_data: Optional[Dict] = state.spring.feed(trade, cvd_metrics.cumulative)
+        # Obtener régimen actual del par para umbrales adaptativos
+        regime_str = "UNKNOWN"
+        if self._regime_det is not None:
+            regime_str = self._regime_det.regime(pair).value
+
+        # Feed spring detector con régimen → umbrales adaptativos
+        spring_data: Optional[Dict] = state.spring.feed(
+            trade, cvd_metrics.cumulative, regime=regime_str,
+        )
         if spring_data is None:
             return None
 
@@ -116,10 +125,12 @@ class MultiPairMonitor:
 
         state.last_score = score
 
-        if score < config.SIGNAL_SCORE_THRESHOLD:
+        # Threshold adaptativo: usa score_min del régimen si disponible
+        score_threshold = spring_data.get("score_min", config.SIGNAL_SCORE_THRESHOLD)
+        if score < score_threshold:
             logger.debug(
-                "MultiPairMonitor: {} spring score {} below threshold {}",
-                pair, score, config.SIGNAL_SCORE_THRESHOLD,
+                "MultiPairMonitor: {} spring score {} below threshold {} (régimen={})",
+                pair, score, score_threshold, regime_str,
             )
             return None
 

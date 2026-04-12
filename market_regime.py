@@ -14,13 +14,18 @@ Integración en main.py:
 """
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional
 
+import aiohttp
 from loguru import logger
+
+import config
 
 
 # ── Régimen ───────────────────────────────────────────────────────────────────
@@ -159,8 +164,9 @@ class MarketRegimeDetector:
         )
         self._snapshots[pair] = snap
 
-        # Log solo cuando cambia el régimen
+        # Log + alerta Telegram cuando cambia el régimen
         if prev is None or prev.regime != regime:
+            old_label = prev.regime.value if prev else "UNKNOWN"
             logger.info(
                 "[regime] {} → {} | BB_width={:.2f}% momentum={:+.2f}% RSI={:.0f} "
                 "threshold_adj={:+d} size_mult={:.1f}x",
@@ -168,6 +174,38 @@ class MarketRegimeDetector:
                 snap.bb_width_pct, snap.momentum_pct, snap.rsi,
                 snap.threshold_adj, snap.size_multiplier,
             )
+            asyncio.create_task(
+                self._alert_regime_change(pair, old_label, regime.value)
+            )
+
+    async def _alert_regime_change(self, pair: str, old: str, new: str) -> None:
+        """Envia cambio de régimen a Telegram con los umbrales spring actualizados."""
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+
+        old_p = config.SPRING_PARAMS.get(old, config.SPRING_PARAMS["LATERAL"])
+        new_p = config.SPRING_PARAMS.get(new, config.SPRING_PARAMS["LATERAL"])
+
+        msg = (
+            f"\U0001f4ca R\u00e9gimen cambiado: {pair}\n"
+            f"{old} \u2192 {new}\n"
+            f"Umbrales spring ajustados:\n"
+            f"  Drop:   {old_p['drop_pct']*100:.2f}% \u2192 {new_p['drop_pct']*100:.2f}%\n"
+            f"  Bounce: {old_p['bounce_pct']*100:.2f}% \u2192 {new_p['bounce_pct']*100:.2f}%\n"
+            f"  Vol:    {old_p['vol_mult']:.2f}x \u2192 {new_p['vol_mult']:.2f}x\n"
+            f"  Score m\u00edn: {old_p['score_min']} \u2192 {new_p['score_min']}"
+        )
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+        except Exception:
+            pass
 
 
 # ── Indicadores técnicos ───────────────────────────────────────────────────────

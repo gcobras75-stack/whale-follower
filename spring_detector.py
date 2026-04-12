@@ -88,11 +88,15 @@ class SpringDetector:
     # ── API pública ────────────────────────────────────────────────────────────
 
     def feed(
-        self, trade: Trade, cvd_value: float
+        self, trade: Trade, cvd_value: float, regime: str = "UNKNOWN"
     ) -> Optional[Dict]:
         """
         Alimenta un trade. Devuelve spring_data dict si detecta patrón,
         o None si no hay patrón o está en cooldown.
+
+        *regime*: régimen de mercado actual (LATERAL, TRENDING_UP,
+        TRENDING_DOWN, HIGH_VOL, UNKNOWN). Determina los umbrales
+        de detección vía config.SPRING_PARAMS.
         """
         now = trade.timestamp
         pt  = PricePoint(
@@ -112,7 +116,7 @@ class SpringDetector:
         if len(self._window) < 10:
             return None
 
-        return self._evaluate(now, cvd_value)
+        return self._evaluate(now, cvd_value, regime)
 
     def strongest_exchange(self, ts: float) -> str:
         return self._vol_tracker.strongest(ts)
@@ -124,26 +128,33 @@ class SpringDetector:
 
     # ── Evaluación ─────────────────────────────────────────────────────────────
 
-    def _evaluate(self, now: float, cvd_now: float) -> Optional[Dict]:
+    def _evaluate(self, now: float, cvd_now: float,
+                  regime: str = "UNKNOWN") -> Optional[Dict]:
         pts           = list(self._window)
         current_price = pts[-1].price
 
-        # Condición A: caída >= 0.3% en ≤ 10 segundos
+        # ── Seleccionar umbrales adaptativos por régimen ─────────────────────
+        params     = config.SPRING_PARAMS.get(regime, config.SPRING_PARAMS["LATERAL"])
+        drop_thr   = params["drop_pct"]
+        bounce_thr = params["bounce_pct"]
+        vol_thr    = params["vol_mult"]
+
+        # Condición A: caída >= drop_thr en ≤ SPRING_DROP_SECS
         drop_window     = [p for p in pts if now - p.timestamp <= config.SPRING_DROP_SECS]
         if not drop_window:
             return None
         high_before     = max(p.price for p in drop_window)
         spring_low      = min(p.price for p in drop_window)
         drop_pct        = (high_before - spring_low) / high_before
-        cond_a          = drop_pct >= config.SPRING_DROP_PCT
-        drop_intensity  = min(drop_pct / (config.SPRING_DROP_PCT * 2), 1.0)
+        cond_a          = drop_pct >= drop_thr
+        drop_intensity  = min(drop_pct / (drop_thr * 2), 1.0)
 
-        # Condición B: rebote >= 0.2% desde el mínimo en ≤ 5 segundos
+        # Condición B: rebote >= bounce_thr desde el mínimo en ≤ SPRING_BOUNCE_SECS
         bounce_window   = [p for p in pts if now - p.timestamp <= config.SPRING_BOUNCE_SECS]
         bounce_low      = min((p.price for p in bounce_window), default=current_price)
         bounce_pct      = (current_price - bounce_low) / bounce_low if bounce_low > 0 else 0.0
-        cond_b          = bounce_pct >= config.SPRING_BOUNCE_PCT
-        bounce_intensity = min(bounce_pct / (config.SPRING_BOUNCE_PCT * 2), 1.0)
+        cond_b          = bounce_pct >= bounce_thr
+        bounce_intensity = min(bounce_pct / (bounce_thr * 2), 1.0)
 
         # Condición C: CVD sube mientras precio baja (divergencia)
         if len(drop_window) >= 2:
@@ -152,11 +163,11 @@ class SpringDetector:
         else:
             cond_c = False
 
-        # Condición D: volumen combinado > 1.5x promedio
+        # Condición D: volumen combinado > vol_thr × promedio
         recent_vol    = self._vol_tracker.total_last_minute(now)
         baseline_avg  = self._baseline_avg()
         vol_ratio     = (recent_vol / baseline_avg) if baseline_avg > 0 else 0.0
-        cond_d        = vol_ratio >= config.VOLUME_MULTIPLIER
+        cond_d        = vol_ratio >= vol_thr
 
         # ── Telemetría temporal ───────────────────────────────────────────────
         self._eval_count += 1
@@ -167,35 +178,37 @@ class SpringDetector:
         if now - self._last_telemetry_ts >= self._telemetry_interval_secs:
             # Identifica exactamente qué condición falta para el best intento
             missing = []
-            if self._best_drop_pct   < config.SPRING_DROP_PCT:
+            if self._best_drop_pct   < drop_thr:
                 missing.append(
-                    f"drop {self._best_drop_pct*100:.3f}%<{config.SPRING_DROP_PCT*100:.3f}%"
+                    f"drop {self._best_drop_pct*100:.3f}%<{drop_thr*100:.3f}%"
                 )
-            if self._best_bounce_pct < config.SPRING_BOUNCE_PCT:
+            if self._best_bounce_pct < bounce_thr:
                 missing.append(
-                    f"bounce {self._best_bounce_pct*100:.3f}%<{config.SPRING_BOUNCE_PCT*100:.3f}%"
+                    f"bounce {self._best_bounce_pct*100:.3f}%<{bounce_thr*100:.3f}%"
                 )
-            if self._best_vol_ratio  < config.VOLUME_MULTIPLIER:
+            if self._best_vol_ratio  < vol_thr:
                 missing.append(
-                    f"vol {self._best_vol_ratio:.2f}x<{config.VOLUME_MULTIPLIER:.2f}x"
+                    f"vol {self._best_vol_ratio:.2f}x<{vol_thr:.2f}x"
                 )
             if not missing:
                 missing.append("(ninguna — debería haber disparado)")
 
-            # Score aproximado: spring_confirmed vale +20 primary_pts; el resto
-            # lo calcula scoring_engine, pero aquí reportamos el best-effort.
             proxy_score = 0
-            if self._best_drop_pct   >= config.SPRING_DROP_PCT:   proxy_score += 8
-            if self._best_bounce_pct >= config.SPRING_BOUNCE_PCT: proxy_score += 12
-            if self._best_vol_ratio  >= config.VOLUME_MULTIPLIER: proxy_score += 8
+            if self._best_drop_pct   >= drop_thr:   proxy_score += 8
+            if self._best_bounce_pct >= bounce_thr:  proxy_score += 12
+            if self._best_vol_ratio  >= vol_thr:     proxy_score += 8
 
             logger.info(
-                "[spring] Vela analizada | evals={} | proxy_score={} | "
-                "best: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | faltó: {}",
-                self._eval_count, proxy_score,
+                "[spring] Vela analizada | régimen={} | evals={} | proxy_score={} | "
+                "best: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | "
+                "umbrales: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | faltó: {}",
+                regime, self._eval_count, proxy_score,
                 self._best_drop_pct * 100,
                 self._best_bounce_pct * 100,
                 self._best_vol_ratio,
+                drop_thr * 100,
+                bounce_thr * 100,
+                vol_thr,
                 ", ".join(missing),
             )
             # Reset del intervalo
@@ -230,6 +243,8 @@ class SpringDetector:
             "current_price":   round(current_price, 2),
             "vol_ratio":       round(vol_ratio, 2),
             "strongest_exchange": self._vol_tracker.strongest(now),
+            "regime":          regime,
+            "score_min":       params["score_min"],
         }
 
     # ── Helpers ────────────────────────────────────────────────────────────────

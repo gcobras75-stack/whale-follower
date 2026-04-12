@@ -223,7 +223,7 @@ async def trading_loop() -> None:
     # ── Motores principales ────────────────────────────────────────────────────
     aggregator = Aggregator()
     context    = ContextEngine()
-    monitor    = MultiPairMonitor()
+    monitor    = MultiPairMonitor(regime_detector=regime_det)
     selector   = PairSelector()
     allocator  = CapitalAllocator()
     risk_mgr   = RiskManager(config.REAL_CAPITAL if config.PRODUCTION else config.PAPER_CAPITAL)

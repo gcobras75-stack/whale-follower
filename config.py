@@ -30,13 +30,43 @@ ENABLE_BYBIT:   bool = os.getenv("ENABLE_BYBIT",   "true").lower() == "true"
 ENABLE_OKX:     bool = os.getenv("ENABLE_OKX",     "true").lower() == "true"
 ENABLE_BINANCE: bool = os.getenv("ENABLE_BINANCE", "false").lower() == "true"  # desactivado
 
-# ── Spring detection thresholds ───────────────────────────────────────────────
+# ── Spring detection thresholds (legacy — usados como fallback) ───────────────
 SPRING_DROP_PCT:   float = float(os.getenv("SPRING_DROP_PCT",   "0.003"))
 SPRING_BOUNCE_PCT: float = float(os.getenv("SPRING_BOUNCE_PCT", "0.002"))
 SPRING_DROP_SECS:  int   = int(os.getenv("SPRING_DROP_SECS",    "10"))
 SPRING_BOUNCE_SECS: int  = int(os.getenv("SPRING_BOUNCE_SECS",  "5"))
 VOLUME_MULTIPLIER: float = float(os.getenv("VOLUME_MULTIPLIER", "1.5"))
 WINDOW_SECS:       int   = int(os.getenv("WINDOW_SECS",         "60"))
+
+# ── Umbrales adaptativos por régimen de mercado ──────────────────────────────
+# Cada régimen tiene sus propios umbrales de detección del spring.
+# El spring_detector selecciona los parámetros según el régimen activo.
+SPRING_PARAMS: dict = {
+    "TRENDING_UP": {
+        "drop_pct":    0.0030,   # 0.30% — original, mercado en movimiento
+        "bounce_pct":  0.0020,   # 0.20%
+        "vol_mult":    1.50,
+        "score_min":   65,
+    },
+    "TRENDING_DOWN": {
+        "drop_pct":    0.0030,   # 0.30% — estricto contra tendencia
+        "bounce_pct":  0.0020,
+        "vol_mult":    1.50,
+        "score_min":   75,       # alto para evitar longs contra tendencia
+    },
+    "LATERAL": {
+        "drop_pct":    0.0015,   # 0.15% — ajustado al mercado actual
+        "bounce_pct":  0.0010,   # 0.10%
+        "vol_mult":    1.20,
+        "score_min":   55,       # más permisivo en lateral predecible
+    },
+    "HIGH_VOL": {
+        "drop_pct":    0.0050,   # 0.50% — muy estricto en caos
+        "bounce_pct":  0.0030,
+        "vol_mult":    2.00,
+        "score_min":   75,
+    },
+}
 
 # ── Stop-cascade detection ────────────────────────────────────────────────────
 CASCADE_SELL_COUNT: int = int(os.getenv("CASCADE_SELL_COUNT", "200"))
