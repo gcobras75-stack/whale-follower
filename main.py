@@ -921,14 +921,16 @@ async def trading_loop() -> None:
 
                     # Si falló → buscar par alternativo más barato
                     if not okx_result:
+                        # Usar el size REAL post-sizing, no el original
+                        effective = _okx_wyckoff.effective_size(final_size)
                         logger.info(
-                            "[main] OKX {} falló — buscando par alternativo (size=${:.0f}, "
-                            "precios disponibles: {})",
-                            exec_pair, final_size,
+                            "[main] OKX {} falló — buscando alternativo "
+                            "(size_orig=${:.0f} size_real=${:.0f} precios={})",
+                            exec_pair, final_size, effective,
                             [p for p in _latest_prices if _latest_prices[p] > 0][:6],
                         )
                         alt = _okx_wyckoff.find_affordable_pair(
-                            final_size, _latest_prices, original_pair=exec_pair)
+                            effective, _latest_prices, original_pair=exec_pair)
                         if alt and alt in _latest_prices:
                             exec_pair  = alt
                             exec_price = _latest_prices[alt]
@@ -979,7 +981,7 @@ async def trading_loop() -> None:
                         # Si falló, buscar par alternativo en MEXC
                         if not mexc_result:
                             alt = _mexc_wyckoff.find_affordable_pair(
-                                final_size, _latest_prices, original_pair=mexc_pair)
+                                10.0, _latest_prices, original_pair=mexc_pair)
                             if alt and alt in _latest_prices:
                                 mexc_pair  = alt
                                 mexc_price = _latest_prices[alt]

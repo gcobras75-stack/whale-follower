@@ -494,6 +494,16 @@ class OKXExecutor:
         candidates.sort(key=lambda x: -x[1])
         return candidates[0][0]
 
+    def effective_size(self, size_usd: float) -> float:
+        """Calcula el size real después del sizing dinámico (sin llamar API)."""
+        bal = self._last_balance
+        libre = bal - _WYCKOFF_RESERVE
+        if libre < _MIN_MARGIN_FREE:
+            return 0.0
+        max_order = max(50.0, bal * 0.15)
+        s = min(size_usd, libre * _MAX_ORDER_FRACTION, max_order)
+        return max(10.0, s)
+
     # ── Market orders ───────────────────────────────────────────────────────
 
     async def market_order(
