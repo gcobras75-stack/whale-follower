@@ -36,8 +36,10 @@ class FearGreedSnapshot:
 
 def _classify(value: int) -> tuple[str, float, bool, bool]:
     """Return (label, multiplier, block_long, block_short) for a given index value."""
+    if value < 10:
+        return "Extreme Fear", 0.8, True, False   # solo pánico absoluto bloquea
     if value <= 25:
-        return "Extreme Fear", 0.8, True, False
+        return "Fear", 0.8, False, False           # miedo fuerte pero no bloquea (rebote Wyckoff)
     if value <= 45:
         return "Fear", 0.8, False, False
     if value <= 55:

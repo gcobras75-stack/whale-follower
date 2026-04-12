@@ -31,6 +31,7 @@ _MODEL_PATH = Path(__file__).parent / "models" / "xgboost_model.pkl"
 _BLOCK_THRESHOLD = 0.65
 _RETRAIN_EVERY = 10
 _RECENT_WINDOW = 50
+_MIN_REAL_TRADES_TO_BLOCK = 50   # no bloquear hasta tener datos reales
 _RECENT_WEIGHT = 3
 
 _FEATURE_KEYS = [
@@ -168,10 +169,21 @@ class MLModel:
     def should_block(self, features: Dict[str, float]) -> Tuple[bool, float]:
         """
         Returns (block, probability).
-        block=True if probability < 0.65.
+        block=True if probability < 0.65 AND model has enough real data.
         """
         if not _XGBOOST_AVAILABLE or self._model is None:
             return (False, 1.0)
+
+        # Modo warmup: no bloquear si el modelo solo tiene datos sintéticos.
+        # self._new_samples cuenta los trades reales registrados via record_outcome().
+        real_trades = len(self._new_samples)
+        if real_trades < _MIN_REAL_TRADES_TO_BLOCK:
+            prob = self.predict(features)
+            logger.info(
+                "[ml_model] Modo warmup ({} trades < {}) — señal permitida (prob={:.3f})",
+                real_trades, _MIN_REAL_TRADES_TO_BLOCK, prob,
+            )
+            return (False, prob)
 
         prob = self.predict(features)
         block = prob < _BLOCK_THRESHOLD
