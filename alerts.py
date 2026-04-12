@@ -704,16 +704,23 @@ async def handle_telegram_commands(executor: Any) -> None:
                 if chat != config.TELEGRAM_CHAT_ID:
                     continue
 
-                if text == "/status":
-                    await _cmd_status()
-                elif text == "/stats":
-                    await _cmd_stats()
-                elif text in ("/report", "/analytics"):
-                    await _cmd_report()
-                elif text == "/last":
-                    await _cmd_last()
-                elif text == "/trades":
-                    await _cmd_trades(executor)
+                try:
+                    if text == "/status":
+                        await asyncio.wait_for(_cmd_status(), timeout=10.0)
+                    elif text == "/stats":
+                        await asyncio.wait_for(_cmd_stats(), timeout=10.0)
+                    elif text in ("/report", "/analytics"):
+                        await asyncio.wait_for(_cmd_report(), timeout=15.0)
+                    elif text == "/last":
+                        await asyncio.wait_for(_cmd_last(), timeout=10.0)
+                    elif text == "/trades":
+                        await asyncio.wait_for(_cmd_trades(executor), timeout=10.0)
+                except asyncio.TimeoutError:
+                    logger.error("[telegram_cmd] Timeout procesando {}", text)
+                    await _reply(f"Timeout procesando {text}. Bot activo.")
+                except Exception as exc:
+                    logger.error("[telegram_cmd] Error procesando {}: {}", text, exc)
+                    await _reply(f"Error en {text}. Bot activo.")
 
         except asyncio.CancelledError:
             return
@@ -771,8 +778,11 @@ async def _cmd_stats() -> None:
         cap_okx_str = "sin datos"
 
     # Drawdown
-    dd     = check_drawdown()
-    dd_str = f"-{dd:.1f}% ⚠️" if dd >= 5 else f"-{dd:.1f}% ✅"
+    try:
+        dd     = check_drawdown()
+        dd_str = f"-{dd:.1f}% ⚠️" if dd >= 5 else f"-{dd:.1f}% ✅"
+    except Exception:
+        dd_str = "N/A"
 
     # P&L por estrategia (solo las que tienen actividad)
     pnl_strat = _stats["pnl_by_strategy"]
