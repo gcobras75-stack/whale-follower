@@ -860,45 +860,52 @@ async def trading_loop() -> None:
                     f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
                 )
             elif _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
-                # Fallback a OKX cuando Bybit rechaza (min demasiado alto)
-                logger.info(
-                    "[main] Bybit rechazó {} ${:.2f} — intentando OKX fallback",
-                    alloc.pair, final_size,
-                )
+                # Fallback a OKX — verificar que hay USDT suficiente
                 try:
-                    okx_result = await asyncio.wait_for(
-                        _okx_wyckoff.market_order(
-                            pair=alloc.pair,
-                            side="buy",
-                            size_usd=final_size,
-                            price_hint=alloc.entry_price,
-                        ),
-                        timeout=10.0,
-                    )
-                    if okx_result:
-                        logger.info(
-                            "[main] Trade OKX {} ${:.2f} OK orderId={}",
-                            alloc.pair, final_size,
-                            okx_result.get("orderId", "?"),
+                    _okx_bal = await asyncio.wait_for(
+                        _okx_wyckoff.get_balance(), timeout=5.0)
+                except Exception:
+                    _okx_bal = 0.0
+
+                if _okx_bal < 20:
+                    logger.warning(
+                        "[main] OKX sin USDT suficiente (${:.0f}) — Wyckoff cancelado",
+                        _okx_bal)
+                else:
+                    logger.info(
+                        "[main] Bybit rechazó {} ${:.2f} — OKX fallback (bal=${:.0f})",
+                        alloc.pair, final_size, _okx_bal)
+                    try:
+                        okx_result = await asyncio.wait_for(
+                            _okx_wyckoff.market_order(
+                                pair=alloc.pair,
+                                side="buy",
+                                size_usd=final_size,
+                                price_hint=alloc.entry_price,
+                            ),
+                            timeout=10.0,
                         )
-                        # Registrar en Supabase como trade Wyckoff
-                        asyncio.create_task(alerts.send_trade_alert("wyckoff", {
-                            "pair":     alloc.pair,
-                            "score":    new_score,
-                            "entry":    alloc.entry_price,
-                            "sl":       alloc.stop_loss,
-                            "tp":       alloc.take_profit,
-                            "size_usd": final_size,
-                        }))
-                    else:
-                        logger.error(
-                            "[main] OKX fallback también falló para {} ${:.2f}",
-                            alloc.pair, final_size,
-                        )
-                except asyncio.TimeoutError:
-                    logger.error("[main] OKX fallback timeout {} ${:.2f}", alloc.pair, final_size)
-                except Exception as exc:
-                    logger.error("[main] OKX fallback error: {}", exc)
+                        if okx_result:
+                            logger.info(
+                                "[main] Trade OKX {} ${:.2f} OK orderId={}",
+                                alloc.pair, final_size,
+                                okx_result.get("orderId", "?"))
+                            asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                                "pair":     alloc.pair,
+                                "score":    new_score,
+                                "entry":    alloc.entry_price,
+                                "sl":       alloc.stop_loss,
+                                "tp":       alloc.take_profit,
+                                "size_usd": final_size,
+                            }))
+                        else:
+                            logger.error(
+                                "[main] OKX fallback también falló para {} ${:.2f}",
+                                alloc.pair, final_size)
+                    except asyncio.TimeoutError:
+                        logger.error("[main] OKX fallback timeout {} ${:.2f}", alloc.pair, final_size)
+                    except Exception as exc:
+                        logger.error("[main] OKX fallback error: {}", exc)
 
         if dashboard:
             dashboard.record_signal(new_score, operated=bool(allocation.trades), blocked_by_ml=False)

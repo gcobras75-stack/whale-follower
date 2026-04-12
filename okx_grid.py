@@ -53,6 +53,11 @@ _GRID_CONFIG: Dict[str, dict] = {
 
 _MIN_ORDER_OKX     = 1.0      # OKX SPOT mínimo ~$1 USD
 _FEES_PCT          = 0.001    # 0.1% OKX taker fee
+
+# ── Reserva de capital para Wyckoff ──────────────────────────────────────────
+# El grid NO debe consumir todo el USDT de OKX. Reservar para trades Wyckoff.
+_OKX_GRID_MAX_CAPITAL  = 300.0    # máximo $300 para grid total
+_OKX_WYCKOFF_RESERVE   = 100.0    # mínimo $100 reservados para Wyckoff executor
 _PRICE_HISTORY     = 100
 _CIRCUIT_BREAKER   = 0.04     # suspender si pierde >4% del capital asignado
 _REBALANCE_HOURS   = 6        # recentrar grid cada 6h
@@ -187,6 +192,17 @@ class OKXGridEngine:
         spacing     = self._calc_spacing(pair, cfg)
         n           = cfg["levels"]
         cap         = cfg["capital_usd"]
+
+        # Respetar reserva Wyckoff: reducir capital grid si excede el máximo
+        total_grid_capital = sum(c["capital_usd"] for c in _GRID_CONFIG.values())
+        if total_grid_capital > _OKX_GRID_MAX_CAPITAL:
+            scale = _OKX_GRID_MAX_CAPITAL / total_grid_capital
+            cap   = cap * scale
+            logger.info(
+                "[okx_grid] {} capital reducido ${:.0f}→${:.0f} (reserva Wyckoff ${:.0f})",
+                pair, cfg["capital_usd"], cap, _OKX_WYCKOFF_RESERVE,
+            )
+
         cap_per_lvl = cap / n
 
         meets_min = cap_per_lvl >= _MIN_ORDER_OKX
@@ -334,6 +350,21 @@ class OKXGridEngine:
     async def _handle_buy_real(self, grid: OKXGridState, level: OKXLevel,
                                 price: float, pair: str) -> None:
         try:
+            # Verificar reserva Wyckoff antes de comprar
+            if self._okx_exec:
+                try:
+                    bal = await self._okx_exec.get_balance()
+                    if bal - level.size_usd < _OKX_WYCKOFF_RESERVE:
+                        logger.warning(
+                            "[okx_grid] {} BUY cancelado: balance ${:.0f} - orden ${:.0f} "
+                            "< reserva Wyckoff ${:.0f}",
+                            pair, bal, level.size_usd, _OKX_WYCKOFF_RESERVE,
+                        )
+                        level.pending = False
+                        return
+                except Exception:
+                    pass
+
             # Rate-limit guard: mínimo 1s entre órdenes reales por par
             elapsed = time.time() - grid.last_order_ts
             if elapsed < 1.0:
