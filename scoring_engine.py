@@ -275,16 +275,18 @@ class ScoringEngine:
         bd.volume_pts = min(bd.volume_pts, 35)
 
         # ── 3. CONTEXTO INSTITUCIONAL (max 35) ────────────────────────────────
-        # Funding Rate
+        # Funding Rate — siempre suma puntos (neutral=4, bullish=8)
         if context.funding_signal == "bullish":
             bd.funding_favorable = True
-            bd.context_pts      += context.funding_pts
+        if context.funding_pts > 0:
+            bd.context_pts += context.funding_pts
         bd.funding_rate = context.funding_rate
 
-        # Open Interest
+        # Open Interest — siempre suma puntos (neutral=3, confirming=7)
         if context.oi_signal == "confirming":
             bd.oi_confirming = True
-            bd.context_pts  += context.oi_pts
+        if context.oi_pts > 0:
+            bd.context_pts += context.oi_pts
         bd.oi_change_pct = context.oi_change_pct
 
         # On-Chain (Capa 5)
@@ -294,10 +296,18 @@ class ScoringEngine:
         elif ext.onchain_signal == "bearish":
             bd.context_pts    -= 10   # penalizar
 
-        # Liquidation Map (Capa 2)
-        if ext.liq_zone_active and ext.liq_extra_pts > 0:
+        # Liquidation Map (Capa 2) — si hay pts, sumarlos
+        if ext.liq_extra_pts > 0:
             bd.liq_zone    = True
             bd.context_pts += ext.liq_extra_pts
+
+        logger.debug(
+            "[scoring] ctx: funding={}({}) oi={}({}) onchain={} liq_pts={} → ctx_raw={}",
+            context.funding_signal, context.funding_pts,
+            context.oi_signal, context.oi_pts,
+            ext.onchain_signal, ext.liq_extra_pts,
+            bd.context_pts,
+        )
 
         bd.context_pts = min(bd.context_pts, 35)
 
