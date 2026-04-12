@@ -860,22 +860,26 @@ async def trading_loop() -> None:
             final_size = max(config.MIN_TRADE_SIZE_USD, final_size)
             final_size = min(config.MAX_TRADE_SIZE_USD, final_size)
 
-            paper = await executor.open_trade(
-                signal_score     = alloc.signal_score,
-                entry_price      = alloc.entry_price,
-                stop_loss        = alloc.stop_loss,
-                take_profit      = alloc.take_profit,
-                signal_id        = signal_id,
-                pair             = alloc.pair,
-                size_usd         = final_size,
-                signal_features  = features if ml_model else None,
-            )
-            if paper:
-                logger.info(
-                    f"[main] Trade Bybit {alloc.pair} ${paper.size_usd:.0f} "
-                    f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
+            # Bybit: solo intentar si está habilitado (deshabilitado por CloudFront 403)
+            paper = None
+            if config.BYBIT_ENABLED:
+                paper = await executor.open_trade(
+                    signal_score     = alloc.signal_score,
+                    entry_price      = alloc.entry_price,
+                    stop_loss        = alloc.stop_loss,
+                    take_profit      = alloc.take_profit,
+                    signal_id        = signal_id,
+                    pair             = alloc.pair,
+                    size_usd         = final_size,
+                    signal_features  = features if ml_model else None,
                 )
-            elif _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
+                if paper:
+                    logger.info(
+                        f"[main] Trade Bybit {alloc.pair} ${paper.size_usd:.0f} "
+                        f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
+                    )
+
+            if not paper and _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
                 # Fallback a OKX — verificar balance + par alternativo si contrato es caro
                 try:
                     _okx_bal = await asyncio.wait_for(

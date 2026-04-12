@@ -399,7 +399,7 @@ class OKXExecutor:
             body_dict = {
                 "instId":  inst_id,
                 "lever":   "1",
-                "mgnMode": "cross",
+                "mgnMode": "isolated",
             }
             body = json.dumps(body_dict)
             async with aiohttp.ClientSession() as session:
@@ -561,7 +561,8 @@ class OKXExecutor:
         path = "/api/v5/trade/order"
         _side = side.lower()
 
-        # SWAP (perpetuos): sz = número de contratos, tdMode = "cross"
+        # SWAP (perpetuos): sz = número de contratos, tdMode = "isolated"
+        # Isolated: margen = exactamente el valor de la posición (no bloquea más)
         ct_val = _CT_VAL.get(inst_id, 1.0)
         if price_hint <= 0:
             logger.warning("[okx_exec] need valid price_hint (got {})", price_hint)
@@ -580,7 +581,7 @@ class OKXExecutor:
 
         body_dict = {
             "instId":  inst_id,
-            "tdMode":  "cross",
+            "tdMode":  "isolated",
             "side":    _side,
             "ordType": "market",
             "sz":      str(n_contracts),

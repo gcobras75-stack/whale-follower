@@ -134,7 +134,8 @@ CROSS_ARB_MIN_BALANCE_USD: float = float(os.getenv("CROSS_ARB_MIN_BALANCE_USD", 
 BYBIT_MIN_FOR_CROSS_ARB:  float = float(os.getenv("BYBIT_MIN_FOR_CROSS_ARB",  "200"))  # Bybit spot mínimos: ETH=$103, SOL=$40, BTC=$67
 
 # ── Control Bybit / OKX ─────────────────────────────────────────────────────
-BYBIT_ORDERS_BLOCKED: bool = os.getenv("BYBIT_ORDERS_BLOCKED", "false").lower() == "true"
+BYBIT_ORDERS_BLOCKED: bool = os.getenv("BYBIT_ORDERS_BLOCKED", "true").lower() == "true"   # default true — CloudFront 403
+BYBIT_ENABLED:        bool = os.getenv("BYBIT_ENABLED",        "false").lower() == "true"  # deshabilitado — AWS/Railway IPs bloqueadas
 ENABLE_OKX_GRID:      bool = os.getenv("ENABLE_OKX_GRID",      "true").lower()  == "true"
 
 # ── Bitso (BTC/MXN monitoring) ───────────────────────────────────────────────
