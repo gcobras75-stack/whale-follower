@@ -123,6 +123,16 @@ class MultiPairMonitor:
         state.last_spring_data = spring_data
         current_price: float = spring_data.get("current_price", trade.price)
 
+        logger.info(
+            "[pipeline] Spring detectado {} | cond_a={} cond_b={} cond_c={} cond_d={} | "
+            "drop={} bounce={} vol={}x | régimen={}",
+            pair,
+            spring_data.get("cond_a"), spring_data.get("cond_b"),
+            spring_data.get("cond_c"), spring_data.get("cond_d"),
+            spring_data.get("drop_pct"), spring_data.get("bounce_pct"),
+            spring_data.get("vol_ratio"), regime_str,
+        )
+
         # Score the spring
         score, breakdown = self._scorer.score(
             spring_data=spring_data,
@@ -134,12 +144,28 @@ class MultiPairMonitor:
 
         state.last_score = score
 
-        # Threshold adaptativo: usa score_min del régimen si disponible
-        score_threshold = spring_data.get("score_min", config.SIGNAL_SCORE_THRESHOLD)
-        if score < score_threshold:
-            logger.debug(
-                "MultiPairMonitor: {} spring score {} below threshold {} (régimen={})",
-                pair, score, score_threshold, regime_str,
+        # ── Pre-filtro: umbral BAJO solo para filtrar ruido ───────────────────
+        # Este score NO tiene ExtendedContext (sin CVD combined, sin liq map,
+        # sin Fear&Greed, sin orderbook, etc.). El score real se recalcula
+        # en main.py con las 14 capas y se compara contra effective_threshold.
+        # Aquí solo filtramos señales completamente vacías.
+        _PRE_FILTER = 5   # mínimo: al menos cond_a detectada (8 pts)
+
+        logger.info(
+            "[pipeline] Score pre-filtro {} (mín={}) | primary={} vol={} ctx={} struct={} | "
+            "spring_confirmed={} cvd_div={} | pasa={}",
+            score, _PRE_FILTER,
+            breakdown.primary_pts, breakdown.volume_pts,
+            breakdown.context_pts, breakdown.structure_pts,
+            breakdown.spring_confirmed, breakdown.cvd_divergence,
+            score >= _PRE_FILTER,
+        )
+
+        if score < _PRE_FILTER:
+            logger.info(
+                "[pipeline] {} descartado (ruido): score={}<{} | block={}",
+                pair, score, _PRE_FILTER,
+                breakdown.block_reason or "none",
             )
             return None
 

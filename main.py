@@ -645,6 +645,17 @@ async def trading_loop() -> None:
             )
 
         if new_score < effective_threshold:
+            logger.info(
+                "[pipeline] {} RECHAZADO final: score={}<{} | "
+                "primary={} vol={} ctx={} struct={} opts={} | "
+                "spring_confirmed={} block={}",
+                signal.pair, new_score, effective_threshold,
+                new_bd.primary_pts, new_bd.volume_pts,
+                new_bd.context_pts, new_bd.structure_pts,
+                getattr(ext, "options_pts", 0),
+                new_bd.spring_confirmed,
+                new_bd.block_reason or "none",
+            )
             continue
 
         _signal_count += 1

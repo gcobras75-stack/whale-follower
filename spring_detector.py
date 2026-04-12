@@ -199,6 +199,14 @@ class SpringDetector:
         if drop_pct   > self._best_drop_pct:   self._best_drop_pct   = drop_pct
         if bounce_pct > self._best_bounce_pct: self._best_bounce_pct = bounce_pct
         if vol_ratio  > self._best_vol_ratio:  self._best_vol_ratio  = vol_ratio
+        # Contadores de condiciones individuales Y simultáneas
+        if not hasattr(self, "_hits_a"):
+            self._hits_a = 0
+            self._hits_b = 0
+            self._hits_ab = 0
+        if cond_a: self._hits_a += 1
+        if cond_b: self._hits_b += 1
+        if cond_a and cond_b: self._hits_ab += 1
 
         if now - self._last_telemetry_ts >= self._telemetry_interval_secs:
             # Identifica exactamente qué condición falta para el best intento
@@ -228,12 +236,17 @@ class SpringDetector:
                 if len(self._vol_snapshots) >= self._BASELINE_MIN_SAMPLES
                 else f"warmup({len(self._vol_snapshots)}/{self._BASELINE_MIN_SAMPLES})"
             )
+            hits_a  = getattr(self, "_hits_a", 0)
+            hits_b  = getattr(self, "_hits_b", 0)
+            hits_ab = getattr(self, "_hits_ab", 0)
             logger.info(
-                "[spring] Vela analizada | régimen={} | evals={} | proxy_score={} | "
+                "[spring] Vela analizada | régimen={} | evals={} | "
+                "hits: A={} B={} A+B={} | "
                 "best: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | "
                 "umbrales: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | "
                 "vol_baseline={} | faltó: {}",
-                regime, self._eval_count, proxy_score,
+                regime, self._eval_count,
+                hits_a, hits_b, hits_ab,
                 self._best_drop_pct * 100,
                 self._best_bounce_pct * 100,
                 self._best_vol_ratio,
@@ -249,6 +262,9 @@ class SpringDetector:
             self._best_bounce_pct   = 0.0
             self._best_vol_ratio    = 0.0
             self._eval_count        = 0
+            self._hits_a            = 0
+            self._hits_b            = 0
+            self._hits_ab           = 0
 
         # Si ninguna condición primaria → ignorar
         if not cond_a and not cond_b:
