@@ -48,15 +48,16 @@ _PAIR_TO_INST: Dict[str, str] = {
 
 # Valor por contrato en OKX perpetuos (ctVal en USD o base coin)
 # OKX USDT-M swaps: ctVal está en la moneda base (ej: 0.01 ETH por contrato)
+# ctVal: unidades de la moneda base por contrato (fuente: OKX API /public/instruments)
 _CT_VAL: Dict[str, float] = {
-    "BTC-USDT-SWAP":  0.01,    # 1 contrato = 0.01 BTC
-    "ETH-USDT-SWAP":  0.1,     # 1 contrato = 0.1 ETH
+    "BTC-USDT-SWAP":  0.001,   # 1 contrato = 0.001 BTC
+    "ETH-USDT-SWAP":  0.01,    # 1 contrato = 0.01 ETH
     "SOL-USDT-SWAP":  1.0,     # 1 contrato = 1 SOL
-    "BNB-USDT-SWAP":  0.1,     # 1 contrato = 0.1 BNB
-    "DOGE-USDT-SWAP": 100.0,   # 1 contrato = 100 DOGE
-    "XRP-USDT-SWAP":  100.0,   # 1 contrato = 100 XRP
-    "ADA-USDT-SWAP":  100.0,   # 1 contrato = 100 ADA
-    "AVAX-USDT-SWAP": 1.0,     # 1 contrato = 1 AVAX
+    "BNB-USDT-SWAP":  0.01,    # 1 contrato = 0.01 BNB
+    "DOGE-USDT-SWAP": 10.0,    # 1 contrato = 10 DOGE
+    "XRP-USDT-SWAP":  10.0,    # 1 contrato = 10 XRP
+    "ADA-USDT-SWAP":  10.0,    # 1 contrato = 10 ADA
+    "AVAX-USDT-SWAP": 0.1,     # 1 contrato = 0.1 AVAX
     "LINK-USDT-SWAP": 1.0,     # 1 contrato = 1 LINK
 }
 
@@ -374,6 +375,38 @@ class OKXExecutor:
             logger.warning("[okx_exec] get_total_balance_usd error: {}", exc)
             return self._last_balance, {}
 
+    # ── Leverage ──────────────────────────────────────────────────────────────
+
+    _leverage_set: set = set()   # instIds donde ya se configuró leverage
+
+    async def _ensure_leverage(self, inst_id: str) -> None:
+        """Configura leverage 1x para un instrumento SWAP (solo una vez)."""
+        if inst_id in self._leverage_set:
+            return
+        try:
+            path = "/api/v5/account/set-leverage"
+            body_dict = {
+                "instId":  inst_id,
+                "lever":   "1",
+                "mgnMode": "cross",
+            }
+            body = json.dumps(body_dict)
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    _BASE_URL + path,
+                    headers=_auth_headers("POST", path, body),
+                    data=body,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+                data = await resp.json()
+            if data.get("code") == "0":
+                self._leverage_set.add(inst_id)
+                logger.info("[okx_exec] Leverage 1x configurado para {}", inst_id)
+            else:
+                logger.warning("[okx_exec] set-leverage {} error: {}", inst_id, data.get("msg"))
+        except Exception as exc:
+            logger.warning("[okx_exec] _ensure_leverage error: {}", exc)
+
     # ── Market orders ───────────────────────────────────────────────────────
 
     async def market_order(
@@ -384,13 +417,13 @@ class OKXExecutor:
         price_hint: float,
     ) -> Optional[Dict[str, Any]]:
         """
-        Place a market order on OKX SPOT.
+        Place a market order on OKX SWAP (perpetuos USDT-M).
 
         Args:
             pair:       Bot pair name e.g. "ETHUSDT"
-            side:       "buy" or "sell"
-            size_usd:   Approximate USD notional
-            price_hint: Current price (used for sell qty calculation)
+            side:       "buy" (long) or "sell" (short)
+            size_usd:   Approximate USD notional (converted to contracts)
+            price_hint: Current price (used to calculate contract count)
 
         Returns:
             Order result dict with order_id, or None on failure.
@@ -437,12 +470,16 @@ class OKXExecutor:
 
         body = json.dumps(body_dict)
 
+        usd_approx = n_contracts * usd_per_contract
         logger.info(
-            "[okx_exec] SPOT {} {} ≈${:.0f}",
-            _side.upper(), pair, size_usd,
+            "[okx_exec] SWAP {} {} {} contratos ≈${:.0f}",
+            _side.upper(), inst_id, n_contracts, usd_approx,
         )
 
         try:
+            # Asegurar leverage 1x antes de la primera orden
+            await self._ensure_leverage(inst_id)
+
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
                     _BASE_URL + path,
@@ -458,8 +495,8 @@ class OKXExecutor:
                 if data.get("data"):
                     order_err = data["data"][0].get("sMsg", "")
                 logger.error(
-                    "[okx_exec] SPOT ORDER FAILED {}: {} | {}",
-                    pair, err_msg, order_err,
+                    "[okx_exec] SWAP ORDER FAILED {}: {} | {}",
+                    inst_id, err_msg, order_err,
                 )
                 return None
 
@@ -467,8 +504,8 @@ class OKXExecutor:
             order_id = order_data.get("ordId", "")
 
             logger.info(
-                "[okx_exec] SPOT ORDER OK {} {} ≈${:.0f} ordId={}",
-                _side.upper(), pair, size_usd, order_id,
+                "[okx_exec] SWAP ORDER OK {} {} {} contratos ≈${:.0f} ordId={}",
+                _side.upper(), inst_id, n_contracts, usd_approx, order_id,
             )
 
             return {
