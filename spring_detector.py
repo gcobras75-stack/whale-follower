@@ -75,6 +75,16 @@ class SpringDetector:
         self._last_signal_ts:  float = 0.0
         self._cooldown_secs:   float = 30.0
 
+        # ── Telemetría temporal (para diagnosticar 101h sin señal) ────────────
+        # Log throttled cada N segundos con el "mejor intento" visto en ese
+        # intervalo — muestra drop/bounce máximos y qué condición se queda corta.
+        self._telemetry_interval_secs: float = 30.0
+        self._last_telemetry_ts:       float = 0.0
+        self._best_drop_pct:           float = 0.0
+        self._best_bounce_pct:         float = 0.0
+        self._best_vol_ratio:          float = 0.0
+        self._eval_count:              int   = 0
+
     # ── API pública ────────────────────────────────────────────────────────────
 
     def feed(
@@ -148,10 +158,63 @@ class SpringDetector:
         vol_ratio     = (recent_vol / baseline_avg) if baseline_avg > 0 else 0.0
         cond_d        = vol_ratio >= config.VOLUME_MULTIPLIER
 
+        # ── Telemetría temporal ───────────────────────────────────────────────
+        self._eval_count += 1
+        if drop_pct   > self._best_drop_pct:   self._best_drop_pct   = drop_pct
+        if bounce_pct > self._best_bounce_pct: self._best_bounce_pct = bounce_pct
+        if vol_ratio  > self._best_vol_ratio:  self._best_vol_ratio  = vol_ratio
+
+        if now - self._last_telemetry_ts >= self._telemetry_interval_secs:
+            # Identifica exactamente qué condición falta para el best intento
+            missing = []
+            if self._best_drop_pct   < config.SPRING_DROP_PCT:
+                missing.append(
+                    f"drop {self._best_drop_pct*100:.3f}%<{config.SPRING_DROP_PCT*100:.3f}%"
+                )
+            if self._best_bounce_pct < config.SPRING_BOUNCE_PCT:
+                missing.append(
+                    f"bounce {self._best_bounce_pct*100:.3f}%<{config.SPRING_BOUNCE_PCT*100:.3f}%"
+                )
+            if self._best_vol_ratio  < config.VOLUME_MULTIPLIER:
+                missing.append(
+                    f"vol {self._best_vol_ratio:.2f}x<{config.VOLUME_MULTIPLIER:.2f}x"
+                )
+            if not missing:
+                missing.append("(ninguna — debería haber disparado)")
+
+            # Score aproximado: spring_confirmed vale +20 primary_pts; el resto
+            # lo calcula scoring_engine, pero aquí reportamos el best-effort.
+            proxy_score = 0
+            if self._best_drop_pct   >= config.SPRING_DROP_PCT:   proxy_score += 8
+            if self._best_bounce_pct >= config.SPRING_BOUNCE_PCT: proxy_score += 12
+            if self._best_vol_ratio  >= config.VOLUME_MULTIPLIER: proxy_score += 8
+
+            logger.info(
+                "[spring] Vela analizada | evals={} | proxy_score={} | "
+                "best: drop={:.3f}% bounce={:.3f}% vol={:.2f}x | faltó: {}",
+                self._eval_count, proxy_score,
+                self._best_drop_pct * 100,
+                self._best_bounce_pct * 100,
+                self._best_vol_ratio,
+                ", ".join(missing),
+            )
+            # Reset del intervalo
+            self._last_telemetry_ts = now
+            self._best_drop_pct     = 0.0
+            self._best_bounce_pct   = 0.0
+            self._best_vol_ratio    = 0.0
+            self._eval_count        = 0
+
         # Si ninguna condición primaria → ignorar
         if not cond_a and not cond_b:
             return None
 
+        logger.info(
+            "[spring] \u2b50 SPRING DETECTADO | drop={:.3f}% bounce={:.3f}% "
+            "cond_a={} cond_b={} cond_c={} cond_d={} vol_ratio={:.2f}x",
+            drop_pct * 100, bounce_pct * 100,
+            cond_a, cond_b, cond_c, cond_d, vol_ratio,
+        )
         self._last_signal_ts = now
 
         return {
