@@ -74,7 +74,7 @@ CASCADE_SECS:       int = int(os.getenv("CASCADE_SECS",       "5"))
 
 # ── Trade parameters ──────────────────────────────────────────────────────────
 STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "0.005"))
-RISK_REWARD:   float = float(os.getenv("RISK_REWARD",   "3.0"))
+RISK_REWARD:   float = float(os.getenv("RISK_REWARD",   "2.0"))   # backtest optimal: 1:2 > 1:3 en lateral
 MIN_TRADE_SIZE_USD: float = float(os.getenv("MIN_TRADE_SIZE_USD", "10"))
 MAX_TRADE_SIZE_USD: float = float(os.getenv("MAX_TRADE_SIZE_USD", "50"))
 
