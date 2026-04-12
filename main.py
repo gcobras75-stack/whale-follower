@@ -230,6 +230,16 @@ async def trading_loop() -> None:
     executor   = BybitTestnetExecutor()
     _executor_ref = executor
 
+    # OKX executor como fallback para Wyckoff cuando Bybit rechaza
+    _okx_wyckoff = None
+    if config.OKX_API_KEY and config.OKX_SECRET and config.OKX_PASSPHRASE:
+        try:
+            from okx_executor import OKXExecutor
+            _okx_wyckoff = OKXExecutor()
+            logger.info("[main] OKX executor disponible como fallback para Wyckoff")
+        except Exception as exc:
+            logger.warning("[main] OKX executor no disponible: {}", exc)
+
     range_trader = (range_mod.RangeTrader(executor, regime_det, production=prod)
                     if range_mod and regime_det else None)
 
@@ -796,6 +806,7 @@ async def trading_loop() -> None:
 
         for alloc in allocation.trades:
             signal_id = signal_id_for_signal if alloc.pair == signal.pair else str(uuid.uuid4())
+            final_size = alloc.size_usd * _size_mult
 
             paper = await executor.open_trade(
                 signal_score     = alloc.signal_score,
@@ -804,14 +815,54 @@ async def trading_loop() -> None:
                 take_profit      = alloc.take_profit,
                 signal_id        = signal_id,
                 pair             = alloc.pair,
-                size_usd         = alloc.size_usd * _size_mult,
+                size_usd         = final_size,
                 signal_features  = features if ml_model else None,
             )
             if paper:
                 logger.info(
-                    f"[main] Trade {alloc.pair} ${paper.size_usd:.0f} "
+                    f"[main] Trade Bybit {alloc.pair} ${paper.size_usd:.0f} "
                     f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
                 )
+            elif _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
+                # Fallback a OKX cuando Bybit rechaza (min demasiado alto)
+                logger.info(
+                    "[main] Bybit rechazó {} ${:.2f} — intentando OKX fallback",
+                    alloc.pair, final_size,
+                )
+                try:
+                    okx_result = await asyncio.wait_for(
+                        _okx_wyckoff.market_order(
+                            pair=alloc.pair,
+                            side="buy",
+                            size_usd=final_size,
+                            price_hint=alloc.entry_price,
+                        ),
+                        timeout=10.0,
+                    )
+                    if okx_result:
+                        logger.info(
+                            "[main] Trade OKX {} ${:.2f} OK orderId={}",
+                            alloc.pair, final_size,
+                            okx_result.get("orderId", "?"),
+                        )
+                        # Registrar en Supabase como trade Wyckoff
+                        asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                            "pair":     alloc.pair,
+                            "score":    new_score,
+                            "entry":    alloc.entry_price,
+                            "sl":       alloc.stop_loss,
+                            "tp":       alloc.take_profit,
+                            "size_usd": final_size,
+                        }))
+                    else:
+                        logger.error(
+                            "[main] OKX fallback también falló para {} ${:.2f}",
+                            alloc.pair, final_size,
+                        )
+                except asyncio.TimeoutError:
+                    logger.error("[main] OKX fallback timeout {} ${:.2f}", alloc.pair, final_size)
+                except Exception as exc:
+                    logger.error("[main] OKX fallback error: {}", exc)
 
         if dashboard:
             dashboard.record_signal(new_score, operated=bool(allocation.trades), blocked_by_ml=False)
