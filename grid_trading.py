@@ -714,32 +714,15 @@ class GridTradingEngine:
     # ── Telegram ──────────────────────────────────────────────────────────────
 
     async def _alert_grid_startup(self) -> None:
-        """Única alerta de arranque del Grid — resume plan de todos los pares."""
-        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
-
-        lines = ["\u2705 [GRID] Iniciado"]
+        """Log de arranque del Grid — solo Railway, no Telegram."""
         for pair, plan in self._plan.items():
             short = pair.replace("USDT", "")
             if plan["enabled"]:
-                lines.append(
-                    f"{short}: {plan['levels']} niveles | ${plan['size_per_level']:.0f} por nivel"
-                )
+                logger.info("[grid] {} plan: {} niveles × ${:.0f}",
+                            short, plan["levels"], plan["size_per_level"])
             else:
-                lines.append(
-                    f"{short}: desactivado (min ${plan['min_needed']:.0f} | disp ${plan['capital']:.0f})"
-                )
-        msg = "\n".join(lines)
-
-        try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                             json={"chat_id": chat_id, "text": msg},
-                             timeout=aiohttp.ClientTimeout(total=10))
-        except Exception:
-            pass
+                logger.info("[grid] {} desactivado (min ${:.0f} | disp ${:.0f})",
+                            short, plan["min_needed"], plan["capital"])
 
     async def _alert_cycle(self, grid: GridState, exit_price: float, pnl: float) -> None:
         """Ciclos de grid → solo log Railway (no Telegram, genera spam)."""

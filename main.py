@@ -989,23 +989,9 @@ async def _log_server_ip() -> None:
     else:
         logger.warning("[startup] No se pudo obtener IP pública del servidor")
 
-    # Alerta Telegram de inicio
-    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
-        return
-    prod = os.environ.get("PRODUCTION", "false").lower() == "true"
-    msg  = (
-        f"🚀 Whale Follower Bot iniciado\n"
-        f"🌍 IP: {ip} Singapore ✅\n"
-        f"🔧 Modo: {'REAL' if prod else 'PAPEL'}\n"
-        f"📊 Estrategias: Grid OKX (ETH/SOL) + Wyckoff Spring + Termómetros"
-    )
-    try:
-        import tg_sender
-        await tg_sender.send(msg, priority="critical")
-    except Exception as exc:
-        logger.warning("[startup] Telegram inicio error: {}", exc)
+    # NO enviar alerta Telegram al arrancar — conservar rate limit.
+    # Solo se envía Telegram cuando hay una señal real ejecutada.
+    logger.info("[startup] Telegram: sin mensaje de inicio (rate limit protection)")
 
 
 async def _send_telegram(msg: str) -> None:
