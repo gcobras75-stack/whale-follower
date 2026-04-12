@@ -503,59 +503,16 @@ async def dispatch(
     )
 
 
-# ── Telegram rate limiter ─────────────────────────────────────────────────────
-# Máximo 20 mensajes por hora. Si se excede, solo logueamos.
-_tg_rate_window:  List[float] = []
-_TG_MAX_PER_HOUR = 20
-_tg_retry_after:  float = 0.0   # timestamp hasta el que estamos bloqueados por 429
+# ── Telegram — delega a tg_sender centralizado ──────────────────────────────
+# Backwards-compatible: _send_telegram sigue existiendo para los módulos
+# que ya lo importan, pero delega a tg_sender.send().
+_tg_retry_after: float = 0.0   # legacy — ahora lo maneja tg_sender
 
 
 async def _send_telegram(text: str, priority: str = "normal") -> None:
-    """Envía mensaje a Telegram con rate limiting.
-
-    priority:
-      "critical" — siempre enviar (circuit breaker, drawdown, señales Wyckoff)
-      "normal"   — sujeto a rate limit (reportes, status)
-    """
-    global _tg_retry_after
-
-    now = time.time()
-
-    # Respetar 429 retry_after
-    if now < _tg_retry_after:
-        logger.debug("[telegram] Rate-limited hasta {:.0f}s más", _tg_retry_after - now)
-        return
-
-    # Rate limit: max 20/hora (excepto críticos)
-    if priority != "critical":
-        _tg_rate_window[:] = [t for t in _tg_rate_window if now - t < 3600]
-        if len(_tg_rate_window) >= _TG_MAX_PER_HOUR:
-            logger.warning("[telegram] Rate limit alcanzado ({}/h) — mensaje omitido", _TG_MAX_PER_HOUR)
-            return
-
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": config.TELEGRAM_CHAT_ID,
-        "text":    text,
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status == 429:
-                    body = await resp.json()
-                    retry_secs = body.get("parameters", {}).get("retry_after", 60)
-                    _tg_retry_after = now + retry_secs
-                    logger.warning("[telegram] 429 rate limit: esperar {}s", retry_secs)
-                elif resp.status != 200:
-                    body = await resp.text()
-                    logger.error("[telegram] HTTP {}: {}", resp.status, body)
-                else:
-                    _tg_rate_window.append(now)
-                    logger.success("[telegram] Alerta enviada.")
-    except Exception as exc:
-        logger.error("[telegram] Error: {}", exc)
+    """Envía mensaje a Telegram via tg_sender centralizado."""
+    import tg_sender
+    await tg_sender.send(text, priority=priority)
 
 
 async def send_system_message(text: str) -> None:

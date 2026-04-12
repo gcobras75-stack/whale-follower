@@ -262,15 +262,11 @@ class StrategyManager:
     # ── Telegram ──────────────────────────────────────────────────────────────
 
     async def _notify_telegram(self, changes: List[str], c: MarketConditions) -> None:
-        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
         try:
-            import aiohttp as _aiohttp
+            import tg_sender
             on_list  = ", ".join(s for s, a in _active.items() if a)
             off_list = ", ".join(s for s, a in _active.items() if not a) or "ninguna"
-            text = (
+            msg = (
                 "🤖 *Strategy Manager — Cambio de estado*\n\n"
                 + "\n".join(changes)
                 + f"\n\n📊 *Condiciones:*\n"
@@ -280,13 +276,7 @@ class StrategyManager:
                 + f"\n✅ Activas: {on_list}\n"
                 + f"⏸️ Pausadas: {off_list}"
             )
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            async with _aiohttp.ClientSession() as s:
-                await s.post(url, json={
-                    "chat_id":    chat_id,
-                    "text":       text,
-                    "parse_mode": "Markdown",
-                }, timeout=_aiohttp.ClientTimeout(total=8))
+            await tg_sender.send(msg, priority="critical")
         except Exception as exc:
             logger.warning("[strategy_mgr] Telegram error: {}", exc)
 

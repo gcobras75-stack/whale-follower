@@ -451,16 +451,8 @@ class OKXFuturesGrid:
         return False
 
     async def _alert(self, msg: str) -> None:
-        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
         try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg},
-                    timeout=aiohttp.ClientTimeout(total=8),
-                )
+            import tg_sender
+            await tg_sender.send(msg)
         except Exception:
             pass

@@ -198,12 +198,8 @@ class MarketRegimeDetector:
             f"  Score m\u00edn: {old_p['score_min']} \u2192 {new_p['score_min']}"
         )
         try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
+            import tg_sender
+            await tg_sender.send(msg)
         except Exception:
             pass
 

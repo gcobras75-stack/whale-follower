@@ -1002,30 +1002,17 @@ async def _log_server_ip() -> None:
         f"📊 Estrategias: Grid OKX (ETH/SOL) + Wyckoff Spring + Termómetros"
     )
     try:
-        async with _aiohttp.ClientSession() as s:
-            await s.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": msg},
-                timeout=_aiohttp.ClientTimeout(total=8),
-            )
+        import tg_sender
+        await tg_sender.send(msg, priority="critical")
     except Exception as exc:
         logger.warning("[startup] Telegram inicio error: {}", exc)
 
 
 async def _send_telegram(msg: str) -> None:
-    """Envía mensaje Telegram. No lanza excepciones."""
-    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
-        return
+    """Envía mensaje Telegram via tg_sender centralizado."""
     try:
-        import aiohttp as _ah
-        async with _ah.ClientSession() as s:
-            await s.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": msg},
-                timeout=_ah.ClientTimeout(total=8),
-            )
+        import tg_sender
+        await tg_sender.send(msg)
     except Exception:
         pass
 
