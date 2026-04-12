@@ -346,6 +346,22 @@ async def trading_loop() -> None:
         except Exception as exc:
             logger.warning("[main] learning mode announce failed: {}", exc)
 
+    # ── Paper Trader paralelo (threshold bajo → ML aprende rápido) ──────────
+    _paper_trader = None
+    _latest_prices: Dict[str, float] = {}   # actualizado en cada tick
+    try:
+        from paper_trader import PaperTrader
+        _paper_trader = PaperTrader(threshold=35, capital=10_000.0)
+        asyncio.create_task(
+            _paper_trader.run_check_loop(lambda: _latest_prices)
+        )
+        asyncio.create_task(
+            _paper_trader.run_daily_report_loop()
+        )
+        logger.info("[main] PaperTrader paralelo activo (threshold=35)")
+    except Exception as exc:
+        logger.warning("[main] PaperTrader no disponible: {}", exc)
+
     # ── Threshold Optimizer (auto-ajuste cada 6h) ────────────────────────────
     try:
         from threshold_optimizer import get_optimizer
@@ -430,6 +446,9 @@ async def trading_loop() -> None:
     # ── Loop principal ─────────────────────────────────────────────────────────
     async for trade, _legacy_state in aggregator.stream():
       try:
+
+        # 0. Actualizar precios para paper_trader
+        _latest_prices[trade.pair] = trade.price
 
         # 1. Gestionar trades activos
         if executor._enabled:
@@ -689,6 +708,21 @@ async def trading_loop() -> None:
             signal.pair, effective_threshold, regime_label,
             "optimizer" if thr_optimizer else "SPRING_PARAMS",
         )
+
+        # Paper trader: evaluar TODAS las señales (threshold=35, independiente del real)
+        if _paper_trader and new_score > 0:
+            regime_p = config.SPRING_PARAMS.get(regime_label, config.SPRING_PARAMS["LATERAL"])
+            _paper_sl = signal.entry_price * (1 - regime_p.get("sl_pct", 0.005))
+            _paper_tp = signal.entry_price * (1 + regime_p.get("tp_pct", 0.010))
+            _paper_trader.evaluate_signal(
+                pair=signal.pair,
+                score=new_score,
+                entry=signal.entry_price,
+                sl=_paper_sl,
+                tp=_paper_tp,
+                regime=regime_label,
+                features=features if ml_model else None,
+            )
 
         if new_score < effective_threshold:
             logger.info(
