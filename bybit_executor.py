@@ -249,7 +249,8 @@ class BybitTestnetExecutor:
         # sustituir por el par preferido (ETH, orden mín ~$20 vs BTC ~$67).
         if self._production:
             # Tamaños mínimos spot por par (Bybit spot — mucho menores que futuros)
-            _MIN_QTY = {"BTCUSDT": 0.000048, "ETHUSDT": 0.00048, "SOLUSDT": 0.01, "BNBUSDT": 0.005}
+            _MIN_QTY = {"BTCUSDT": 0.000048, "ETHUSDT": 0.00048, "SOLUSDT": 0.01, "BNBUSDT": 0.005,
+                        "DOGEUSDT": 1.0, "XRPUSDT": 1.0, "ADAUSDT": 1.0, "AVAXUSDT": 0.01, "LINKUSDT": 0.01}
             min_qty   = _MIN_QTY.get(pair, 0.001)
             min_order = min_qty * entry_price
             max_allowed = self._capital * config.MAX_ORDER_PCT_CAPITAL
@@ -593,11 +594,15 @@ class BybitTestnetExecutor:
     # Mínimos reales de Bybit por par (USD). Órdenes debajo de estos
     # valores son rechazadas con retCode 170140.
     _BYBIT_MIN_ORDER_USD = {
-        "BTCUSDT": 100.0,
-        "ETHUSDT":  20.0,
-        "SOLUSDT":  10.0,
-        "BNBUSDT":  10.0,
-        "DOGEUSDT":  5.0,
+        "BTCUSDT":  100.0,
+        "ETHUSDT":   20.0,
+        "SOLUSDT":   10.0,
+        "BNBUSDT":   10.0,
+        "DOGEUSDT":   5.0,
+        "XRPUSDT":   10.0,
+        "ADAUSDT":   10.0,
+        "AVAXUSDT":  10.0,
+        "LINKUSDT":  10.0,
     }
 
     async def _place_order(self, trade: PaperTrade) -> bool:

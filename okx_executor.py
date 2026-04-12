@@ -39,6 +39,9 @@ _PAIR_TO_INST: Dict[str, str] = {
     "BNBUSDT":  "BNB-USDT",
     "DOGEUSDT": "DOGE-USDT",
     "XRPUSDT":  "XRP-USDT",
+    "ADAUSDT":  "ADA-USDT",
+    "AVAXUSDT": "AVAX-USDT",
+    "LINKUSDT": "LINK-USDT",
 }
 
 _MIN_SPOT_USD = 1.0   # OKX spot minimum ~$1 USD

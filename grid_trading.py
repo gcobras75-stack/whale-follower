@@ -47,9 +47,15 @@ from bybit_utils import place_spot_order as _bybit_ws_order
 # Fuente: límites oficiales perpetuos USDT. Si la orden cae debajo de estos
 # valores Bybit devuelve retCode 170140 "Order value exceeded lower limit".
 BYBIT_MIN_ORDER: Dict[str, float] = {
-    "BTCUSDT": 100.0,
-    "ETHUSDT":  20.0,
-    "SOLUSDT":  10.0,
+    "BTCUSDT":  100.0,
+    "ETHUSDT":   20.0,
+    "SOLUSDT":   10.0,
+    "BNBUSDT":   10.0,
+    "DOGEUSDT":   5.0,
+    "XRPUSDT":   10.0,
+    "ADAUSDT":   10.0,
+    "AVAXUSDT":  10.0,
+    "LINKUSDT":  10.0,
 }
 
 # ── Config por par ────────────────────────────────────────────────────────────

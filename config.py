@@ -105,7 +105,7 @@ MAX_ORDER_PCT_CAPITAL: float = float(os.getenv("MAX_ORDER_PCT_CAPITAL", "0.35"))
 
 # ── Multi-pair monitoring ─────────────────────────────────────────────────────
 TRADING_PAIRS: list[str] = [
-    p.strip() for p in os.getenv("TRADING_PAIRS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT").split(",")
+    p.strip() for p in os.getenv("TRADING_PAIRS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT,XRPUSDT,ADAUSDT,AVAXUSDT,LINKUSDT").split(",")
 ]
 ALLOCATION_MODE:         str = os.getenv("ALLOCATION_MODE", "B")   # A | B | C
 CORRELATION_WINDOW_SECS: int = int(os.getenv("CORRELATION_WINDOW_SECS", "60"))
