@@ -47,24 +47,32 @@ SPRING_PARAMS: dict = {
         "bounce_pct":  0.0020,   # 0.20%
         "vol_mult":    1.50,
         "score_min":   65,
+        "sl_pct":      0.005,    # 0.5% SL
+        "tp_pct":      0.015,    # 1.5% TP — ratio 1:3 (tendencia llega al TP lejano)
     },
     "TRENDING_DOWN": {
         "drop_pct":    0.0030,   # 0.30% — estricto contra tendencia
         "bounce_pct":  0.0020,
         "vol_mult":    1.50,
-        "score_min":   75,       # alto para evitar longs contra tendencia
+        "score_min":   75,
+        "sl_pct":      0.005,
+        "tp_pct":      0.015,    # 1:3
     },
     "LATERAL": {
         "drop_pct":    0.0013,   # 0.130% (observado ~0.133-0.187%)
         "bounce_pct":  0.0009,   # 0.090% (observado ~0.094-0.109%)
         "vol_mult":    1.10,     # 1.10x  (observado ~1.12-1.35x)
         "score_min":   55,
+        "sl_pct":      0.005,    # 0.5% SL
+        "tp_pct":      0.010,    # 1.0% TP — ratio 1:2 (backtest 30d: WR 34.5%, PnL +$1.94)
     },
     "HIGH_VOL": {
         "drop_pct":    0.0050,   # 0.50% — muy estricto en caos
         "bounce_pct":  0.0030,
         "vol_mult":    2.00,
         "score_min":   75,
+        "sl_pct":      0.005,
+        "tp_pct":      0.015,    # 1:3
     },
 }
 

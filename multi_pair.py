@@ -181,8 +181,9 @@ class MultiPairMonitor:
 
         state.last_signal_ts = now
 
-        # Compute entry / exits — ATR dinámico con fallback a config fijo
-        stop_loss, take_profit = self._atr_exits(state, current_price)
+        # Compute entry / exits — régimen-aware SL/TP con ATR fallback
+        regime_p = config.SPRING_PARAMS.get(regime_str, config.SPRING_PARAMS["LATERAL"])
+        stop_loss, take_profit = self._atr_exits(state, current_price, regime_p)
 
         signal = PairSignal(
             pair=pair,
@@ -208,24 +209,30 @@ class MultiPairMonitor:
 
     # ── ATR-based dynamic risk management ──────────────────────────────────────────────────
 
-    def _atr_exits(self, state: PairState, entry: float) -> Tuple[float, float]:
-        """SL = entry - 1.5*ATR, TP = entry + 1.5*ATR*RR (RR 3:1).
-        Fallback a STOP_LOSS_PCT / RISK_REWARD fijos de config si no hay datos suficientes.
-        """
+    def _atr_exits(self, state: PairState, entry: float,
+                   regime_params: Optional[dict] = None) -> Tuple[float, float]:
+        """SL/TP adaptativos por régimen. ATR dinámico con fallback a SPRING_PARAMS."""
+        sl_pct = (regime_params or {}).get("sl_pct", config.STOP_LOSS_PCT)
+        tp_pct = (regime_params or {}).get("tp_pct", sl_pct * config.RISK_REWARD)
+        rr     = tp_pct / sl_pct if sl_pct > 0 else 2.0
+
         atr = self._compute_atr14(state)
         if atr and atr > 0:
-            sl_dist = 1.5 * atr
+            sl_dist     = 1.5 * atr
             stop_loss   = entry - sl_dist
-            take_profit = entry + sl_dist * config.RISK_REWARD
+            take_profit = entry + sl_dist * rr
             logger.info(
-                "MultiPairMonitor: {} ATR={:.4f} SL={:.4f} TP={:.4f} (dinámico 1.5×ATR)",
-                state.pair, atr, stop_loss, take_profit,
+                "MultiPairMonitor: {} ATR={:.4f} SL={:.4f} TP={:.4f} (RR 1:{:.1f})",
+                state.pair, atr, stop_loss, take_profit, rr,
             )
             return stop_loss, take_profit
-        # Fallback: valores fijos de config.py
-        stop_loss   = entry * (1.0 - config.STOP_LOSS_PCT)
-        take_profit = entry + (entry - stop_loss) * config.RISK_REWARD
-        logger.debug("MultiPairMonitor: {} SL fijo (ATR insuf. datos)", state.pair)
+        # Fallback: porcentajes del régimen
+        stop_loss   = entry * (1.0 - sl_pct)
+        take_profit = entry * (1.0 + tp_pct)
+        logger.info(
+            "MultiPairMonitor: {} SL={:.4f} TP={:.4f} (fijo SL={:.1f}% TP={:.1f}% RR 1:{:.1f})",
+            state.pair, stop_loss, take_profit, sl_pct * 100, tp_pct * 100, rr,
+        )
         return stop_loss, take_profit
 
     def _compute_atr14(self, state: PairState) -> Optional[float]:
