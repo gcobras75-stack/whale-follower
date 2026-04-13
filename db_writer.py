@@ -30,21 +30,26 @@ def _now_ts() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 def _client():
-    from supabase import create_client
+    from supabase import create_client, ClientOptions
     url = os.environ.get("SUPABASE_URL", "")
     key = os.environ.get("SUPABASE_KEY", "")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set")
-    return create_client(url, key)
+    return create_client(url, key, options=ClientOptions(postgrest_client_timeout=30))
 
 async def _run(fn) -> Optional[Any]:
-    """Run a blocking supabase call in a thread pool."""
+    """Run a blocking supabase call in a thread pool with retry."""
     loop = asyncio.get_event_loop()
-    try:
-        return await loop.run_in_executor(None, fn)
-    except Exception as exc:
-        logger.warning("[db_writer] Supabase error: {}", exc)
-        return None
+    for attempt in range(3):
+        try:
+            return await loop.run_in_executor(None, fn)
+        except Exception as exc:
+            if attempt < 2:
+                logger.warning("[db_writer] Supabase error (attempt {}/3), retrying: {}", attempt + 1, exc)
+                await asyncio.sleep(1 * (attempt + 1))
+            else:
+                logger.error("[db_writer] Supabase failed after 3 attempts: {}", exc)
+                return None
 
 
 # ── Learning mode tables ─────────────────────────────────────────────────────
