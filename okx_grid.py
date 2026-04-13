@@ -27,7 +27,7 @@ import config
 _GRID_CONFIG: Dict[str, dict] = {
     "ETHUSDT": {
         "levels":      4,
-        "capital_usd": 25.0,    # $25 OKX — $6.25/nivel
+        "capital_usd": 15.0,    # $15 OKX — $3.75/nivel
         "min_spacing": 0.003,   # 0.3% — OKX fees 0.2% → neto 0.1%
         "max_spacing": 0.018,
         "atr_mult":    1.5,
@@ -35,7 +35,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     },
     "SOLUSDT": {
         "levels":      4,
-        "capital_usd": 20.0,    # $20 OKX — $5/nivel
+        "capital_usd": 12.5,    # $12.5 OKX — $3.125/nivel
         "min_spacing": 0.003,   # 0.3% — OKX fees 0.2% → neto 0.1%
         "max_spacing": 0.022,
         "atr_mult":    2.0,
@@ -43,7 +43,7 @@ _GRID_CONFIG: Dict[str, dict] = {
     },
     "DOGEUSDT": {
         "levels":      4,
-        "capital_usd": 20.0,    # $20 OKX — $5/nivel (más volatilidad = más ciclos)
+        "capital_usd": 12.5,    # $12.5 OKX — $3.125/nivel (más volatilidad = más ciclos)
         "min_spacing": 0.003,   # 0.3% — OKX fees 0.2% → neto 0.1%
         "max_spacing": 0.030,
         "atr_mult":    2.5,
