@@ -642,6 +642,24 @@ class OKXExecutor:
                 _side.upper(), inst_id, n_contracts, usd_approx, order_id,
             )
 
+            try:
+                import db_writer
+                asyncio.create_task(db_writer._run(
+                    lambda: db_writer._client().table("paper_trades").insert({
+                        "strategy": "wyckoff",
+                        "pair": pair,
+                        "side": "Buy",
+                        "entry_price": price_hint,
+                        "size_usd": size_usd,
+                        "score": 0,
+                        "status": "open",
+                        "source": "real_okx",
+                        "created_at": db_writer._now_ts(),
+                    }).execute()
+                ))
+            except Exception:
+                pass
+
             return {
                 "order_id":     order_id,
                 "pair":         pair,

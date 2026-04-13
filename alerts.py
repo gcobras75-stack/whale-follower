@@ -36,6 +36,7 @@ _stats: Dict[str, Any] = {
     "capital_bybit":       0.0,
     "capital_okx":         0.0,
     "capital_okx_breakdown": {},   # {"USDT": xx, "ETH": xx, "SOL": xx}
+    "capital_usdt_only":     0.0,  # solo USDT para drawdown (sin cripto holdings)
     # Bitso monitor
     "bitso_opportunities": 0,
     "bitso_spread_sum":    0.0,
@@ -128,8 +129,12 @@ def record_strategy_pnl(strategy: str, pnl: float, pair: str = "") -> None:
             pnl_list.pop(0)
 
 def check_drawdown() -> float:
-    """Calcula drawdown actual y emite alerta Telegram si supera umbral."""
-    cap = _stats["capital_bybit"] + _stats["capital_okx"]
+    """Calcula drawdown sobre capital USDT (no incluye cripto en holdings)."""
+    # Usar solo USDT para drawdown — ETH/SOL/BTC varían con el mercado
+    cap = _stats.get("capital_usdt_only", 0.0)
+    if cap <= 0:
+        # Fallback: usar capital reportado pero con nota
+        cap = _stats["capital_bybit"] + _stats["capital_okx"]
     if cap <= 0:
         return 0.0
     if cap > _stats["capital_peak"]:
@@ -363,6 +368,9 @@ def set_capital(bybit: float = 0.0, okx: float = 0.0, okx_breakdown: dict = None
         _stats["capital_okx"] = okx
     if okx_breakdown:
         _stats["capital_okx_breakdown"] = okx_breakdown
+    # Capital USDT-only para drawdown (no incluye cripto holdings)
+    _stats["capital_usdt_only"] = (bybit or 0) + (okx_breakdown or {}).get("USDT", 0)
+
     # Actualizar position_sizer con capital total real
     total = (_stats["capital_bybit"] or 0) + (_stats["capital_okx"] or 0)
     if total > 0:

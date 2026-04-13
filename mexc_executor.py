@@ -214,6 +214,25 @@ class MEXCExecutor:
                 order_id = data.get("data", "")
                 logger.info("[mexc] ORDER OK {} {} contratos orderId={}",
                             symbol, n_contracts, order_id)
+
+                try:
+                    import db_writer
+                    asyncio.create_task(db_writer._run(
+                        lambda: db_writer._client().table("paper_trades").insert({
+                            "strategy": "wyckoff",
+                            "pair": pair,
+                            "side": "Buy",
+                            "entry_price": price_hint,
+                            "size_usd": size_usd,
+                            "score": 0,
+                            "status": "open",
+                            "source": "real_mexc",
+                            "created_at": db_writer._now_ts(),
+                        }).execute()
+                    ))
+                except Exception:
+                    pass
+
                 return {"orderId": order_id, "pair": pair, "symbol": symbol}
             else:
                 logger.error("[mexc] ORDER FAILED {}: code={} msg={}",
