@@ -285,6 +285,16 @@ def record_arb_executed_pair(pair: str, pnl: float = 0.0) -> None:
     if k:
         _stats[k] = _stats.get(k, 0) + 1
 
+def _fmt_price(pair: str, price: float) -> str:
+    """Formatea precio con decimales apropiados segun el par."""
+    p = pair.upper().replace("/", "")
+    if p.startswith(("XRP", "ADA", "DOGE")):
+        return f"${price:,.4f}"
+    if p.startswith("BTC") and price > 1000:
+        return f"${price:,.0f}"
+    return f"${price:,.2f}"
+
+
 async def send_trade_alert(trade_type: str, data: dict) -> None:
     """
     Envia notificacion Telegram cuando se ejecuta un trade real.
@@ -333,14 +343,24 @@ async def send_trade_alert(trade_type: str, data: dict) -> None:
         elif trade_type == "wyckoff":
             pair      = data.get("pair", "BTCUSDT")
             pair_disp = pair.replace("USDT", "/USDT")
+            entry = data.get("entry", 0)
+            sl    = data.get("sl", 0)
+            tp    = data.get("tp", 0)
+            # Sanity check: si SL/TP no corresponden al precio de entrada
+            # (ej: vienen de otro par), recalcular desde entry con %s del config
+            if entry > 0 and (sl <= 0 or abs(sl - entry) / entry > 0.20):
+                sl_pct = getattr(config, "STOP_LOSS_PCT", 0.005)
+                rr     = getattr(config, "RISK_REWARD", 2.0)
+                sl = entry * (1.0 - sl_pct)
+                tp = entry * (1.0 + sl_pct * rr)
             msg = (
                 f"\U0001f433 WHALE SPRING DETECTADO\n"
                 f"──────────────────────\n"
                 f"Par:        {pair_disp}\n"
                 f"Score:      {data.get('score', 0)}/130\n"
-                f"Entrada:    ${data.get('entry', 0):,.2f}\n"
-                f"Stop Loss:  ${data.get('sl', 0):,.2f}\n"
-                f"Target:     ${data.get('tp', 0):,.2f}\n"
+                f"Entrada:    {_fmt_price(pair, entry)}\n"
+                f"Stop Loss:  {_fmt_price(pair, sl)}\n"
+                f"Target:     {_fmt_price(pair, tp)}\n"
                 f"Tamaño:     ${data.get('size_usd', 0):.2f}\n"
                 f"──────────────────────\n"
                 f"Hora:       {now_str} CST"
@@ -835,6 +855,16 @@ async def _cmd_stats() -> None:
 
     # Termometros
     t = _thermometers
+    # Actualizar mempool en tiempo real (los otros 3 se actualizan via run() async)
+    try:
+        from mempool_thermometer import MempoolThermometer
+        if not hasattr(_cmd_stats, "_mempool"):
+            _cmd_stats._mempool = MempoolThermometer()
+        _mp_data = _cmd_stats._mempool.get_full_analysis()
+        t["mempool_score"]  = _mp_data["mempool_score"]
+        t["mempool_signal"] = _mp_data["signal"]
+    except Exception:
+        pass
     dom_line = f"{t['btc_dom_pct']:.1f}% ({t['btc_dom_signal']})"
     liq_line = (f"LONG=${t['liq_long_m']:.1f}M  SHORT=${t['liq_short_m']:.1f}M"
                 f" ({t['liq_signal']})")

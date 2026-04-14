@@ -1018,12 +1018,20 @@ async def trading_loop() -> None:
                             "[main] Trade OKX {} ${:.2f} OK orderId={}",
                             exec_pair, final_size,
                             okx_result.get("orderId", "?"))
+                        # Recalcular SL/TP si el par cambio (fallback a alternativo)
+                        _sl = alloc.stop_loss
+                        _tp = alloc.take_profit
+                        if exec_pair != alloc.pair:
+                            _sl_pct = config.STOP_LOSS_PCT
+                            _rr     = config.RISK_REWARD
+                            _sl = exec_price * (1.0 - _sl_pct)
+                            _tp = exec_price * (1.0 + _sl_pct * _rr)
                         asyncio.create_task(alerts.send_trade_alert("wyckoff", {
                             "pair":     exec_pair,
                             "score":    new_score,
                             "entry":    exec_price,
-                            "sl":       alloc.stop_loss,
-                            "tp":       alloc.take_profit,
+                            "sl":       _sl,
+                            "tp":       _tp,
                             "size_usd": final_size,
                         }))
                     elif _mexc_wyckoff and _mexc_wyckoff.enabled:
@@ -1061,12 +1069,20 @@ async def trading_loop() -> None:
                             logger.info("[main] Trade MEXC {} ${:.2f} OK orderId={}",
                                         mexc_pair, final_size,
                                         mexc_result.get("orderId", "?"))
+                            # Recalcular SL/TP si el par cambio
+                            _sl_m = alloc.stop_loss
+                            _tp_m = alloc.take_profit
+                            if mexc_pair != alloc.pair:
+                                _sl_pct = config.STOP_LOSS_PCT
+                                _rr     = config.RISK_REWARD
+                                _sl_m = mexc_price * (1.0 - _sl_pct)
+                                _tp_m = mexc_price * (1.0 + _sl_pct * _rr)
                             asyncio.create_task(alerts.send_trade_alert("wyckoff", {
                                 "pair":     mexc_pair,
                                 "score":    new_score,
                                 "entry":    mexc_price,
-                                "sl":       alloc.stop_loss,
-                                "tp":       alloc.take_profit,
+                                "sl":       _sl_m,
+                                "tp":       _tp_m,
                                 "size_usd": final_size,
                             }))
                         else:
