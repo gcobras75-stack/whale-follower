@@ -217,19 +217,14 @@ class MEXCExecutor:
 
                 try:
                     import db_writer
-                    asyncio.create_task(db_writer._run(
-                        lambda: db_writer._client().table("paper_trades").insert({
-                            "strategy": "wyckoff",
-                            "pair": pair,
-                            "side": "Buy",
-                            "entry_price": price_hint,
-                            "size_usd": size_usd,
-                            "score": 0,
-                            "status": "open",
-                            "source": "real_mexc",
-                            "created_at": db_writer._now_ts(),
-                        }).execute()
-                    ))
+                    asyncio.create_task(db_writer.save_real_trade({
+                        "trade_id":    order_id,
+                        "pair":        pair,
+                        "side":        "Buy",
+                        "entry_price": price_hint,
+                        "size_usd":    round(size_usd, 2),
+                        "source":      "real_mexc",
+                    }))
                 except Exception:
                     pass
 

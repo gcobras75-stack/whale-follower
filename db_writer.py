@@ -555,3 +555,23 @@ async def save_range_close(trade, reason: str, exit_price: float, pnl_net: float
         close_reason  = reason,
         duration_secs = int(time.time() - trade.open_ts),
     )
+
+
+# ── Real trades (OKX / MEXC / Bybit) ────────────────────────────────────────
+
+async def save_real_trade(data: Dict[str, Any]) -> None:
+    """Persist a real exchange trade into paper_trades with full metadata."""
+    import uuid
+    row = {
+        "id":          data.get("trade_id", str(uuid.uuid4())),
+        "strategy":    data.get("strategy", "wyckoff"),
+        "pair":        data["pair"],
+        "side":        data.get("side", "Buy"),
+        "entry_price": data["entry_price"],
+        "size_usd":    data["size_usd"],
+        "stop_loss":   data.get("sl", 0),
+        "take_profit": data.get("tp", 0),
+        "status":      "open",
+        "source":      data.get("source", "real"),
+    }
+    await _run(lambda: _client().table("paper_trades").insert(row).execute())
