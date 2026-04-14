@@ -28,9 +28,12 @@ import alerts as _alerts
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _CHECK_INTERVAL_SECS  = 6 * 3600     # cada 6 horas
+_URGENT_INTERVAL_SECS = 30 * 60     # alerta urgent cada 30 min
+_SUGGESTED_INTERVAL   = 6 * 3600    # alerta suggested cada 6 horas
 _TARGET_BYBIT_PCT     = 0.60         # objetivo: 60% en Bybit (opera grid + Wyckoff)
 _SUGGESTED_DEV        = 0.20         # desviacion > 20% → sugerir rebalanceo
 _URGENT_DEV           = 0.35         # desviacion > 35% → alerta urgente
+_BYBIT_MIN_OK         = 100.0       # Bybit > $100 = balance normalizado
 
 # ── Dust Cleanup ──────────────────────────────────────────────────────────────
 _DUST_CLEANUP_SECS    = 4 * 3600     # limpieza cada 4 horas
@@ -61,6 +64,8 @@ class CapitalRebalancer:
         self._snap: RebalanceSnapshot = RebalanceSnapshot()
         self._executor = None   # referencia al BybitTestnetExecutor (opcional)
         self._okx_exec = None   # OKXExecutor lazy — para get_total_balance_usd()
+        self._last_urgent_alert_ts: float = 0.0
+        self._last_suggested_alert_ts: float = 0.0
         logger.info(
             "[rebalancer] Iniciado | check={}h | target_bybit={:.0f}% | "
             "suggested_dev={:.0f}% | urgent_dev={:.0f}%",
@@ -87,7 +92,9 @@ class CapitalRebalancer:
     async def _balance_loop(self) -> None:
         while True:
             await self._check()
-            await asyncio.sleep(_CHECK_INTERVAL_SECS)
+            # Si urgent, re-check cada 30 min; si no, cada 6h
+            interval = _URGENT_INTERVAL_SECS if self._snap.status == "urgent" else _CHECK_INTERVAL_SECS
+            await asyncio.sleep(interval)
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -97,6 +104,15 @@ class CapitalRebalancer:
     def usdt_balances(self) -> tuple[float, float]:
         """Retorna (bybit_usdt, okx_usdt) del último snapshot para exchange selection."""
         return self._snap.bybit_usdt, self._snap.okx_usdt
+
+    async def force_check(self) -> RebalanceSnapshot:
+        """Forzar verificación inmediata (llamado por /rebalance)."""
+        await self._check()
+        return self._snap
+
+    def get_okx_breakdown(self) -> dict:
+        """Retorna breakdown de OKX por coin desde alerts._stats."""
+        return _alerts._stats.get("capital_okx_breakdown", {})
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -169,8 +185,20 @@ class CapitalRebalancer:
         except Exception:
             pass
 
-        if status in ("suggested", "urgent"):
-            await self._alert(self._snap)
+        now = time.time()
+        if status == "urgent":
+            if now - self._last_urgent_alert_ts >= _URGENT_INTERVAL_SECS:
+                await self._alert(self._snap)
+                self._last_urgent_alert_ts = now
+        elif status == "suggested":
+            if now - self._last_suggested_alert_ts >= _SUGGESTED_INTERVAL:
+                await self._alert(self._snap)
+                self._last_suggested_alert_ts = now
+
+        # Reset alert timers when balance normalizes
+        if status == "ok" or bybit_bal >= _BYBIT_MIN_OK:
+            self._last_urgent_alert_ts = 0.0
+            self._last_suggested_alert_ts = 0.0
 
     async def _fetch_bybit(self) -> Optional[float]:
         """
@@ -540,27 +568,50 @@ class CapitalRebalancer:
         if not token or not chat_id:
             return
 
-        if snap.status == "urgent":
-            icon   = "🚨"
-            titulo = "REBALANCEO URGENTE"
-            accion = (f"Bybit tiene {snap.bybit_pct:.1f}% del capital "
-                      f"(objetivo {_TARGET_BYBIT_PCT*100:.0f}%).\n"
-                      f"Desviacion: {snap.deviation_pct:.1f}% > limite {_URGENT_DEV*100:.0f}%\n"
-                      f"Transfiere USDT entre exchanges para equilibrar.")
-        else:
-            icon   = "⚠️"
-            titulo = "Rebalanceo sugerido"
-            accion = (f"Bybit tiene {snap.bybit_pct:.1f}% del capital "
-                      f"(objetivo {_TARGET_BYBIT_PCT*100:.0f}%).\n"
-                      f"Desviacion: {snap.deviation_pct:.1f}% — considera rebalancear.")
+        target_bybit = snap.total_usdt * _TARGET_BYBIT_PCT
+        deficit      = max(0, target_bybit - snap.bybit_usdt)
 
-        msg = (
-            f"{icon} [{titulo}]\n"
-            f"Bybit:  ${snap.bybit_usdt:.2f} USDT ({snap.bybit_pct:.1f}%)\n"
-            f"OKX:    ${snap.okx_usdt:.2f} USDT ({100-snap.bybit_pct:.1f}%)\n"
-            f"Total:  ${snap.total_usdt:.2f} USDT\n\n"
-            f"{accion}"
-        )
+        bybit_label = f"${snap.bybit_usdt:.2f}   ({snap.bybit_pct:.0f}%)"
+        okx_label   = f"${snap.okx_usdt:.2f} ({100-snap.bybit_pct:.0f}%)"
+
+        if snap.bybit_pct < 20:
+            bybit_label += "  <- muy bajo"
+            okx_label   += "  <- concentrado"
+
+        if snap.status == "urgent":
+            msg = (
+                f"\U0001f6a8 REBALANCEO URGENTE\n"
+                f"------------------------------\n"
+                f"Bybit:  {bybit_label}\n"
+                f"OKX:    {okx_label}\n"
+                f"Total:  ${snap.total_usdt:.2f}\n"
+                f"------------------------------\n"
+                f"Accion manual necesaria:\n"
+                f"Transfiere ${deficit:.0f} USDT de OKX -> Bybit\n\n"
+                f"Pasos:\n"
+                f"1. Abre OKX app -> Assets -> Withdraw\n"
+                f"2. Selecciona USDT (red TRC20 o ERC20)\n"
+                f"3. Monto: ${deficit:.0f} USDT\n"
+                f"4. Direccion destino Bybit:\n"
+                f"   Ve a Bybit -> Assets -> Deposit -> USDT\n"
+                f"   Copia tu direccion de deposito\n"
+                f"5. Confirma la transferencia\n"
+                f"------------------------------\n"
+                f"  Wyckoff y Mean Reversion bloqueados\n"
+                f"   hasta que Bybit tenga capital suficiente"
+            )
+        else:
+            msg = (
+                f"  Rebalanceo sugerido\n"
+                f"------------------------------\n"
+                f"Bybit:  {bybit_label}\n"
+                f"OKX:    {okx_label}\n"
+                f"Total:  ${snap.total_usdt:.2f}\n"
+                f"------------------------------\n"
+                f"Considera transferir ~${deficit:.0f} USDT de OKX -> Bybit\n"
+                f"Target: {_TARGET_BYBIT_PCT*100:.0f}% Bybit / "
+                f"{(1-_TARGET_BYBIT_PCT)*100:.0f}% OKX"
+            )
         try:
             async with aiohttp.ClientSession() as s:
                 await s.post(

@@ -670,6 +670,15 @@ async def dispatch_multi(
     )
 
 
+# ── Rebalancer reference (set from main.py) ──────────────────────────────────
+_rebalancer_ref = None
+
+def set_rebalancer(rebalancer) -> None:
+    """Registra referencia al CapitalRebalancer para el comando /rebalance."""
+    global _rebalancer_ref
+    _rebalancer_ref = rebalancer
+
+
 # ── Comandos de Telegram (/status /stats /last /trades) ───────────────────────
 
 async def handle_telegram_commands(executor: Any) -> None:
@@ -730,6 +739,8 @@ async def handle_telegram_commands(executor: Any) -> None:
                         await asyncio.wait_for(_cmd_last(), timeout=10.0)
                     elif text == "/trades":
                         await asyncio.wait_for(_cmd_trades(executor), timeout=10.0)
+                    elif text == "/rebalance":
+                        await asyncio.wait_for(_cmd_rebalance(), timeout=15.0)
                 except asyncio.TimeoutError:
                     logger.error("[telegram_cmd] Timeout procesando {}", text)
                     await _reply(f"Timeout procesando {text}. Bot activo.")
@@ -1092,3 +1103,55 @@ async def _cmd_trades(executor: Any) -> None:
             f"  Razon cierre: {t['close_reason'] or 'activo'}\n"
         )
     await _reply("\n".join(lines))
+
+
+async def _cmd_rebalance() -> None:
+    """Comando /rebalance — muestra estado de capital y accion recomendada."""
+    if _rebalancer_ref is None:
+        await _reply("Rebalancer no disponible.")
+        return
+
+    try:
+        snap = await _rebalancer_ref.force_check()
+    except Exception as exc:
+        await _reply(f"Error verificando balances: {exc}")
+        return
+
+    okx_bd = _rebalancer_ref.get_okx_breakdown()
+    target_bybit = snap.total_usdt * 0.60
+    target_okx   = snap.total_usdt * 0.40
+
+    # Status emoji y accion
+    if snap.status == "urgent":
+        status_label = "URGENT"
+        deficit = max(0, target_bybit - snap.bybit_usdt)
+        accion = f"Transfiere ${deficit:.0f} USDT de OKX -> Bybit"
+    elif snap.status == "suggested":
+        status_label = "SUGGESTED"
+        deficit = max(0, target_bybit - snap.bybit_usdt)
+        accion = f"Considera mover ~${deficit:.0f} USDT a Bybit"
+    else:
+        status_label = "OK"
+        accion = "Balance equilibrado, no se requiere accion"
+
+    # Build OKX breakdown lines
+    okx_lines = ""
+    for coin, val in okx_bd.items():
+        if coin != "USDT" and val > 0.5:
+            okx_lines += f"OKX {coin}:          ${val:.2f}\n"
+
+    msg = (
+        f"ESTADO DE CAPITAL\n"
+        f"------------------------------\n"
+        f"Bybit USDT:    ${snap.bybit_usdt:.2f}  ({snap.bybit_pct:.0f}%)\n"
+        f"OKX USDT:      ${snap.okx_usdt:.2f}  ({100-snap.bybit_pct:.0f}%)\n"
+        f"{okx_lines}"
+        f"------------------------------\n"
+        f"Capital Total: ${snap.total_usdt:.2f}\n"
+        f"Target Bybit:  60% (${target_bybit:.0f})\n"
+        f"Target OKX:    40% (${target_okx:.0f})\n"
+        f"------------------------------\n"
+        f"Estado: {status_label}\n"
+        f"Accion: {accion}"
+    )
+    await _reply(msg)

@@ -320,6 +320,7 @@ async def trading_loop() -> None:
         asyncio.create_task(daily_rep.run(),   name="daily_report")
     if rebalancer:
         rebalancer.set_executor(executor)   # proteger coins con trades activos en dust cleanup
+        alerts.set_rebalancer(rebalancer)
         asyncio.create_task(rebalancer.run(),  name="rebalancer")
     if strat_mgr:
         asyncio.create_task(strat_mgr.run(),   name="strategy_manager")
@@ -465,6 +466,9 @@ async def trading_loop() -> None:
     logger.info("=" * 60)
 
     recent_signals = deque(maxlen=200)
+    _last_capital_warn_ts: float = 0.0
+    _CAPITAL_WARN_INTERVAL = 600  # 10 minutos
+    _BYBIT_MIN_FOR_STRATEGIES = 50.0
 
     # ── Ajuste mempool por estrategia ─────────────────────────────────────────
     def apply_mempool_adjustments(score: float, strategy_name: str):
@@ -574,6 +578,18 @@ async def trading_loop() -> None:
         if meta_agt and trade.pair == "BTCUSDT":
             meta_agt.on_price(trade.pair, trade.price, trade.quantity)
 
+
+        # 2b. Capital gate warning (cada 10 min si Bybit bajo)
+        _now_cg = time.time()
+        if rebalancer and (_now_cg - _last_capital_warn_ts) >= _CAPITAL_WARN_INTERVAL:
+            _bybit_bal_cg = rebalancer.snapshot().bybit_usdt
+            if 0 < _bybit_bal_cg < _BYBIT_MIN_FOR_STRATEGIES:
+                logger.warning(
+                    "[capital] Bybit=${:.2f} — Wyckoff/MeanRev/OFI "
+                    "esperando capital. Usa /rebalance en Telegram.",
+                    _bybit_bal_cg,
+                )
+                _last_capital_warn_ts = _now_cg
 
         # 3. Procesar spring detection
         ctx_snapshot = context.snapshot()
