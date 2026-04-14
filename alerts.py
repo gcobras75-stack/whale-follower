@@ -85,6 +85,8 @@ _thermometers: Dict[str, Any] = {
     "dxy_value":      0.0,
     "dxy_change_pct": 0.0,
     "dxy_signal":     "?",
+    "mempool_score":  0.0,
+    "mempool_signal": "?",
 }
 
 # ── Stats public API ──────────────────────────────────────────────────
@@ -871,6 +873,7 @@ async def _cmd_stats() -> None:
         f"BTC Dominancia:       {dom_line}\n"
         f"Liquidaciones 1h:     {liq_line}\n"
         f"DXY:                  {dxy_line}\n"
+        f"Mempool BTC:          {t['mempool_score']:.0f}/100 ({t['mempool_signal']})\n"
         f"\nUptime:               {h}h {m}m\n"
     )
 

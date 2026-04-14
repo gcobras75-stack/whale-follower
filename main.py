@@ -196,6 +196,7 @@ async def trading_loop() -> None:
     btc_dom_mod  = _try_import("btc_dominance")
     liq_glob_mod = _try_import("liquidations_global")
     dxy_mod        = _try_import("dxy_monitor")
+    mempool_mod    = _try_import("mempool_thermometer")
     daily_rep_mod  = _try_import("daily_report")
     rebalancer_mod  = _try_import("rebalancer")
     strat_mgr_mod   = _try_import("strategy_manager")
@@ -215,6 +216,7 @@ async def trading_loop() -> None:
     btc_dom    = btc_dom_mod.BtcDominanceMonitor()       if btc_dom_mod   else None
     liq_glob   = liq_glob_mod.LiquidationsGlobal()       if liq_glob_mod  else None
     dxy_mon    = dxy_mod.DxyMonitor()                    if dxy_mod       else None
+    mempool_th = mempool_mod.MempoolThermometer()         if mempool_mod   else None
     daily_rep     = daily_rep_mod.DailyReporter()              if daily_rep_mod   else None
     rebalancer    = rebalancer_mod.CapitalRebalancer()          if rebalancer_mod  else None
     session_vol   = session_vol_mod.SessionVolumeTracker()      if session_vol_mod else None
@@ -404,8 +406,8 @@ async def trading_loop() -> None:
         macro_agent is not None,  regime_det is not None,
         range_trader is not None, deribit_eng is not None,
     ])
-    thermo_active = sum([btc_dom is not None, liq_glob is not None, dxy_mon is not None])
-    logger.info(f" Termometros: {thermo_active}/3 activos (dom/liq/dxy)")
+    thermo_active = sum([btc_dom is not None, liq_glob is not None, dxy_mon is not None, mempool_th is not None])
+    logger.info(f" Termometros: {thermo_active}/4 activos (dom/liq/dxy/mempool)")
     logger.info(" Arbitraje:  DESHABILITADO (ENABLE_CROSS_ARB=false — solo OKX Grid activo)")
     strats_active = sum([mean_rev is not None, grid_eng is not None,
                          ofi_eng is not None, mom_eng is not None, dn_eng is not None])
@@ -463,6 +465,60 @@ async def trading_loop() -> None:
     logger.info("=" * 60)
 
     recent_signals = deque(maxlen=200)
+
+    # ── Ajuste mempool por estrategia ─────────────────────────────────────────
+    def apply_mempool_adjustments(score: float, strategy_name: str):
+        if not mempool_th:
+            return score
+        try:
+            analysis = mempool_th.get_full_analysis()
+            ms = analysis["mempool_score"]
+            # Actualizar termometros en alerts
+            alerts.update_thermometers(
+                mempool_score=ms,
+                mempool_signal=analysis["signal"],
+            )
+
+            if strategy_name in ("grid_btc", "grid_eth", "grid_sol", "grid"):
+                if ms >= 80:
+                    logger.warning(f"[mempool] GRID BLOQUEADO score={ms}")
+                    return None
+                elif ms >= 60: score -= 5
+                elif ms <= 25: score += 5
+
+            elif strategy_name in ("cross_exchange_arb", "cross_arb"):
+                if ms >= 80:   score += 10
+                elif ms >= 60: score += 7
+                elif ms <= 25: score -= 3
+
+            elif strategy_name in ("whale_spring", "wyckoff", "spring"):
+                if ms >= 80:   score += 5
+                elif ms >= 60: score += 8
+
+            elif strategy_name in ("mean_reversion", "mean_rev"):
+                if ms >= 80:
+                    logger.warning(f"[mempool] MEAN_REV BLOQUEADO score={ms}")
+                    return None
+                elif ms >= 60: score -= 8
+                elif ms <= 25: score += 5
+
+            elif strategy_name in ("momentum_scaling", "momentum"):
+                if ms >= 60:   score += 8
+                elif ms <= 25: score -= 5
+
+            elif strategy_name in ("lead_lag", "lead_lag_arb"):
+                if ms >= 60:   score += 6
+                elif ms <= 25: score -= 5
+
+            elif strategy_name in ("funding_arb", "funding_rate_arb"):
+                if ms >= 80:   score += 8
+                elif ms >= 60: score += 5
+
+            logger.debug(f"[mempool] {strategy_name} ms={ms} signal={analysis['signal']}")
+            return score
+        except Exception as e:
+            logger.warning(f"[mempool] Error: {e}")
+            return score
 
     # ── Loop principal ─────────────────────────────────────────────────────────
     async for trade, _legacy_state in aggregator.stream():
@@ -657,6 +713,13 @@ async def trading_loop() -> None:
             if dxy_adj != 0:
                 new_score = max(0, new_score + dxy_adj)
                 logger.info(f"[main] {signal.pair} dxy adj={dxy_adj:+d} → score={new_score}")
+
+        # 5e. Termometro 4 — Mempool BTC
+        if mempool_th:
+            new_score = apply_mempool_adjustments(new_score, "wyckoff")
+            if new_score is None:
+                logger.info(f"[mempool] {signal.pair} operacion bloqueada por congestion mempool")
+                continue
 
         # 5c. Aplicar ML (ultimo filtro)
         if ml_model:
