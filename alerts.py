@@ -723,9 +723,14 @@ async def handle_telegram_commands(executor: Any) -> None:
                 offset = update["update_id"] + 1
                 msg    = update.get("message", {})
                 text   = msg.get("text", "").strip()
-                chat   = str(msg.get("chat", {}).get("id", ""))
+                chat_id_int = msg.get("chat", {}).get("id", 0)
+                chat   = str(chat_id_int)
 
-                if chat != config.TELEGRAM_CHAT_ID:
+                # Security: block unauthorized users
+                from security_monitor import is_authorized, handle_unauthorized
+                if not is_authorized(chat_id_int):
+                    username = msg.get("from", {}).get("username")
+                    asyncio.create_task(handle_unauthorized(chat_id_int, username, text))
                     continue
 
                 try:
