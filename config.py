@@ -140,7 +140,7 @@ BYBIT_MIN_FOR_CROSS_ARB:  float = float(os.getenv("BYBIT_MIN_FOR_CROSS_ARB",  "2
 # ── Control Bybit / OKX ─────────────────────────────────────────────────────
 BYBIT_ORDERS_BLOCKED: bool = os.getenv("BYBIT_ORDERS_BLOCKED", "true").lower() == "true"   # default true — CloudFront 403
 BYBIT_ENABLED:        bool = os.getenv("BYBIT_ENABLED",        "false").lower() == "true"  # deshabilitado — AWS/Railway IPs bloqueadas
-ENABLE_OKX_GRID:      bool = os.getenv("ENABLE_OKX_GRID",      "true").lower()  == "true"
+ENABLE_OKX_GRID:      bool = os.getenv("ENABLE_OKX_GRID",      "false").lower() == "true"  # deshabilitado — liberar USDT para Wyckoff
 
 # ── Bitso (BTC/MXN monitoring) ───────────────────────────────────────────────
 BITSO_API_KEY: str = os.getenv("BITSO_API_KEY", "")   # vacio = solo lectura
