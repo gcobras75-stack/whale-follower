@@ -704,7 +704,7 @@ class BybitTestnetExecutor:
         self, trade: PaperTrade, signal_id: Optional[str]
     ) -> None:
         try:
-            from supabase import create_client
+            from supabase import create_client, ClientOptions
             loop = asyncio.get_running_loop()
             row = {
                 "signal_id":    signal_id,
@@ -717,7 +717,8 @@ class BybitTestnetExecutor:
                 "size_usd":     trade.size_usd,
                 "status":       "open",
             }
-            client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+            client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY,
+                                   options=ClientOptions(postgrest_client_timeout=5))
             result = await loop.run_in_executor(
                 None,
                 lambda: client.table("paper_trades").insert(row).execute()
@@ -737,7 +738,7 @@ class BybitTestnetExecutor:
             logger.warning("[executor] Sin db_row_id para actualizar cierre en Supabase.")
             return
         try:
-            from supabase import create_client
+            from supabase import create_client, ClientOptions
             loop = asyncio.get_running_loop()
             update = {
                 "status":           "closed",
@@ -747,7 +748,8 @@ class BybitTestnetExecutor:
                 "close_reason":     trade.close_reason,
                 "duration_seconds": duration,
             }
-            client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+            client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY,
+                                   options=ClientOptions(postgrest_client_timeout=5))
             await loop.run_in_executor(
                 None,
                 lambda: (

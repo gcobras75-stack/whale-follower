@@ -410,7 +410,11 @@ _supabase: Optional[Client] = None
 def _get_supabase() -> Client:
     global _supabase
     if _supabase is None:
-        _supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+        from supabase import ClientOptions
+        _supabase = create_client(
+            config.SUPABASE_URL, config.SUPABASE_KEY,
+            options=ClientOptions(postgrest_client_timeout=5),
+        )
     return _supabase
 
 
