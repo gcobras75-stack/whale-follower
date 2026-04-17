@@ -737,7 +737,7 @@ async def handle_telegram_commands(executor: Any) -> None:
                     if text == "/status":
                         await asyncio.wait_for(_cmd_status(), timeout=10.0)
                     elif text == "/stats":
-                        await asyncio.wait_for(_cmd_stats(), timeout=10.0)
+                        await asyncio.wait_for(_cmd_stats(), timeout=12.0)
                     elif text in ("/report", "/analytics"):
                         await asyncio.wait_for(_cmd_report(), timeout=15.0)
                     elif text == "/last":
@@ -798,6 +798,7 @@ async def _cmd_status() -> None:
             lambda: _client().table("paper_trades")
             .select("id", count="exact")
             .gte("created_at", today_start)
+            .limit(100)
             .execute()
         )
         if result:
@@ -819,6 +820,50 @@ async def _cmd_status() -> None:
 
 
 async def _cmd_stats() -> None:
+    try:
+        async with asyncio.timeout(8):
+            await _cmd_stats_full()
+    except (TimeoutError, asyncio.TimeoutError):
+        logger.warning("[stats] timeout 8s — enviando datos en memoria")
+        await _cmd_stats_fallback()
+    except Exception as e:
+        logger.warning(f"[stats] error — fallback: {e}")
+        await _cmd_stats_fallback()
+
+
+async def _cmd_stats_fallback() -> None:
+    """Respuesta rapida con datos en memoria, sin queries externas."""
+    uptime = int(time.time() - _stats["start_time"])
+    h, m   = divmod(uptime // 60, 60)
+    total_pnl = sum(_stats["pnl_by_strategy"].values())
+    cap_bybit = _stats["capital_bybit"] or config.REAL_CAPITAL
+    cap_okx   = _stats["capital_okx"]   or 0.0
+    total_trades = sum(v["total"] for v in _stats["trades_by_strategy"].values())
+
+    pnl_strat = _stats["pnl_by_strategy"]
+    pnl_lines = ""
+    for strat, pnl in pnl_strat.items():
+        if pnl != 0.0:
+            pnl_lines += f"  {strat:<16} ${pnl:+.4f}\n"
+    if not pnl_lines:
+        pnl_lines = "  (sin trades completados aun)\n"
+
+    await _reply(
+        f"Stats (memoria — timeout en consultas)\n"
+        f"--------------------------------------\n"
+        f"PnL sesion:           ${total_pnl:+.4f}\n"
+        f"Trades sesion:        {total_trades}\n"
+        f"Capital Bybit:        ~${cap_bybit:.0f}\n"
+        f"Capital OKX:          ~${cap_okx:.0f}\n"
+        f"\nP&L por estrategia\n"
+        f"------------------\n"
+        f"{pnl_lines}"
+        f"Uptime:               {h}h {m}m\n"
+    )
+
+
+async def _cmd_stats_full() -> None:
+    """Stats completas — puede ser lenta por queries externas."""
     uptime = int(time.time() - _stats["start_time"])
     h, m   = divmod(uptime // 60, 60)
 
@@ -885,9 +930,9 @@ async def _cmd_stats() -> None:
         import config as _cfg
         if _cfg.MEMPOOL_ENABLED:
             from mempool_thermometer import MempoolThermometer
-            if not hasattr(_cmd_stats, "_mempool"):
-                _cmd_stats._mempool = MempoolThermometer()
-            _mp_data = _cmd_stats._mempool.get_full_analysis()
+            if not hasattr(_cmd_stats_full, "_mempool"):
+                _cmd_stats_full._mempool = MempoolThermometer()
+            _mp_data = _cmd_stats_full._mempool.get_full_analysis()
             t["mempool_score"]  = _mp_data["mempool_score"]
             t["mempool_signal"] = _mp_data["signal"]
     except Exception:
