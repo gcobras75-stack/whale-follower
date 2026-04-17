@@ -207,7 +207,8 @@ class MEXCExecutor:
             "symbol":    symbol,
             "vol":       n_contracts,
             "side":      side_code,
-            "type":      5,          # 5 = market order
+            "type":      1,          # 1 = limit order (maker fee 0.02%)
+            "price":     str(price_hint),
             "openType":  1,          # 1 = isolated
             "leverage":  1,
         }

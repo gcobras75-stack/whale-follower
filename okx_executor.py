@@ -525,13 +525,15 @@ class OKXExecutor:
         price_hint: float,
     ) -> Optional[Dict[str, Any]]:
         """
-        Place a market order on OKX SWAP (perpetuos USDT-M).
+        Place a limit order on OKX SWAP (perpetuos USDT-M) at price_hint.
+
+        Uses limit (maker) orders to pay 0.02% fee instead of 0.06% taker.
 
         Args:
             pair:       Bot pair name e.g. "ETHUSDT"
             side:       "buy" (long) or "sell" (short)
             size_usd:   Approximate USD notional (converted to contracts)
-            price_hint: Current price (used to calculate contract count)
+            price_hint: Current price — used as limit price and to calc contracts
 
         Returns:
             Order result dict with order_id, or None on failure.
@@ -604,7 +606,8 @@ class OKXExecutor:
             "instId":  inst_id,
             "tdMode":  "isolated",
             "side":    _side,
-            "ordType": "market",
+            "ordType": "limit",
+            "px":      str(price_hint),
             "sz":      str(n_contracts),
         }
         # posSide solo en long_short_mode. En net_mode causa error.
