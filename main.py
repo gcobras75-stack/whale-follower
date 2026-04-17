@@ -314,15 +314,17 @@ async def trading_loop() -> None:
         except Exception as exc:
             logger.warning("[main] OKX executor no disponible: {}", exc)
 
-    # MEXC executor como segundo fallback
+    # MEXC executor como segundo fallback (deshabilitado — CloudFront 403 desde Contabo)
     _mexc_wyckoff = None
-    if config.MEXC_API_KEY and config.MEXC_API_SECRET:
+    if config.MEXC_ENABLED and config.MEXC_API_KEY and config.MEXC_API_SECRET:
         try:
             from mexc_executor import MEXCExecutor
             _mexc_wyckoff = MEXCExecutor()
             logger.info("[main] MEXC executor disponible como segundo fallback")
         except Exception as exc:
             logger.warning("[main] MEXC executor no disponible: {}", exc)
+    elif not config.MEXC_ENABLED:
+        logger.info("[main] MEXC deshabilitado (MEXC_ENABLED=false)")
 
     range_trader = (range_mod.RangeTrader(executor, regime_det, production=prod)
                     if range_mod and regime_det else None)
@@ -673,15 +675,14 @@ async def trading_loop() -> None:
             meta_agt.on_price(trade.pair, trade.price, trade.quantity)
 
 
-        # 2b. Capital gate warning (cada 10 min si OKX+MEXC bajo)
+        # 2b. Capital gate warning (cada 10 min si OKX bajo)
         _now_cg = time.time()
         if rebalancer and (_now_cg - _last_capital_warn_ts) >= _CAPITAL_WARN_INTERVAL:
             _snap_cg = rebalancer.snapshot()
             _okx_bal_cg = getattr(_snap_cg, "okx_usdt", 0.0)
             if 0 < _okx_bal_cg < _BYBIT_MIN_FOR_STRATEGIES:
                 logger.warning(
-                    "[capital] OKX=${:.2f} — capital bajo para Wyckoff/MeanRev. "
-                    "MEXC como fallback.",
+                    "[capital] OKX=${:.2f} — capital bajo para Wyckoff/MeanRev.",
                     _okx_bal_cg,
                 )
                 _last_capital_warn_ts = _now_cg
@@ -1199,8 +1200,9 @@ async def trading_loop() -> None:
                     }))
 
             if not _traded:
+                _exchanges = "OKX" if not config.MEXC_ENABLED else "OKX+MEXC"
                 logger.error(
-                    "[main] OKX+MEXC agotados para ${:.0f}", final_size)
+                    "[main] {} agotados para ${:.0f}", _exchanges, final_size)
 
         if dashboard:
             dashboard.record_signal(new_score, operated=bool(allocation.trades), blocked_by_ml=False)

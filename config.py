@@ -128,6 +128,7 @@ GATE_API_KEY:    str = os.getenv("GATE_API_KEY",    "")
 GATE_API_SECRET: str = os.getenv("GATE_API_SECRET", "")
 
 # ── MEXC Futures (segundo fallback después de OKX) ──────────────────────────
+MEXC_ENABLED:    bool = os.getenv("MEXC_ENABLED",    "false").lower() == "true"  # deshabilitado — CloudFront 403 desde Contabo
 MEXC_API_KEY:    str = os.getenv("MEXC_API_KEY",    "")
 MEXC_API_SECRET: str = os.getenv("MEXC_API_SECRET", "")
 CROSS_ARB_MAX_SIZE_USD:    float = float(os.getenv("CROSS_ARB_MAX_SIZE_USD",    "50"))
