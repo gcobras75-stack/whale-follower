@@ -161,6 +161,7 @@ class Aggregator:
     ) -> None:
         delay = config.BACKOFF_BASE
         while True:
+            _t0 = time.time()
             try:
                 logger.info(f"[{name}] Connecting…")
                 await handler()
@@ -168,9 +169,17 @@ class Aggregator:
                 logger.info(f"[{name}] Task cancelled.")
                 return
             except Exception as exc:
-                logger.warning(f"[{name}] Disconnected: {exc}. Retry in {delay:.0f}s")
+                uptime = time.time() - _t0
+                logger.warning(
+                    f"[{name}] Disconnected after {uptime:.0f}s: {exc!r} "
+                    f"type={type(exc).__name__}. Retry in {delay:.0f}s"
+                )
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, config.BACKOFF_MAX)
+                # Reset backoff si estuvo conectado >60s (desconexión fue transitoria)
+                if uptime > 60:
+                    delay = config.BACKOFF_BASE
+                else:
+                    delay = min(delay * 2, config.BACKOFF_MAX)
             else:
                 delay = config.BACKOFF_BASE   # reset on clean exit
 
@@ -270,25 +279,44 @@ class Aggregator:
         url = "wss://ws.okx.com:8443/ws/v5/public"
         sub_args = [{"channel": "trades", "instId": self._okx_inst_id(p)}
                     for p in config.TRADING_PAIRS]
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+        async with websockets.connect(
+            url, ping_interval=20, ping_timeout=30,
+            close_timeout=10, max_size=2**22,
+        ) as ws:
             await ws.send(json.dumps({"op": "subscribe", "args": sub_args}))
             logger.success(f"[okx] Connected ({len(sub_args)} pairs).")
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg.get("arg", {}).get("channel") != "trades":
-                    continue
-                inst_id: str = msg["arg"].get("instId", "BTC-USDT")
-                pair = inst_id.replace("-", "")     # "ETH-USDT" → "ETHUSDT"
-                for t in msg.get("data", []):
-                    trade = Trade(
-                        exchange="okx",
-                        price=float(t["px"]),
-                        quantity=float(t["sz"]),
-                        side=t["side"],
-                        timestamp=int(t["ts"]) / 1000.0,
-                        pair=pair,
-                    )
-                    await self._enqueue(trade)
+
+            # OKX requiere ping aplicación cada 25s además del ping protocolo
+            async def _okx_app_ping():
+                while True:
+                    await asyncio.sleep(25)
+                    try:
+                        await ws.send("ping")
+                    except Exception:
+                        return  # ws cerrado, salir del ping loop
+
+            ping_task = asyncio.create_task(_okx_app_ping())
+            try:
+                async for raw in ws:
+                    if raw == "pong":
+                        continue
+                    msg = json.loads(raw)
+                    if msg.get("arg", {}).get("channel") != "trades":
+                        continue
+                    inst_id: str = msg["arg"].get("instId", "BTC-USDT")
+                    pair = inst_id.replace("-", "")     # "ETH-USDT" → "ETHUSDT"
+                    for t in msg.get("data", []):
+                        trade = Trade(
+                            exchange="okx",
+                            price=float(t["px"]),
+                            quantity=float(t["sz"]),
+                            side=t["side"],
+                            timestamp=int(t["ts"]) / 1000.0,
+                            pair=pair,
+                        )
+                        await self._enqueue(trade)
+            finally:
+                ping_task.cancel()
 
     # ── ETHBTC Bybit spot ─────────────────────────────────────────────────────
     # ETH/BTC spot en Bybit — necesario para arbitraje triangular real.
@@ -322,23 +350,41 @@ class Aggregator:
     async def _okx_ethbtc_handler(self) -> None:
         url = "wss://ws.okx.com:8443/ws/v5/public"
         sub = json.dumps({"op": "subscribe", "args": [{"channel": "trades", "instId": "ETH-BTC"}]})
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+        async with websockets.connect(
+            url, ping_interval=20, ping_timeout=30,
+            close_timeout=10, max_size=2**22,
+        ) as ws:
             await ws.send(sub)
             logger.success("[okx_ethbtc] Connected (ETH-BTC spot).")
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg.get("arg", {}).get("instId") != "ETH-BTC":
-                    continue
-                for t in msg.get("data", []):
-                    trade = Trade(
-                        exchange  = "okx",
-                        price     = float(t["px"]),
-                        quantity  = float(t["sz"]),
-                        side      = t["side"],
-                        timestamp = int(t["ts"]) / 1000.0,
-                        pair      = "ETHBTC",
-                    )
-                    await self._enqueue(trade)
+
+            async def _okx_app_ping():
+                while True:
+                    await asyncio.sleep(25)
+                    try:
+                        await ws.send("ping")
+                    except Exception:
+                        return
+
+            ping_task = asyncio.create_task(_okx_app_ping())
+            try:
+                async for raw in ws:
+                    if raw == "pong":
+                        continue
+                    msg = json.loads(raw)
+                    if msg.get("arg", {}).get("instId") != "ETH-BTC":
+                        continue
+                    for t in msg.get("data", []):
+                        trade = Trade(
+                            exchange  = "okx",
+                            price     = float(t["px"]),
+                            quantity  = float(t["sz"]),
+                            side      = t["side"],
+                            timestamp = int(t["ts"]) / 1000.0,
+                            pair      = "ETHBTC",
+                        )
+                        await self._enqueue(trade)
+            finally:
+                ping_task.cancel()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
