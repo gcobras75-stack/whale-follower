@@ -95,11 +95,12 @@ class MEXCExecutor:
             return 0.0
         try:
             headers = _make_headers(self._api_key, self._secret)
-            async with aiohttp.ClientSession() as s:
+            connector = aiohttp.TCPConnector(family=2)  # AF_INET = IPv4
+            async with aiohttp.ClientSession(connector=connector) as s:
                 async with s.get(
                     f"{_BASE_URL}/api/v1/private/account/assets",
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=8),
+                    timeout=aiohttp.ClientTimeout(total=8, connect=5),
                 ) as r:
                     data = await r.json()
             if data.get("success"):
@@ -127,11 +128,12 @@ class MEXCExecutor:
                 "positionType": 1,   # 1=one-way
             })
             headers = _make_headers(self._api_key, self._secret, body)
-            async with aiohttp.ClientSession() as s:
+            connector = aiohttp.TCPConnector(family=2)  # AF_INET = IPv4
+            async with aiohttp.ClientSession(connector=connector) as s:
                 async with s.post(
                     f"{_BASE_URL}/api/v1/private/position/change_leverage",
                     headers=headers, data=body,
-                    timeout=aiohttp.ClientTimeout(total=8),
+                    timeout=aiohttp.ClientTimeout(total=8, connect=5),
                 ) as r:
                     data = await r.json()
             if data.get("success"):
@@ -214,19 +216,29 @@ class MEXCExecutor:
 
         try:
             headers = _make_headers(self._api_key, self._secret, body)
-            async with aiohttp.ClientSession() as s:
+            url = f"{_BASE_URL}/api/v1/private/order/submit"
+            logger.info("[mexc] POST {} timeout=10s", url)
+
+            data = None
+            connector = aiohttp.TCPConnector(family=2)  # AF_INET = IPv4 only
+            async with aiohttp.ClientSession(connector=connector) as s:
                 async with s.post(
-                    f"{_BASE_URL}/api/v1/private/order/submit",
-                    headers=headers, data=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    url, headers=headers, data=body,
+                    timeout=aiohttp.ClientTimeout(total=10, connect=5),
                 ) as r:
                     raw_text = await r.text()
-                    logger.info("[mexc] HTTP {} response: {}", r.status, raw_text[:500])
+                    http_status = r.status
+                    logger.info("[mexc] HTTP {} response: {}", http_status, raw_text[:500])
                     try:
                         data = json.loads(raw_text)
                     except Exception:
-                        logger.error("[mexc] ABORT: response no es JSON: {}", raw_text[:300])
+                        logger.error("[mexc] ABORT: response no es JSON (HTTP {}): {}",
+                                     http_status, raw_text[:300])
                         return None
+
+            if data is None:
+                logger.error("[mexc] ABORT: data es None después de request")
+                return None
 
             if data.get("success"):
                 order_id = data.get("data", "")
@@ -249,13 +261,19 @@ class MEXCExecutor:
                 return {"orderId": order_id, "pair": pair, "symbol": symbol}
             else:
                 logger.error(
-                    "[mexc] ORDER REJECTED by API: symbol={} success={} code={} "
-                    "message='{}' full_response={}",
+                    "[mexc] ORDER REJECTED: symbol={} success={} code={} "
+                    "message='{}' full={}",
                     symbol, data.get("success"), data.get("code"),
                     data.get("message", data.get("msg", "")),
                     str(data)[:400],
                 )
                 return None
+        except asyncio.TimeoutError:
+            logger.error("[mexc] ORDER TIMEOUT: no response from MEXC in 10s (symbol={})", symbol)
+            return None
+        except aiohttp.ClientError as exc:
+            logger.error("[mexc] ORDER NETWORK ERROR: {!r} type={}", exc, type(exc).__name__)
+            return None
         except Exception as exc:
             logger.error("[mexc] ORDER EXCEPTION: {!r} type={}", exc, type(exc).__name__)
             return None

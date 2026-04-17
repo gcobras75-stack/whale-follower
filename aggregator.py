@@ -33,6 +33,7 @@ def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     _FORCE_IPV4_HOSTS = (
         "ws.okx.com", "stream.bybit.com", "ws.kraken.com",
         "aws.okx.com", "wsaws.okx.com",
+        "contract.mexc.com", "www.mexc.com",
     )
     if isinstance(host, str) and any(h in host for h in _FORCE_IPV4_HOSTS):
         family = socket.AF_INET
