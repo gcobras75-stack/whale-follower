@@ -238,7 +238,8 @@ async def trading_loop() -> None:
         try:
             from okx_executor import OKXExecutor
             _okx_wyckoff = OKXExecutor()
-            logger.info("[main] OKX executor disponible como fallback para Wyckoff")
+            logger.info("[main] OKX executor disponible (enabled={}) como exchange principal",
+                        _okx_wyckoff.enabled)
         except Exception as exc:
             logger.warning("[main] OKX executor no disponible: {}", exc)
 

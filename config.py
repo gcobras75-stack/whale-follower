@@ -46,7 +46,7 @@ SPRING_PARAMS: dict = {
         "drop_pct":    0.0030,   # 0.30% — original, mercado en movimiento
         "bounce_pct":  0.0020,   # 0.20%
         "vol_mult":    1.50,
-        "score_min":   65,
+        "score_min":   50,       # bajado de 65 → 50 para destrabar trades
         "sl_pct":      0.005,    # 0.5% SL
         "tp_pct":      0.015,    # 1.5% TP — ratio 1:3 (tendencia llega al TP lejano)
     },
@@ -62,7 +62,7 @@ SPRING_PARAMS: dict = {
         "drop_pct":    0.0013,   # 0.130% (observado ~0.133-0.187%)
         "bounce_pct":  0.0009,   # 0.090% (observado ~0.094-0.109%)
         "vol_mult":    1.10,     # 1.10x  (observado ~1.12-1.35x)
-        "score_min":   55,
+        "score_min":   40,       # bajado de 55 → 40 para destrabar primer trade real
         "sl_pct":      0.005,    # 0.5% SL
         "tp_pct":      0.010,    # 1.0% TP — ratio 1:2 (backtest 30d: WR 34.5%, PnL +$1.94)
     },
