@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 MEMPOOL_API_BASE = "https://mempool.space/api"
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 30
 CACHE_TTL_SECONDS = 60
 
 logger = logging.getLogger("mempool_thermometer")

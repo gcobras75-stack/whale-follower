@@ -882,12 +882,14 @@ async def _cmd_stats() -> None:
     t = _thermometers
     # Actualizar mempool en tiempo real (los otros 3 se actualizan via run() async)
     try:
-        from mempool_thermometer import MempoolThermometer
-        if not hasattr(_cmd_stats, "_mempool"):
-            _cmd_stats._mempool = MempoolThermometer()
-        _mp_data = _cmd_stats._mempool.get_full_analysis()
-        t["mempool_score"]  = _mp_data["mempool_score"]
-        t["mempool_signal"] = _mp_data["signal"]
+        import config as _cfg
+        if _cfg.MEMPOOL_ENABLED:
+            from mempool_thermometer import MempoolThermometer
+            if not hasattr(_cmd_stats, "_mempool"):
+                _cmd_stats._mempool = MempoolThermometer()
+            _mp_data = _cmd_stats._mempool.get_full_analysis()
+            t["mempool_score"]  = _mp_data["mempool_score"]
+            t["mempool_signal"] = _mp_data["signal"]
     except Exception:
         pass
     dom_line = f"{t['btc_dom_pct']:.1f}% ({t['btc_dom_signal']})"

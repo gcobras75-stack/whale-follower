@@ -216,7 +216,7 @@ async def trading_loop() -> None:
     btc_dom    = btc_dom_mod.BtcDominanceMonitor()       if btc_dom_mod   else None
     liq_glob   = liq_glob_mod.LiquidationsGlobal()       if liq_glob_mod  else None
     dxy_mon    = dxy_mod.DxyMonitor()                    if dxy_mod       else None
-    mempool_th = mempool_mod.MempoolThermometer()         if mempool_mod   else None
+    mempool_th = mempool_mod.MempoolThermometer()         if mempool_mod and config.MEMPOOL_ENABLED else None
     daily_rep     = daily_rep_mod.DailyReporter()              if daily_rep_mod   else None
     rebalancer    = rebalancer_mod.CapitalRebalancer()          if rebalancer_mod  else None
     session_vol   = session_vol_mod.SessionVolumeTracker()      if session_vol_mod else None

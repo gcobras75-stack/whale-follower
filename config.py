@@ -150,6 +150,7 @@ BITSO_SECRET:  str = os.getenv("BITSO_SECRET",  "")   # vacio = solo lectura
 NEWS_API_KEY:       str   = os.getenv("NEWS_API_KEY",        "")
 WHALE_ALERT_KEY:    str   = os.getenv("WHALE_ALERT_KEY",     "")
 ML_BLOCK_THRESHOLD: float = float(os.getenv("ML_BLOCK_THRESHOLD", "0.65"))
+MEMPOOL_ENABLED:    bool  = os.getenv("MEMPOOL_ENABLED", "true").lower() == "true"
 
 # ── Reconnection back-off ─────────────────────────────────────────────────────
 BACKOFF_BASE: float = 1.0
