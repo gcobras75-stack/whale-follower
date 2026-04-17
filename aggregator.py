@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -18,6 +19,27 @@ import websockets
 from loguru import logger
 
 import config
+
+
+# ── Force IPv4 for all WebSocket connections ─────────────────────────────────
+# Contabo VPS has IPv6 (2407:...) as primary. Many exchanges (OKX, Bybit)
+# don't support IPv6 well — connections silently fail with empty errors.
+# Force AF_INET (IPv4) at the socket level.
+
+_orig_getaddrinfo = socket.getaddrinfo
+
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Override getaddrinfo to force IPv4 for exchange WebSocket hosts."""
+    _FORCE_IPV4_HOSTS = (
+        "ws.okx.com", "stream.bybit.com", "ws.kraken.com",
+        "aws.okx.com", "wsaws.okx.com",
+    )
+    if isinstance(host, str) and any(h in host for h in _FORCE_IPV4_HOSTS):
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+socket.getaddrinfo = _ipv4_getaddrinfo
+logger.info("[aggregator] IPv4 forzado para exchanges WebSocket")
 
 # ── Normalized trade object ───────────────────────────────────────────────────
 
@@ -221,7 +243,10 @@ class Aggregator:
             "method": "subscribe",
             "params": {"channel": "trade", "symbol": symbols},
         })
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+        async with websockets.connect(
+            url, ping_interval=20, ping_timeout=30,
+            close_timeout=10, max_size=2**22,
+        ) as ws:
             await ws.send(sub_msg)
             logger.success(f"[kraken] Connected ({len(symbols)} pairs).")
             async for raw in ws:
@@ -251,7 +276,10 @@ class Aggregator:
     async def _bybit_handler(self) -> None:
         url = "wss://stream.bybit.com/v5/public/linear"
         args = [f"publicTrade.{p}" for p in config.TRADING_PAIRS]
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+        async with websockets.connect(
+            url, ping_interval=20, ping_timeout=30,
+            close_timeout=10, max_size=2**22,
+        ) as ws:
             await ws.send(json.dumps({"op": "subscribe", "args": args}))
             logger.success(f"[bybit] Connected ({len(args)} pairs).")
             async for raw in ws:
@@ -326,7 +354,10 @@ class Aggregator:
     async def _bybit_ethbtc_handler(self) -> None:
         url = "wss://stream.bybit.com/v5/public/spot"
         sub = json.dumps({"op": "subscribe", "args": ["publicTrade.ETHBTC"]})
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+        async with websockets.connect(
+            url, ping_interval=20, ping_timeout=30,
+            close_timeout=10, max_size=2**22,
+        ) as ws:
             await ws.send(sub)
             logger.success("[bybit_ethbtc] Connected (ETHBTC spot).")
             async for raw in ws:
