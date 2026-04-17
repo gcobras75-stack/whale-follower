@@ -66,6 +66,15 @@ _WYCKOFF_RESERVE    = 5.0    # buffer mínimo (availBal ya descuenta posiciones)
 _MAX_ORDER_FRACTION = 0.50   # máximo 50% del disponible por trade
 _MIN_MARGIN_FREE    = 8.0    # necesitamos al menos $8 para operar
 
+# Timeouts por tipo de operación
+_TIMEOUT_ORDER   = aiohttp.ClientTimeout(total=15, connect=5)
+_TIMEOUT_QUERY   = aiohttp.ClientTimeout(total=10, connect=5)
+
+def _session() -> aiohttp.ClientSession:
+    """Create aiohttp session with IPv4-only connector (Contabo IPv6 breaks OKX)."""
+    connector = aiohttp.TCPConnector(family=2)  # AF_INET = IPv4
+    return aiohttp.ClientSession(connector=connector)
+
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
 
@@ -165,13 +174,13 @@ class OKXExecutor:
             trading_bal = 0.0
             funding_bal = 0.0
 
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 # 1. Trading account
                 path_t = "/api/v5/account/balance?ccy=USDT"
                 resp_t = await session.get(
                     _BASE_URL + path_t,
                     headers=_auth_headers("GET", path_t),
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data_t = await resp_t.json()
                 if data_t.get("code") == "0":
@@ -182,7 +191,7 @@ class OKXExecutor:
                 resp_f = await session.get(
                     _BASE_URL + path_f,
                     headers=_auth_headers("GET", path_f),
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data_f = await resp_f.json()
                 if data_f.get("code") == "0":
@@ -212,11 +221,11 @@ class OKXExecutor:
             return 0.0
 
         async def _get_raw(path: str) -> dict:
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 resp = await session.get(
                     _BASE_URL + path,
                     headers=_auth_headers("GET", path),
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 http_status = resp.status
                 data = await resp.json()
@@ -312,14 +321,14 @@ class OKXExecutor:
         total_usd = 0.0
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
 
                 # 1. Obtener todos los coins en cuenta trading
                 path_bal = "/api/v5/account/balance"
                 resp_bal = await session.get(
                     _BASE_URL + path_bal,
                     headers=_auth_headers("GET", path_bal),
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data_bal = await resp_bal.json()
 
@@ -357,7 +366,7 @@ class OKXExecutor:
                     try:
                         resp_tk = await session.get(
                             _BASE_URL + path_tk,
-                            timeout=aiohttp.ClientTimeout(total=5),
+                            timeout=_TIMEOUT_QUERY,
                         )
                         data_tk = await resp_tk.json()
                         if data_tk.get("code") == "0" and data_tk.get("data"):
@@ -404,12 +413,12 @@ class OKXExecutor:
                 "mgnMode": "isolated",
             }
             body = json.dumps(body_dict)
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 resp = await session.post(
                     _BASE_URL + path,
                     headers=_auth_headers("POST", path, body),
                     data=body,
-                    timeout=aiohttp.ClientTimeout(total=8),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data = await resp.json()
             if data.get("code") == "0":
@@ -428,11 +437,11 @@ class OKXExecutor:
             return self._acct_level in self._SWAP_OK_MODES
         try:
             path = "/api/v5/account/config"
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 resp = await session.get(
                     _BASE_URL + path,
                     headers=_auth_headers("GET", path),
-                    timeout=aiohttp.ClientTimeout(total=8),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data = await resp.json()
             self._acct_checked = True
@@ -614,12 +623,12 @@ class OKXExecutor:
             # Asegurar leverage 1x antes de la primera orden
             await self._ensure_leverage(inst_id)
 
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 resp = await session.post(
                     _BASE_URL + path,
                     headers=_auth_headers("POST", path, body),
                     data=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_ORDER,
                 )
                 data = await resp.json()
 
@@ -665,8 +674,38 @@ class OKXExecutor:
                 "ts":           time.time(),
             }
 
+        except asyncio.TimeoutError:
+            # Timeout no significa que la orden falló — OKX pudo ejecutarla
+            logger.warning(
+                "[okx_exec] SWAP ORDER TIMEOUT {} (15s) — verificando si se ejecutó...",
+                inst_id,
+            )
+            try:
+                await asyncio.sleep(2)
+                positions = await self.get_positions()
+                for p in positions:
+                    if p["instId"] == inst_id and abs(p["pos"]) > 0:
+                        logger.info(
+                            "[okx_exec] TIMEOUT RECOVERY: orden SÍ se ejecutó — "
+                            "{} pos={} margin=${:.2f}",
+                            inst_id, p["pos"], p["margin"],
+                        )
+                        return {
+                            "order_id":     "timeout_recovered",
+                            "pair":         pair,
+                            "inst_id":      inst_id,
+                            "side":         _side,
+                            "notional_usd": round(size_usd, 2),
+                            "price_hint":   price_hint,
+                            "ts":           time.time(),
+                        }
+                logger.error("[okx_exec] TIMEOUT CONFIRMED: no hay posición {} — orden no ejecutada",
+                             inst_id)
+            except Exception as verify_exc:
+                logger.error("[okx_exec] TIMEOUT + verification error: {!r}", verify_exc)
+            return None
         except Exception as exc:
-            logger.error("[okx_exec] market_order exception: {}", exc)
+            logger.error("[okx_exec] market_order exception: {!r} type={}", exc, type(exc).__name__)
             return None
 
     # ── Close position ──────────────────────────────────────────────────────
@@ -711,12 +750,12 @@ class OKXExecutor:
                 pair, actual_qty, actual_usd,
             )
             try:
-                async with aiohttp.ClientSession() as session:
+                async with _session() as session:
                     resp = await session.post(
                         _BASE_URL + path,
                         headers=_auth_headers("POST", path, body),
                         data=body,
-                        timeout=aiohttp.ClientTimeout(total=10),
+                        timeout=_TIMEOUT_QUERY,
                     )
                     data = await resp.json()
                 if data.get("code") != "0":
@@ -758,11 +797,11 @@ class OKXExecutor:
 
         path = f"/api/v5/trade/order?ordId={order_id}&instId={inst_id}"
         try:
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 resp = await session.get(
                     _BASE_URL + path,
                     headers=_auth_headers("GET", path),
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data = await resp.json()
 
@@ -783,11 +822,11 @@ class OKXExecutor:
             return []
         path = "/api/v5/account/positions?instType=SWAP"
         try:
-            async with aiohttp.ClientSession() as session:
+            async with _session() as session:
                 resp = await session.get(
                     _BASE_URL + path,
                     headers=_auth_headers("GET", path),
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_TIMEOUT_QUERY,
                 )
                 data = await resp.json()
             if data.get("code") != "0":
@@ -835,12 +874,12 @@ class OKXExecutor:
             body = json.dumps(body_dict)
 
             try:
-                async with aiohttp.ClientSession() as session:
+                async with _session() as session:
                     resp = await session.post(
                         _BASE_URL + path,
                         headers=_auth_headers("POST", path, body),
                         data=body,
-                        timeout=aiohttp.ClientTimeout(total=10),
+                        timeout=_TIMEOUT_QUERY,
                     )
                     data = await resp.json()
                 if data.get("code") == "0":
