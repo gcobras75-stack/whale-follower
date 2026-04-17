@@ -476,6 +476,21 @@ async def trading_loop() -> None:
     except Exception as exc:
         logger.warning("[main] AutoHealer no disponible: {}", exc)
 
+    # ── OKX Position Monitor (TP/SL cada 30s) ────────────────────────────────
+    _pos_monitor = None
+    if _okx_wyckoff and _okx_wyckoff.enabled:
+        try:
+            from position_monitor import PositionMonitor
+            _pos_monitor = PositionMonitor(
+                okx_executor=_okx_wyckoff,
+                price_getter=lambda: _latest_prices,
+                telegram_fn=alerts.send_system_message,
+            )
+            asyncio.create_task(_pos_monitor.run(), name="position_monitor")
+            logger.info("[main] OKX PositionMonitor activo (TP/SL check cada 30s)")
+        except Exception as exc:
+            logger.warning("[main] PositionMonitor no disponible: {}", exc)
+
     # ── Banner ────────────────────────────────────────────────────────────────
     active_layers = sum([
         cvd_combined is not None, liq_map is not None,
@@ -1101,6 +1116,18 @@ async def trading_loop() -> None:
                         _rr     = config.RISK_REWARD
                         _sl = exec_price * (1.0 - _sl_pct)
                         _tp = exec_price * (1.0 + _sl_pct * _rr)
+                    # Register for TP/SL monitoring
+                    try:
+                        from position_monitor import register_position
+                        _inst = okx_result.get("inst_id", "")
+                        if _inst:
+                            register_position(
+                                _inst, exec_pair, exec_price,
+                                tp=_tp, sl=_sl, side="buy",
+                                size_usd=final_size,
+                            )
+                    except Exception as _reg_exc:
+                        logger.warning("[main] register_position failed: {}", _reg_exc)
                     asyncio.create_task(alerts.send_trade_alert("wyckoff", {
                         "pair":     exec_pair,
                         "score":    new_score,

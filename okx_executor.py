@@ -727,7 +727,7 @@ class OKXExecutor:
 
         if actual_qty > 0 and price_hint > 0:
             actual_usd = actual_qty * price_hint
-            if actual_usd < _MIN_SPOT_USD:
+            if actual_usd < 1.0:  # minimum OKX order ~$1
                 logger.debug(
                     "[okx_exec] close_position {}: balance ${:.4f} < mínimo OKX, skip",
                     pair, actual_usd,
