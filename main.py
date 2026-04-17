@@ -978,7 +978,7 @@ async def trading_loop() -> None:
                                 size_usd=final_size, price_hint=exec_price),
                             timeout=10.0)
                     except Exception as exc:
-                        logger.warning("[main] OKX {} error: {}", exec_pair, exc)
+                        logger.warning("[main] OKX {} error: {!r} type={}", exec_pair, exc, type(exc).__name__)
 
                     # Si falló → buscar par alternativo más barato
                     if not okx_result:
@@ -1004,7 +1004,7 @@ async def trading_loop() -> None:
                                         size_usd=final_size, price_hint=exec_price),
                                     timeout=10.0)
                             except Exception as exc:
-                                logger.error("[main] OKX alt {} error: {}", alt, exc)
+                                logger.error("[main] OKX alt {} error: {!r} type={}", alt, exc, type(exc).__name__)
                 else:
                     logger.warning(
                         "[main] OKX sin USDT suficiente (${:.0f}) — intentando MEXC",
@@ -1034,7 +1034,8 @@ async def trading_loop() -> None:
 
             # ── 2. Fallback MEXC si OKX no operó ─────────────────────────
             if not _traded and _mexc_wyckoff and _mexc_wyckoff.enabled and final_size >= 1.0:
-                logger.info("[main] OKX no operó — intentando MEXC")
+                logger.info("[main] OKX no operó — intentando MEXC {} ${:.0f} price={:.2f}",
+                            alloc.pair, final_size, alloc.entry_price)
                 mexc_pair  = alloc.pair
                 mexc_price = alloc.entry_price
                 mexc_result = None
@@ -1046,15 +1047,19 @@ async def trading_loop() -> None:
                         timeout=10.0)
                 except Exception as exc:
                     mexc_result = None
-                    logger.warning("[main] MEXC {} error: {}", mexc_pair, exc)
+                    logger.warning("[main] MEXC {} exception: {!r} type={}",
+                                   mexc_pair, exc, type(exc).__name__)
 
-                # Si falló, buscar par alternativo en MEXC
                 if not mexc_result:
+                    logger.warning("[main] MEXC {} retornó None — buscando par alternativo",
+                                   mexc_pair)
                     alt = _mexc_wyckoff.find_affordable_pair(
                         10.0, _latest_prices, original_pair=mexc_pair)
                     if alt and alt in _latest_prices:
                         mexc_pair  = alt
                         mexc_price = _latest_prices[alt]
+                        logger.info("[main] MEXC par alternativo: {} price={:.2f}",
+                                    alt, mexc_price)
                         try:
                             mexc_result = await asyncio.wait_for(
                                 _mexc_wyckoff.market_order(
@@ -1062,7 +1067,10 @@ async def trading_loop() -> None:
                                     size_usd=final_size, price_hint=mexc_price),
                                 timeout=10.0)
                         except Exception as exc:
-                            logger.error("[main] MEXC alt {} error: {}", alt, exc)
+                            logger.error("[main] MEXC alt {} exception: {!r} type={}",
+                                         alt, exc, type(exc).__name__)
+                    else:
+                        logger.warning("[main] MEXC no encontró par alternativo asequible")
 
                 if mexc_result:
                     _traded = True
