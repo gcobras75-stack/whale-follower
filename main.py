@@ -579,15 +579,16 @@ async def trading_loop() -> None:
             meta_agt.on_price(trade.pair, trade.price, trade.quantity)
 
 
-        # 2b. Capital gate warning (cada 10 min si Bybit bajo)
+        # 2b. Capital gate warning (cada 10 min si OKX+MEXC bajo)
         _now_cg = time.time()
         if rebalancer and (_now_cg - _last_capital_warn_ts) >= _CAPITAL_WARN_INTERVAL:
-            _bybit_bal_cg = rebalancer.snapshot().bybit_usdt
-            if 0 < _bybit_bal_cg < _BYBIT_MIN_FOR_STRATEGIES:
+            _snap_cg = rebalancer.snapshot()
+            _okx_bal_cg = getattr(_snap_cg, "okx_usdt", 0.0)
+            if 0 < _okx_bal_cg < _BYBIT_MIN_FOR_STRATEGIES:
                 logger.warning(
-                    "[capital] Bybit=${:.2f} — Wyckoff/MeanRev/OFI "
-                    "esperando capital. Usa /rebalance en Telegram.",
-                    _bybit_bal_cg,
+                    "[capital] OKX=${:.2f} — capital bajo para Wyckoff/MeanRev. "
+                    "MEXC como fallback.",
+                    _okx_bal_cg,
                 )
                 _last_capital_warn_ts = _now_cg
 
@@ -949,45 +950,25 @@ async def trading_loop() -> None:
             final_size = max(config.MIN_TRADE_SIZE_USD, final_size)
             final_size = min(config.MAX_TRADE_SIZE_USD, final_size)
 
-            # Bybit: solo intentar si está habilitado (deshabilitado por CloudFront 403)
+            # OKX principal + MEXC fallback (Bybit deshabilitado)
             paper = None
-            if config.BYBIT_ENABLED:
-                paper = await executor.open_trade(
-                    signal_score     = alloc.signal_score,
-                    entry_price      = alloc.entry_price,
-                    stop_loss        = alloc.stop_loss,
-                    take_profit      = alloc.take_profit,
-                    signal_id        = signal_id,
-                    pair             = alloc.pair,
-                    size_usd         = final_size,
-                    signal_features  = features if ml_model else None,
-                )
-                if paper:
-                    logger.info(
-                        f"[main] Trade Bybit {alloc.pair} ${paper.size_usd:.0f} "
-                        f"entry={paper.entry_price:.2f} sl={paper.stop_loss:.2f}"
-                    )
+            _traded = False
 
-            if not paper and _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
-                # Fallback a OKX — verificar balance + par alternativo si contrato es caro
+            # ── 1. Intentar OKX ──────────────────────────────────────────
+            okx_result = None
+            if _okx_wyckoff and _okx_wyckoff.enabled and final_size >= 1.0:
                 try:
                     _okx_bal = await asyncio.wait_for(
                         _okx_wyckoff.get_balance(), timeout=5.0)
                 except Exception:
                     _okx_bal = 0.0
 
-                if _okx_bal < 20:
-                    logger.warning(
-                        "[main] OKX sin USDT suficiente (${:.0f}) — Wyckoff cancelado",
-                        _okx_bal)
-                else:
-                    # Intentar par original primero; si contrato muy caro → buscar alternativo
-                    exec_pair  = alloc.pair
-                    exec_price = alloc.entry_price
-                    okx_result = None
+                exec_pair  = alloc.pair
+                exec_price = alloc.entry_price
 
+                if _okx_bal >= 20:
                     logger.info(
-                        "[main] Bybit rechazó {} ${:.2f} — OKX fallback (bal=${:.0f})",
+                        "[main] OKX ejecutando {} ${:.2f} (bal=${:.0f})",
                         exec_pair, final_size, _okx_bal)
                     try:
                         okx_result = await asyncio.wait_for(
@@ -1000,7 +981,6 @@ async def trading_loop() -> None:
 
                     # Si falló → buscar par alternativo más barato
                     if not okx_result:
-                        # Usar el size REAL post-sizing, no el original
                         effective = _okx_wyckoff.effective_size(final_size)
                         logger.info(
                             "[main] OKX {} falló — buscando alternativo "
@@ -1014,7 +994,7 @@ async def trading_loop() -> None:
                             exec_pair  = alt
                             exec_price = _latest_prices[alt]
                             logger.info(
-                                "[main] Par alternativo: {} (contrato cabe en ${:.0f})",
+                                "[main] Par alternativo OKX: {} (contrato cabe en ${:.0f})",
                                 alt, final_size)
                             try:
                                 okx_result = await asyncio.wait_for(
@@ -1024,91 +1004,89 @@ async def trading_loop() -> None:
                                     timeout=10.0)
                             except Exception as exc:
                                 logger.error("[main] OKX alt {} error: {}", alt, exc)
-                        else:
-                            logger.warning(
-                                "[main] OKX find_affordable_pair retornó None — "
-                                "ningún par cabe en ${:.0f}", final_size)
+                else:
+                    logger.warning(
+                        "[main] OKX sin USDT suficiente (${:.0f}) — intentando MEXC",
+                        _okx_bal)
 
-                    if okx_result:
-                        logger.info(
-                            "[main] Trade OKX {} ${:.2f} OK orderId={}",
-                            exec_pair, final_size,
-                            okx_result.get("orderId", "?"))
-                        # Recalcular SL/TP si el par cambio (fallback a alternativo)
-                        _sl = alloc.stop_loss
-                        _tp = alloc.take_profit
-                        if exec_pair != alloc.pair:
-                            _sl_pct = config.STOP_LOSS_PCT
-                            _rr     = config.RISK_REWARD
-                            _sl = exec_price * (1.0 - _sl_pct)
-                            _tp = exec_price * (1.0 + _sl_pct * _rr)
-                        asyncio.create_task(alerts.send_trade_alert("wyckoff", {
-                            "pair":     exec_pair,
-                            "score":    new_score,
-                            "entry":    exec_price,
-                            "sl":       _sl,
-                            "tp":       _tp,
-                            "size_usd": final_size,
-                        }))
-                    elif _mexc_wyckoff and _mexc_wyckoff.enabled:
-                        # Tercer fallback: MEXC
-                        logger.info("[main] OKX agotado — intentando MEXC")
-                        mexc_pair  = alloc.pair
-                        mexc_price = alloc.entry_price
+                if okx_result:
+                    _traded = True
+                    logger.info(
+                        "[main] Trade OKX {} ${:.2f} OK orderId={}",
+                        exec_pair, final_size,
+                        okx_result.get("orderId", "?"))
+                    _sl = alloc.stop_loss
+                    _tp = alloc.take_profit
+                    if exec_pair != alloc.pair:
+                        _sl_pct = config.STOP_LOSS_PCT
+                        _rr     = config.RISK_REWARD
+                        _sl = exec_price * (1.0 - _sl_pct)
+                        _tp = exec_price * (1.0 + _sl_pct * _rr)
+                    asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                        "pair":     exec_pair,
+                        "score":    new_score,
+                        "entry":    exec_price,
+                        "sl":       _sl,
+                        "tp":       _tp,
+                        "size_usd": final_size,
+                    }))
+
+            # ── 2. Fallback MEXC si OKX no operó ─────────────────────────
+            if not _traded and _mexc_wyckoff and _mexc_wyckoff.enabled and final_size >= 1.0:
+                logger.info("[main] OKX no operó — intentando MEXC")
+                mexc_pair  = alloc.pair
+                mexc_price = alloc.entry_price
+                mexc_result = None
+                try:
+                    mexc_result = await asyncio.wait_for(
+                        _mexc_wyckoff.market_order(
+                            pair=mexc_pair, side="buy",
+                            size_usd=final_size, price_hint=mexc_price),
+                        timeout=10.0)
+                except Exception as exc:
+                    mexc_result = None
+                    logger.warning("[main] MEXC {} error: {}", mexc_pair, exc)
+
+                # Si falló, buscar par alternativo en MEXC
+                if not mexc_result:
+                    alt = _mexc_wyckoff.find_affordable_pair(
+                        10.0, _latest_prices, original_pair=mexc_pair)
+                    if alt and alt in _latest_prices:
+                        mexc_pair  = alt
+                        mexc_price = _latest_prices[alt]
                         try:
                             mexc_result = await asyncio.wait_for(
                                 _mexc_wyckoff.market_order(
-                                    pair=mexc_pair, side="buy",
+                                    pair=alt, side="buy",
                                     size_usd=final_size, price_hint=mexc_price),
                                 timeout=10.0)
                         except Exception as exc:
-                            mexc_result = None
-                            logger.warning("[main] MEXC {} error: {}", mexc_pair, exc)
+                            logger.error("[main] MEXC alt {} error: {}", alt, exc)
 
-                        # Si falló, buscar par alternativo en MEXC
-                        if not mexc_result:
-                            alt = _mexc_wyckoff.find_affordable_pair(
-                                10.0, _latest_prices, original_pair=mexc_pair)
-                            if alt and alt in _latest_prices:
-                                mexc_pair  = alt
-                                mexc_price = _latest_prices[alt]
-                                try:
-                                    mexc_result = await asyncio.wait_for(
-                                        _mexc_wyckoff.market_order(
-                                            pair=alt, side="buy",
-                                            size_usd=final_size, price_hint=mexc_price),
-                                        timeout=10.0)
-                                except Exception as exc:
-                                    logger.error("[main] MEXC alt {} error: {}", alt, exc)
+                if mexc_result:
+                    _traded = True
+                    logger.info("[main] Trade MEXC {} ${:.2f} OK orderId={}",
+                                mexc_pair, final_size,
+                                mexc_result.get("orderId", "?"))
+                    _sl_m = alloc.stop_loss
+                    _tp_m = alloc.take_profit
+                    if mexc_pair != alloc.pair:
+                        _sl_pct = config.STOP_LOSS_PCT
+                        _rr     = config.RISK_REWARD
+                        _sl_m = mexc_price * (1.0 - _sl_pct)
+                        _tp_m = mexc_price * (1.0 + _sl_pct * _rr)
+                    asyncio.create_task(alerts.send_trade_alert("wyckoff", {
+                        "pair":     mexc_pair,
+                        "score":    new_score,
+                        "entry":    mexc_price,
+                        "sl":       _sl_m,
+                        "tp":       _tp_m,
+                        "size_usd": final_size,
+                    }))
 
-                        if mexc_result:
-                            logger.info("[main] Trade MEXC {} ${:.2f} OK orderId={}",
-                                        mexc_pair, final_size,
-                                        mexc_result.get("orderId", "?"))
-                            # Recalcular SL/TP si el par cambio
-                            _sl_m = alloc.stop_loss
-                            _tp_m = alloc.take_profit
-                            if mexc_pair != alloc.pair:
-                                _sl_pct = config.STOP_LOSS_PCT
-                                _rr     = config.RISK_REWARD
-                                _sl_m = mexc_price * (1.0 - _sl_pct)
-                                _tp_m = mexc_price * (1.0 + _sl_pct * _rr)
-                            asyncio.create_task(alerts.send_trade_alert("wyckoff", {
-                                "pair":     mexc_pair,
-                                "score":    new_score,
-                                "entry":    mexc_price,
-                                "sl":       _sl_m,
-                                "tp":       _tp_m,
-                                "size_usd": final_size,
-                            }))
-                        else:
-                            logger.error(
-                                "[main] Todos los exchanges agotados para ${:.0f}",
-                                final_size)
-                    else:
-                        logger.error(
-                            "[main] OKX fallback agotado, MEXC no disponible — ${:.0f}",
-                            final_size)
+            if not _traded:
+                logger.error(
+                    "[main] OKX+MEXC agotados para ${:.0f}", final_size)
 
         if dashboard:
             dashboard.record_signal(new_score, operated=bool(allocation.trades), blocked_by_ml=False)
