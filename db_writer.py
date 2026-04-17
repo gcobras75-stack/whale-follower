@@ -35,20 +35,20 @@ def _client():
     key = os.environ.get("SUPABASE_KEY", "")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set")
-    return create_client(url, key, options=ClientOptions(postgrest_client_timeout=30))
+    return create_client(url, key, options=ClientOptions(postgrest_client_timeout=5))
 
 async def _run(fn) -> Optional[Any]:
     """Run a blocking supabase call in a thread pool with retry."""
     loop = asyncio.get_event_loop()
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             return await loop.run_in_executor(None, fn)
         except Exception as exc:
-            if attempt < 2:
-                logger.warning("[db_writer] Supabase error (attempt {}/3), retrying: {}", attempt + 1, exc)
-                await asyncio.sleep(1 * (attempt + 1))
+            if attempt < 1:
+                logger.warning("[db_writer] Supabase error (attempt {}/2), retrying: {}", attempt + 1, exc)
+                await asyncio.sleep(1)
             else:
-                logger.error("[db_writer] Supabase failed after 3 attempts: {}", exc)
+                logger.error("[db_writer] Supabase failed after 2 attempts: {}", exc)
                 return None
 
 

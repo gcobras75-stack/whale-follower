@@ -380,9 +380,16 @@ async def trading_loop() -> None:
     try:
         from threshold_optimizer import get_optimizer
         thr_optimizer = get_optimizer()
-        await thr_optimizer.load_from_supabase()
+        # No bloquear arranque — cargar thresholds en background
+        async def _load_thresholds():
+            try:
+                await thr_optimizer.load_from_supabase()
+                logger.info("[main] ThresholdOptimizer: thresholds cargados de Supabase")
+            except Exception as exc:
+                logger.warning("[main] ThresholdOptimizer: Supabase no disponible, usando defaults: {}", exc)
+        asyncio.create_task(_load_thresholds())
         asyncio.create_task(thr_optimizer.run_loop())
-        logger.info("[main] ThresholdOptimizer activo (ajuste cada 6h)")
+        logger.info("[main] ThresholdOptimizer activo (carga Supabase en background)")
     except Exception as exc:
         thr_optimizer = None
         logger.warning("[main] ThresholdOptimizer no disponible: {}", exc)
