@@ -109,9 +109,9 @@ class MEXCExecutor:
                         self._last_balance = bal
                         logger.info("[mexc] Balance USDT=${:.2f}", bal)
                         return bal
-            logger.warning("[mexc] Balance response: {}", data.get("code"))
+            logger.warning("[mexc] Balance response: code={} data={}", data.get("code"), str(data)[:200])
         except Exception as exc:
-            logger.warning("[mexc] get_balance error: {}", exc)
+            logger.warning("[mexc] get_balance error: {!r} type={}", exc, type(exc).__name__)
         return self._last_balance
 
     # ── Leverage ─────────────────────────────────────────────────────────────
@@ -138,9 +138,9 @@ class MEXCExecutor:
                 self._leverage_set.add(symbol)
                 logger.info("[mexc] Leverage 1x configurado para {}", symbol)
             else:
-                logger.warning("[mexc] set_leverage {} error: {}", symbol, data)
+                logger.warning("[mexc] set_leverage {} error: {}", symbol, str(data)[:200])
         except Exception as exc:
-            logger.warning("[mexc] _ensure_leverage error: {}", exc)
+            logger.warning("[mexc] _ensure_leverage error: {!r}", exc)
 
     # ── Market order ─────────────────────────────────────────────────────────
 
@@ -190,25 +190,33 @@ class MEXCExecutor:
 
         # MEXC futures order: side 1=open_long, 2=close_short, 3=open_short, 4=close_long
         side_code = 1 if side.lower() == "buy" else 3
-        body = json.dumps({
+        order_params = {
             "symbol":    symbol,
-            "price":     str(round(price_hint, 2)),
-            "vol":       str(n_contracts),
+            "vol":       n_contracts,
             "side":      side_code,
             "type":      5,          # 5 = market order
             "openType":  1,          # 1 = isolated
             "leverage":  1,
-        })
+        }
+        body = json.dumps(order_params)
+        logger.info("[mexc] Order params: {}", order_params)
 
         try:
             headers = _make_headers(self._api_key, self._secret, body)
+            logger.debug("[mexc] POST /order/submit body={}", body)
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     f"{_BASE_URL}/api/v1/private/order/submit",
                     headers=headers, data=body,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
-                    data = await r.json()
+                    raw_text = await r.text()
+                    logger.info("[mexc] Response HTTP={} body={}", r.status, raw_text[:500])
+                    try:
+                        data = json.loads(raw_text)
+                    except Exception:
+                        logger.error("[mexc] Response no es JSON: {}", raw_text[:300])
+                        return None
 
             if data.get("success"):
                 order_id = data.get("data", "")
@@ -230,11 +238,15 @@ class MEXCExecutor:
 
                 return {"orderId": order_id, "pair": pair, "symbol": symbol}
             else:
-                logger.error("[mexc] ORDER FAILED {}: code={} msg={}",
-                             symbol, data.get("code"), data.get("message", data.get("msg")))
+                logger.error(
+                    "[mexc] ORDER FAILED {}: success={} code={} msg={} full={}",
+                    symbol, data.get("success"), data.get("code"),
+                    data.get("message", data.get("msg", "?")),
+                    str(data)[:300],
+                )
                 return None
         except Exception as exc:
-            logger.error("[mexc] market_order error: {}", exc)
+            logger.error("[mexc] market_order exception: {!r} type={}", exc, type(exc).__name__)
             return None
 
     # ── Par alternativo ──────────────────────────────────────────────────────
