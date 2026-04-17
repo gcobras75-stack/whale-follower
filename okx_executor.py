@@ -774,3 +774,88 @@ class OKXExecutor:
 
         except Exception:
             return None
+
+    # ── Positions management ───────────────────────────────────────────────
+
+    async def get_positions(self) -> list:
+        """Get all open SWAP positions from OKX."""
+        if not self._enabled:
+            return []
+        path = "/api/v5/account/positions?instType=SWAP"
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    _BASE_URL + path,
+                    headers=_auth_headers("GET", path),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                data = await resp.json()
+            if data.get("code") != "0":
+                logger.warning("[okx_exec] get_positions error: {}", data.get("msg"))
+                return []
+            positions = []
+            for p in data.get("data", []):
+                pos = float(p.get("pos", "0"))
+                if pos == 0:
+                    continue
+                positions.append({
+                    "instId":   p.get("instId"),
+                    "pos":      pos,
+                    "posSide":  p.get("posSide", "net"),
+                    "avgPx":    float(p.get("avgPx", "0") or "0"),
+                    "upl":      float(p.get("upl", "0") or "0"),
+                    "margin":   float(p.get("margin", "0") or "0"),
+                    "mgnMode":  p.get("mgnMode"),
+                })
+            logger.info("[okx_exec] {} posiciones abiertas", len(positions))
+            return positions
+        except Exception as exc:
+            logger.error("[okx_exec] get_positions error: {!r}", exc)
+            return []
+
+    async def close_all_positions(self) -> dict:
+        """Close ALL open SWAP positions. Returns summary."""
+        positions = await self.get_positions()
+        if not positions:
+            logger.info("[okx_exec] No hay posiciones abiertas para cerrar")
+            return {"closed": 0, "failed": 0}
+
+        closed = 0
+        failed = 0
+        for p in positions:
+            inst_id = p["instId"]
+            pos_side = p["posSide"]
+            path = "/api/v5/trade/close-position"
+            body_dict = {
+                "instId": inst_id,
+                "mgnMode": p.get("mgnMode", "isolated"),
+            }
+            if pos_side and pos_side != "net":
+                body_dict["posSide"] = pos_side
+            body = json.dumps(body_dict)
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        _BASE_URL + path,
+                        headers=_auth_headers("POST", path, body),
+                        data=body,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    )
+                    data = await resp.json()
+                if data.get("code") == "0":
+                    closed += 1
+                    logger.info("[okx_exec] Cerrada posición {} pos={} upl={:.4f}",
+                                inst_id, p["pos"], p["upl"])
+                else:
+                    failed += 1
+                    logger.error("[okx_exec] Error cerrando {}: {} {}",
+                                 inst_id, data.get("code"), data.get("msg"))
+            except Exception as exc:
+                failed += 1
+                logger.error("[okx_exec] Excepción cerrando {}: {!r}", inst_id, exc)
+
+        bal = await self.get_balance()
+        logger.info("[okx_exec] Resultado: {} cerradas, {} fallidas, USDT disponible=${:.2f}",
+                    closed, failed, bal)
+        return {"closed": closed, "failed": failed, "usdt_after": bal}
