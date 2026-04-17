@@ -60,37 +60,107 @@ _executor_ref = None   # para healthcheck
 _arb_ref      = None   # para healthcheck arb
 
 
+# ── Security: request rate limiter & intrusion detection ─────────────────────
+_req_counts: dict = {}     # ip → [timestamps]
+_blocked_ips: set = set()
+_RATE_LIMIT = 30           # max requests per window
+_RATE_WINDOW = 60          # seconds
+_ALERT_COOLDOWN = 300      # don't alert same IP more than once per 5 min
+_last_alert_ts: dict = {}
+
+_SUSPICIOUS_PATHS = (
+    "/cgi-bin", "/.env", "/wp-", "/admin", "/shell", "/setup",
+    "/config", "/passwd", "/phpmyadmin", "/actuator", "/.git",
+)
+
+
+def _get_client_ip(request: web.Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    peername = request.transport.get_extra_info("peername")
+    return peername[0] if peername else "unknown"
+
+
+async def _alert_intrusion(ip: str, path: str, reason: str) -> None:
+    now = time.time()
+    if now - _last_alert_ts.get(ip, 0) < _ALERT_COOLDOWN:
+        return
+    _last_alert_ts[ip] = now
+    msg = (
+        f"🚨 INTRUSION DETECTED\n"
+        f"IP: {ip}\n"
+        f"Path: {path}\n"
+        f"Reason: {reason}\n"
+        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}"
+    )
+    logger.warning("[security] {}", msg.replace("\n", " | "))
+    try:
+        import alerts
+        asyncio.create_task(alerts._send_telegram(msg, priority="critical"))
+    except Exception:
+        pass
+    try:
+        import db_writer
+        asyncio.create_task(db_writer._run(
+            lambda: db_writer._client().table("security_incidents").insert({
+                "ip": ip, "path": path, "reason": reason,
+                "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            }).execute()
+        ))
+    except Exception:
+        pass
+
+
 # ── Healthcheck HTTP ─────────────────────────────────────────────────────────
 async def health_handler(request: web.Request) -> web.Response:
+    ip = _get_client_ip(request)
+    path = request.path
+
+    # Block known bad IPs
+    if ip in _blocked_ips:
+        return web.Response(status=403, text="")
+
+    # Detect suspicious paths (scanners, bots)
+    if any(s in path.lower() for s in _SUSPICIOUS_PATHS):
+        _blocked_ips.add(ip)
+        asyncio.create_task(_alert_intrusion(ip, path, "suspicious_path_scan"))
+        return web.Response(status=403, text="")
+
+    # Rate limiting per IP
+    now = time.time()
+    hits = _req_counts.setdefault(ip, [])
+    hits[:] = [t for t in hits if now - t < _RATE_WINDOW]
+    hits.append(now)
+    if len(hits) > _RATE_LIMIT:
+        _blocked_ips.add(ip)
+        asyncio.create_task(_alert_intrusion(ip, path, f"rate_limit_{len(hits)}_in_{_RATE_WINDOW}s"))
+        return web.Response(status=429, text="")
+
+    # Health key auth
     _health_key = os.getenv("HEALTH_KEY")
     if _health_key and request.headers.get("X-Health-Key") != _health_key:
-        return web.Response(status=401, text="Unauthorized")
+        return web.Response(status=401, text="")
+
     uptime = int(time.time() - _start_time)
     payload = {
         "status":          "ok",
         "uptime_secs":     uptime,
         "signals_emitted": _signal_count,
         "ready":           _ready,
-        "pair":            os.getenv("TRADING_PAIR", "BTC/USDT"),
-        "exchanges": {
-            "binance": os.getenv("ENABLE_BINANCE", "true").lower() == "true",
-            "bybit":   os.getenv("ENABLE_BYBIT",   "true").lower() == "true",
-            "okx":     os.getenv("ENABLE_OKX",     "true").lower() == "true",
-        },
-        "error": _error_msg or None,
     }
     if _executor_ref is not None:
         payload["leverage"] = _executor_ref.leverage_status()
-    # if _arb_ref is not None:  # DESHABILITADO — arb desactivado
-    #     s = _arb_ref.summary()
-    #     payload["arb"] = {
-    #         "total_pnl_usd":    s.total_pnl_usd,
-    #         "funding_pnl":      s.funding_pnl_usd,
-    #         "cross_opps_1h":    s.cross_opps_1h,
-    #         "lead_triggers_1h": s.lead_triggers_1h,
-    #         "tri_spread_pct":   s.tri_spread_pct,
-    #     }
     return web.json_response(payload)
+
+
+async def _catch_all_handler(request: web.Request) -> web.Response:
+    """Block any path that isn't /health or /."""
+    ip = _get_client_ip(request)
+    if ip not in _blocked_ips:
+        _blocked_ips.add(ip)
+        asyncio.create_task(_alert_intrusion(ip, request.path, "unknown_path_probe"))
+    return web.Response(status=404, text="")
 
 
 async def start_healthcheck() -> web.AppRunner:
@@ -98,11 +168,12 @@ async def start_healthcheck() -> web.AppRunner:
     app  = web.Application()
     app.router.add_get("/health", health_handler)
     app.router.add_get("/",       health_handler)
-    runner = web.AppRunner(app)
+    app.router.add_route("*", "/{path:.*}", _catch_all_handler)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     try:
         await web.TCPSite(runner, "0.0.0.0", port).start()
-        logger.info(f"[health] HTTP server on 0.0.0.0:{port}")
+        logger.info(f"[health] HTTP server on 0.0.0.0:{port} (rate_limit={_RATE_LIMIT}/{_RATE_WINDOW}s)")
     except OSError as e:
         logger.warning(f"[health] Puerto {port} ocupado, healthcheck deshabilitado ({e})")
     return runner
