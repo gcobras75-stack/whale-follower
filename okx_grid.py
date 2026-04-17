@@ -55,9 +55,11 @@ _MIN_ORDER_OKX     = 1.0      # OKX SPOT mínimo ~$1 USD
 _FEES_PCT          = 0.001    # 0.1% OKX taker fee
 
 # ── Reserva de capital para Wyckoff ──────────────────────────────────────────
-# El grid NO debe consumir todo el USDT de OKX. Reservar para trades Wyckoff.
-_OKX_GRID_MAX_CAPITAL  = 40.0     # máximo $40 para grid total
-_OKX_WYCKOFF_RESERVE   = 50.0     # mínimo $50 reservados para Wyckoff executor
+# El grid NO debe consumir todo el USDT de OKX. Reservar 30% para trades Wyckoff.
+_OKX_GRID_MAX_PCT      = 0.70     # grid usa máximo 70% del USDT total
+_OKX_WYCKOFF_RESERVE_PCT = 0.30   # 30% reservado para Wyckoff executor
+_OKX_GRID_MAX_CAPITAL  = 85.0     # fallback absoluto si no se puede leer balance
+_OKX_WYCKOFF_RESERVE   = 37.0     # fallback absoluto ($122 * 0.30)
 _PRICE_HISTORY     = 100
 _CIRCUIT_BREAKER   = 0.04     # suspender si pierde >4% del capital asignado
 _REBALANCE_HOURS   = 6        # recentrar grid cada 6h
@@ -191,8 +193,8 @@ class OKXGridEngine:
             "grids":          result,
             "total_pnl":      round(total_pnl, 4),
             "grid_capital":   round(self.grid_capital_in_use(), 2),
-            "grid_max":       _OKX_GRID_MAX_CAPITAL,
-            "wyckoff_reserve": _OKX_WYCKOFF_RESERVE,
+            "grid_max_pct":   f"{_OKX_GRID_MAX_PCT*100:.0f}%",
+            "wyckoff_reserve_pct": f"{_OKX_WYCKOFF_RESERVE_PCT*100:.0f}%",
             "exchange":       "OKX",
             "mode":           "REAL" if self._production else "PAPEL",
         }
@@ -205,14 +207,15 @@ class OKXGridEngine:
         n           = cfg["levels"]
         cap         = cfg["capital_usd"]
 
-        # Respetar reserva Wyckoff: reducir capital grid si excede el máximo
+        # Respetar reserva Wyckoff: grid usa máximo 70% del balance
         total_grid_capital = sum(c["capital_usd"] for c in _GRID_CONFIG.values())
         if total_grid_capital > _OKX_GRID_MAX_CAPITAL:
             scale = _OKX_GRID_MAX_CAPITAL / total_grid_capital
             cap   = cap * scale
             logger.info(
-                "[okx_grid] {} capital reducido ${:.0f}→${:.0f} (reserva Wyckoff ${:.0f})",
-                pair, cfg["capital_usd"], cap, _OKX_WYCKOFF_RESERVE,
+                "[okx_grid] {} capital reducido ${:.0f}→${:.0f} "
+                "(grid max ${:.0f}, reserva Wyckoff 30%%)",
+                pair, cfg["capital_usd"], cap, _OKX_GRID_MAX_CAPITAL,
             )
 
         cap_per_lvl = cap / n
@@ -368,23 +371,27 @@ class OKXGridEngine:
                     bal = await self._okx_exec.get_balance()
                     grid_used = self.grid_capital_in_use()
 
-                    # Check 1: grid no debe exceder su presupuesto de $40
-                    if grid_used + level.size_usd > _OKX_GRID_MAX_CAPITAL:
+                    # Límites dinámicos basados en % del balance real
+                    grid_max_dynamic = bal * _OKX_GRID_MAX_PCT
+                    wyckoff_reserve_dynamic = bal * _OKX_WYCKOFF_RESERVE_PCT
+
+                    # Check 1: grid no debe exceder 70% del balance
+                    if grid_used + level.size_usd > grid_max_dynamic:
                         logger.warning(
                             "[okx_grid] {} BUY cancelado: grid_usado=${:.0f} + orden=${:.0f} "
-                            "> máximo grid=${:.0f}",
-                            pair, grid_used, level.size_usd, _OKX_GRID_MAX_CAPITAL,
+                            "> máximo grid=${:.0f} (70% de ${:.0f})",
+                            pair, grid_used, level.size_usd, grid_max_dynamic, bal,
                         )
                         level.pending = False
                         return
 
-                    # Check 2: respetar reserva para Wyckoff
-                    if bal - grid_used - level.size_usd < _OKX_WYCKOFF_RESERVE:
+                    # Check 2: respetar 30% reserva para Wyckoff
+                    libre_post = bal - grid_used - level.size_usd
+                    if libre_post < wyckoff_reserve_dynamic:
                         logger.warning(
-                            "[okx_grid] {} BUY cancelado: balance=${:.0f} - grid=${:.0f} "
-                            "- orden=${:.0f} = ${:.0f} < reserva Wyckoff ${:.0f}",
-                            pair, bal, grid_used, level.size_usd,
-                            bal - grid_used - level.size_usd, _OKX_WYCKOFF_RESERVE,
+                            "[okx_grid] {} BUY cancelado: post-orden=${:.0f} "
+                            "< reserva Wyckoff ${:.0f} (30% de ${:.0f})",
+                            pair, libre_post, wyckoff_reserve_dynamic, bal,
                         )
                         level.pending = False
                         return
