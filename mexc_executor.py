@@ -148,23 +148,33 @@ class MEXCExecutor:
         self, pair: str, side: str, size_usd: float, price_hint: float
     ) -> Optional[Dict[str, Any]]:
         """Place market order on MEXC futures. Returns {"orderId": ...} or None."""
+        logger.info(
+            "[mexc] market_order called: pair={} side={} size=${:.0f} price={:.2f} enabled={}",
+            pair, side, size_usd, price_hint, self._enabled,
+        )
         if not self._enabled:
+            logger.warning("[mexc] ABORT: executor deshabilitado (sin API keys)")
             return None
 
         symbol = _PAIR_TO_SYMBOL.get(pair)
         if not symbol:
-            logger.warning("[mexc] Par desconocido: {}", pair)
+            logger.warning("[mexc] ABORT: par desconocido '{}' — pares válidos: {}",
+                           pair, list(_PAIR_TO_SYMBOL.keys()))
             return None
 
         # Sizing dinámico
         try:
             bal = await asyncio.wait_for(self.get_balance(), timeout=5.0)
-        except Exception:
+        except Exception as exc:
+            logger.warning("[mexc] get_balance timeout/error: {!r} — usando cache ${:.0f}",
+                           exc, self._last_balance)
             bal = self._last_balance
 
         libre = bal - _WYCKOFF_RESERVE
+        logger.info("[mexc] Capital: bal=${:.0f} reserva=${:.0f} libre=${:.0f}",
+                    bal, _WYCKOFF_RESERVE, libre)
         if libre < _MIN_MARGIN_FREE:
-            logger.warning("[mexc] Margen insuficiente: ${:.0f} libre < ${:.0f} min",
+            logger.warning("[mexc] ABORT: margen libre ${:.0f} < mínimo ${:.0f}",
                            libre, _MIN_MARGIN_FREE)
             return None
 
@@ -175,16 +185,17 @@ class MEXCExecutor:
         # Calcular contratos
         ct_val = _CT_VAL.get(symbol, 1.0)
         if price_hint <= 0:
+            logger.warning("[mexc] ABORT: price_hint={} inválido", price_hint)
             return None
         usd_per_ct = ct_val * price_hint
         if usd_per_ct > size_usd:
-            logger.warning("[mexc] {} contrato=${:.0f} > size=${:.0f} — saltando",
-                           symbol, usd_per_ct, size_usd)
+            logger.warning("[mexc] ABORT: {} contrato=${:.2f} (ct_val={} × price={:.2f}) > size=${:.0f}",
+                           symbol, usd_per_ct, ct_val, price_hint, size_usd)
             return None
         n_contracts = max(1, int(size_usd / usd_per_ct))
 
-        logger.info("[mexc] Orden: {} {} {} contratos ~${:.0f}",
-                    side.upper(), symbol, n_contracts, n_contracts * usd_per_ct)
+        logger.info("[mexc] Sizing OK: {} {} {} contratos × ${:.2f} = ~${:.0f}",
+                    side.upper(), symbol, n_contracts, usd_per_ct, n_contracts * usd_per_ct)
 
         await self._ensure_leverage(symbol)
 
@@ -199,11 +210,10 @@ class MEXCExecutor:
             "leverage":  1,
         }
         body = json.dumps(order_params)
-        logger.info("[mexc] Order params: {}", order_params)
+        logger.info("[mexc] Enviando orden: {}", order_params)
 
         try:
             headers = _make_headers(self._api_key, self._secret, body)
-            logger.debug("[mexc] POST /order/submit body={}", body)
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     f"{_BASE_URL}/api/v1/private/order/submit",
@@ -211,11 +221,11 @@ class MEXCExecutor:
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
                     raw_text = await r.text()
-                    logger.info("[mexc] Response HTTP={} body={}", r.status, raw_text[:500])
+                    logger.info("[mexc] HTTP {} response: {}", r.status, raw_text[:500])
                     try:
                         data = json.loads(raw_text)
                     except Exception:
-                        logger.error("[mexc] Response no es JSON: {}", raw_text[:300])
+                        logger.error("[mexc] ABORT: response no es JSON: {}", raw_text[:300])
                         return None
 
             if data.get("success"):
@@ -239,14 +249,15 @@ class MEXCExecutor:
                 return {"orderId": order_id, "pair": pair, "symbol": symbol}
             else:
                 logger.error(
-                    "[mexc] ORDER FAILED {}: success={} code={} msg={} full={}",
+                    "[mexc] ORDER REJECTED by API: symbol={} success={} code={} "
+                    "message='{}' full_response={}",
                     symbol, data.get("success"), data.get("code"),
-                    data.get("message", data.get("msg", "?")),
-                    str(data)[:300],
+                    data.get("message", data.get("msg", "")),
+                    str(data)[:400],
                 )
                 return None
         except Exception as exc:
-            logger.error("[mexc] market_order exception: {!r} type={}", exc, type(exc).__name__)
+            logger.error("[mexc] ORDER EXCEPTION: {!r} type={}", exc, type(exc).__name__)
             return None
 
     # ── Par alternativo ──────────────────────────────────────────────────────
