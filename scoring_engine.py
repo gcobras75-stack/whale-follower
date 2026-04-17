@@ -366,16 +366,15 @@ class ScoringEngine:
         raw = (bd.primary_pts + bd.volume_pts +
                bd.context_pts + bd.structure_pts + ext.options_pts)
 
-        # Fear & Greed multiplier — con excepción para zona Wyckoff en LATERAL.
-        # F&G 10-25 en LATERAL = miedo extremo = exactamente cuando los springs
-        # Wyckoff son más rentables. No penalizar con ×0.8.
+        # Fear & Greed multiplier — zona Wyckoff óptima F&G 10-35.
+        # Miedo extremo/alto = springs Wyckoff más rentables históricamente.
+        # No penalizar con ×0.8 en esta zona.
         fg_mult = ext.fear_greed_multiplier
-        regime  = spring_data.get("regime", "UNKNOWN")
         fg_val  = ext.fear_greed_value
-        if fg_mult < 1.0 and regime == "LATERAL" and 10 <= fg_val <= 25:
+        if fg_mult < 1.0 and 10 <= fg_val <= 35:
             fg_mult = 1.0
             logger.info(
-                "[scoring] F&G={} en LATERAL → multiplicador neutral (zona Wyckoff)",
+                "[scoring] F&G={} → multiplicador neutral (zona Wyckoff óptima 10-35)",
                 fg_val,
             )
         raw_adj = raw * fg_mult
