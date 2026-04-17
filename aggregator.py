@@ -119,7 +119,7 @@ class Aggregator:
     def __init__(self) -> None:
         self.cvd = CVDState()
         self.cascade = CascadeDetector()
-        self._queue: asyncio.Queue[Trade] = asyncio.Queue(maxsize=10_000)
+        self._queue: asyncio.Queue[Trade] = asyncio.Queue(maxsize=50_000)
         self._tasks: List[asyncio.Task] = []
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -423,6 +423,13 @@ class Aggregator:
         try:
             self._queue.put_nowait(trade)
         except asyncio.QueueFull:
-            logger.warning("Trade queue full — dropping oldest trade.")
-            self._queue.get_nowait()
+            # Drop oldest 1000 trades in batch to catch up faster
+            dropped = 0
+            while not self._queue.empty() and dropped < 1000:
+                self._queue.get_nowait()
+                dropped += 1
             self._queue.put_nowait(trade)
+            logger.warning(
+                "[aggregator] Queue full — dropped {} old trades (qsize={})",
+                dropped, self._queue.qsize(),
+            )
