@@ -218,8 +218,6 @@ class PaperTrader:
                 .eq("pair", trade.pair)
                 .eq("source", "paper_parallel")
                 .eq("status", "open")
-                .order("created_at", desc=True)
-                .limit(1)
                 .execute()
             )
         except Exception as exc:

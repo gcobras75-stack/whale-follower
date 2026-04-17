@@ -746,6 +746,15 @@ async def handle_telegram_commands(executor: Any) -> None:
                         await asyncio.wait_for(_cmd_trades(executor), timeout=10.0)
                     elif text == "/rebalance":
                         await asyncio.wait_for(_cmd_rebalance(), timeout=15.0)
+                    elif text == "/balance":
+                        await asyncio.wait_for(_cmd_balance(), timeout=15.0)
+                    elif text == "/help":
+                        await asyncio.wait_for(_cmd_help(), timeout=5.0)
+                    elif text.startswith("/"):
+                        await _reply(
+                            f"Comando no reconocido: {text}\n"
+                            "Usa /help para ver opciones."
+                        )
                 except asyncio.TimeoutError:
                     logger.error("[telegram_cmd] Timeout procesando {}", text)
                     await _reply(f"Timeout procesando {text}. Bot activo.")
@@ -1160,3 +1169,53 @@ async def _cmd_rebalance() -> None:
         f"Accion: {accion}"
     )
     await _reply(msg)
+
+
+async def _cmd_balance() -> None:
+    """Comando /balance — muestra balance detallado de todos los exchanges."""
+    cap_bybit = _stats["capital_bybit"] or 0
+    cap_okx   = _stats["capital_okx"] or 0
+    okx_bd    = _stats.get("capital_okx_breakdown", {})
+    total_cap = cap_bybit + cap_okx
+
+    # Drawdown
+    dd = check_drawdown()
+    dd_str = f"-{dd:.1f}%" if dd > 0 else "0.0%"
+
+    # OKX breakdown
+    okx_lines = ""
+    for coin, val in okx_bd.items():
+        if val > 0.01:
+            okx_lines += f"  {coin}: ${val:.2f}\n"
+
+    msg = (
+        f"BALANCE ACTUAL\n"
+        f"{'=' * 30}\n"
+        f"Bybit:    ${cap_bybit:.2f} USD\n"
+        f"OKX:      ${cap_okx:.2f} USD\n"
+    )
+    if okx_lines:
+        msg += f"\nDesglose OKX:\n{okx_lines}"
+    msg += (
+        f"\n{'=' * 30}\n"
+        f"TOTAL:    ${total_cap:.2f} USD\n"
+        f"Drawdown: {dd_str}\n"
+        f"{'=' * 30}"
+    )
+    await _reply(msg)
+
+
+async def _cmd_help() -> None:
+    """Comando /help — lista todos los comandos disponibles."""
+    await _reply(
+        "Comandos disponibles\n"
+        "--------------------\n"
+        "/status   — Estado general del bot\n"
+        "/stats    — Estadisticas detalladas\n"
+        "/balance  — Balance de exchanges\n"
+        "/trades   — Trades recientes\n"
+        "/report   — Reporte con graficos\n"
+        "/last     — Ultima senal detectada\n"
+        "/rebalance — Estado de capital\n"
+        "/help     — Esta ayuda"
+    )
